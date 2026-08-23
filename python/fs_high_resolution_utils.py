@@ -56,9 +56,22 @@ def load_foundation_stereo_model(fs_root: Path, device: Any) -> tuple[Any, Path]
     import torch
     from omegaconf import OmegaConf
 
-    checkpoint_path = fs_root / "weights" / "23-51-11" / "model_best_bp2.pth"
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"找不到 checkpoint: {checkpoint_path}")
+    checkpoint_relative_path = Path("23-51-11") / "model_best_bp2.pth"
+    # The original FoundationStereo checkout commonly keeps checkpoints under
+    # ``FoundationStereo/weights``. This project stores its local checkpoint
+    # at the repository root in the ignored ``weight`` directory instead.
+    checkpoint_candidates = (
+        fs_root / "weights" / checkpoint_relative_path,
+        fs_root / "weight" / checkpoint_relative_path,
+        fs_root.parent / "weights" / checkpoint_relative_path,
+        fs_root.parent / "weight" / checkpoint_relative_path,
+    )
+    checkpoint_path = next(
+        (path for path in checkpoint_candidates if path.is_file()), None
+    )
+    if checkpoint_path is None:
+        searched = "\n".join(f"  - {path}" for path in checkpoint_candidates)
+        raise FileNotFoundError(f"找不到 checkpoint，已检查：\n{searched}")
 
     from core.foundation_stereo import FoundationStereo
 
@@ -410,9 +423,31 @@ def save_triangle_mesh(mesh_result: MeshResult, output_path: Path) -> None:
         raise RuntimeError(f"Unable to write triangle mesh: {output_path}")
 
 
-def configure_capture(namespace: dict[str, Any], repo_root: Path, capture_name: str) -> Path:
-    """Expose the paths and dimensions for one saved raw stereo capture."""
-    capture_directory = repo_root / "data" / capture_name
+def configure_capture(
+    namespace: dict[str, Any], repo_root: Path, capture_name: str = "",
+) -> Path:
+    """Expose the paths and dimensions for one saved raw stereo capture.
+
+    Without a name, select the first complete capture below ``data/`` in
+    lexicographic path order. A specific relative capture name remains
+    supported for deliberate selection.
+    """
+    data_directory = repo_root / "data"
+    if capture_name:
+        capture_directory = data_directory / capture_name
+    else:
+        capture_directories = sorted(
+            path.parent
+            for path in data_directory.rglob("left.png")
+            if (path.parent / "right.png").is_file()
+            and (path.parent / "masks" / "left_mask.png").is_file()
+            and (path.parent / "calibration.json").is_file()
+        )
+        if not capture_directories:
+            raise FileNotFoundError(
+                f"在 data 目录下找不到完整数据组: {data_directory}"
+            )
+        capture_directory = capture_directories[0]
     paths = {
         "LEFT_PATH": capture_directory / "left.png",
         "RIGHT_PATH": capture_directory / "right.png",
@@ -422,13 +457,18 @@ def configure_capture(namespace: dict[str, Any], repo_root: Path, capture_name: 
     for path in paths.values():
         if not path.is_file():
             raise FileNotFoundError(f"缺少文件: {path}")
+    point_cloud_directory = (
+        repo_root / "result" / capture_directory.relative_to(data_directory)
+    )
+    point_cloud_directory.mkdir(parents=True, exist_ok=True)
+
     namespace.update(
         {
             "CAPTURE_DIR": capture_directory,
             **paths,
             "EXPECTED_WIDTH": 2448,
             "EXPECTED_HEIGHT": 2048,
-            "POINT_CLOUD_DIR": capture_directory,
+            "POINT_CLOUD_DIR": point_cloud_directory,
         }
     )
     return capture_directory

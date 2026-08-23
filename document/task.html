@@ -1,0 +1,971 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>After Algorithm Evaluation | Team Timeline</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d8dee9;
+      --canvas: #f5f7fb;
+      --card: #ffffff;
+      --liu: #2563eb;
+      --etienne: #0f9f7d;
+      --leo: #a855f7;
+      --precondition: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1400px, calc(100% - 48px));
+      margin: 0 auto;
+      padding: 48px 0 64px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: #475467;
+      font-size: 0.78rem;
+      font-weight: 750;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 850px;
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.4rem);
+      letter-spacing: -0.045em;
+      line-height: 1.04;
+    }
+
+    .intro {
+      max-width: 720px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 1.02rem;
+      line-height: 1.65;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin: 30px 0 24px;
+    }
+
+    .summary-item {
+      min-height: 92px;
+      padding: 18px 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgb(255 255 255 / 72%);
+    }
+
+    .summary-item span {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .summary-item strong { font-size: 1rem; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      margin: 0 0 18px;
+      color: #475467;
+      font-size: 0.85rem;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .legend i {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .timeline-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--card);
+      box-shadow: 0 14px 40px rgb(31 41 55 / 8%);
+    }
+
+    .timeline-scroll { overflow-x: auto; }
+
+    .timeline {
+      --tooltip-space: 320px;
+      min-width: 1460px;
+      position: relative;
+      padding: 28px 28px calc(30px + var(--tooltip-space));
+    }
+
+    .prerequisite-marker {
+      position: absolute;
+      z-index: 10;
+      top: 88px;
+      bottom: calc(28px + var(--tooltip-space));
+      left: 236px;
+      width: 2px;
+      border-radius: 3px;
+      background: #f5b700;
+      box-shadow: 0 0 0 1px rgb(146 93 0 / 16%);
+      pointer-events: none;
+    }
+
+    .prerequisite-marker::after {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      color: #8a5b00;
+      content: "Prerequisites";
+      font-size: 0.7rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+
+    .axis,
+    .lane {
+      display: grid;
+      grid-template-columns: 190px minmax(700px, 1fr);
+      gap: 18px;
+    }
+
+    .axis {
+      align-items: end;
+      margin-bottom: 12px;
+    }
+
+    .axis-label {
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .months {
+      position: relative;
+      height: 30px;
+      border-bottom: 1px solid #bdc7d8;
+    }
+
+    .months span {
+      position: absolute;
+      bottom: 8px;
+      color: #475467;
+      font-size: 0.78rem;
+      font-weight: 700;
+      transform: translateX(-1px);
+    }
+
+    .months span::after {
+      position: absolute;
+      bottom: -13px;
+      left: 0;
+      width: 1px;
+      height: 6px;
+      background: #bdc7d8;
+      content: "";
+    }
+
+    .lane {
+      min-height: 108px;
+      position: relative;
+      z-index: 0;
+      padding: 18px 0;
+      border-bottom: 1px solid #e8ecf3;
+    }
+
+    .lane:last-child { border-bottom: 0; }
+
+    .lane:hover,
+    .lane:focus-within { z-index: 50; }
+
+    .person {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+    }
+
+    .avatar {
+      display: grid;
+      flex: 0 0 34px;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 50%;
+      color: white;
+      font-size: 0.76rem;
+      font-weight: 800;
+    }
+
+    .person h2 {
+      margin: 1px 0 4px;
+      font-size: 1rem;
+      letter-spacing: -0.01em;
+    }
+
+    .person p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+
+    .track {
+      display: grid;
+      grid-template-columns: repeat(126, minmax(0, 1fr));
+      grid-template-rows: 33px 26px;
+      position: relative;
+      min-height: 59px;
+      align-items: center;
+      background-image: repeating-linear-gradient(
+        90deg,
+        transparent 0,
+        transparent calc(5.555556% - 1px),
+        #edf0f5 calc(5.555556% - 1px),
+        #edf0f5 5.555556%
+      );
+    }
+
+    .track::before {
+      position: absolute;
+      top: 16px;
+      right: 0;
+      left: 0;
+      height: 2px;
+      background: #dfe5ee;
+      content: "";
+    }
+
+    .liu-track {
+      z-index: 4;
+      grid-template-rows: 64px 26px;
+      min-height: 90px;
+      overflow: visible;
+    }
+
+    .liu-track::before { top: 22px; }
+
+    .bar {
+      z-index: 1;
+      display: flex;
+      grid-row: 1;
+      align-items: center;
+      min-width: 0;
+      height: 27px;
+      padding: 0 9px;
+      border-radius: 7px;
+      color: white;
+      font-size: 0.69rem;
+      font-weight: 750;
+      line-height: 1;
+      white-space: normal;
+      box-shadow: 0 3px 8px rgb(15 23 42 / 15%);
+    }
+
+    .bar small {
+      overflow: visible;
+      text-overflow: clip;
+      font-size: inherit;
+      white-space: normal;
+    }
+
+    .bar.compact-label {
+      font-size: 0.6rem;
+      line-height: 1.08;
+    }
+
+    .task-button {
+      position: relative;
+      border: 0;
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }
+
+    .task-button:hover,
+    .task-button:focus-visible {
+      outline: 3px solid rgb(37 99 235 / 28%);
+      outline-offset: 3px;
+      filter: brightness(1.06);
+    }
+
+    .task-tooltip {
+      position: absolute;
+      z-index: 100;
+      top: calc(100% + 9px);
+      left: 0;
+      display: none;
+      width: max-content;
+      max-width: 360px;
+      padding: 12px 14px;
+      border: 1px solid #b8cbfa;
+      border-radius: 9px;
+      background: #ffffff;
+      color: var(--ink);
+      font-size: 0.76rem;
+      font-weight: 500;
+      line-height: 1.4;
+      box-shadow: 0 10px 24px rgb(31 41 55 / 18%);
+    }
+
+    .liu-lane {
+      position: relative;
+      z-index: 3;
+    }
+
+    .etienne-lane {
+      position: relative;
+      z-index: 3;
+    }
+
+    .etienne-track {
+      z-index: 4;
+      grid-template-rows: 64px 26px;
+      min-height: 90px;
+      overflow: visible;
+    }
+
+    .leo-track {
+      grid-template-rows: 64px 26px;
+      min-height: 90px;
+      overflow: visible;
+    }
+
+    .task-tooltip strong {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--liu);
+      font-size: 0.78rem;
+    }
+
+    .task-tooltip ol {
+      display: grid;
+      gap: 3px;
+      margin: 0;
+      padding-left: 17px;
+    }
+
+    .task-button:hover .task-tooltip,
+    .task-button:focus-visible .task-tooltip { display: block; }
+
+    .liu { background: var(--liu); }
+    .liu.task-button {
+      height: 42px;
+      align-self: end;
+      line-height: 1.15;
+    }
+
+    .etienne.task-button {
+      height: 42px;
+      align-self: end;
+      line-height: 1.15;
+    }
+
+    .leo.task-button {
+      height: 42px;
+      align-self: end;
+      line-height: 1.15;
+    }
+
+    .task-duration {
+      z-index: 2;
+      grid-row: 1;
+      align-self: start;
+      color: var(--liu);
+      font-size: 0.76rem;
+      font-weight: 800;
+    }
+
+    .task-duration.tbd { color: #c72b24; }
+    .task-duration.etienne-duration { color: var(--etienne); }
+    .task-duration.leo-duration { color: var(--leo); }
+    .etienne { background: var(--etienne); }
+    .leo { background: var(--leo); }
+
+    .preconditions {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin: 22px 28px 0;
+      padding: 16px 18px;
+      border: 1px solid #f5d68b;
+      border-radius: 12px;
+      background: #fffbeb;
+      color: #6b4f12;
+      font-size: 0.84rem;
+      line-height: 1.55;
+    }
+
+    .preconditions strong { white-space: nowrap; }
+
+    .preconditions ul {
+      display: grid;
+      gap: 4px;
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .preconditions .team {
+      color: #087a4f;
+      font-weight: 800;
+    }
+
+    .preconditions .critical {
+      color: #c72b24;
+      font-weight: 800;
+    }
+
+    .task-details {
+      margin: 0 28px 26px;
+      padding: 18px 20px;
+      border: 1px solid #cdd9f7;
+      border-left: 4px solid var(--liu);
+      border-radius: 12px;
+      background: #f7f9ff;
+    }
+
+    .task-details[hidden] { display: none; }
+
+    .task-details h2 {
+      margin: 0;
+      font-size: 1rem;
+    }
+
+    .task-details p {
+      margin: 5px 0 12px;
+      color: var(--muted);
+      font-size: 0.83rem;
+    }
+
+    .task-details ul {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding-left: 19px;
+      color: #344054;
+      font-size: 0.87rem;
+      line-height: 1.45;
+    }
+
+    .note {
+      margin: 18px 28px 0;
+      color: var(--muted);
+      font-size: 0.79rem;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 680px) {
+      main {
+        width: min(100% - 28px, 1400px);
+        padding-top: 32px;
+      }
+
+      .summary { grid-template-columns: 1fr; }
+      .timeline { padding: 22px 18px 24px; }
+      .preconditions, .note { margin-right: 18px; margin-left: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Post-feasibility-test work</p>
+    <h1>Stereo algorithm deployment</h1>
+    <div class="preconditions">
+      <strong>Prerequisites</strong>
+      <ul>
+        <li><span class="team">Hardware</span> team has completed a <span class="critical">tightly secured, stable device assembly</span> with 2 × RGB and 2 × MSI cameras at 2448 × 2048.</li>
+        <li><span class="team">Optics</span> team has completed camera and LED calibration, verified by a <span class="critical">ChArUco RMS reprojection error of approximately 0.3 px or lower</span>.</li>
+        <li><span class="team">Hardware</span> and <span class="team">Optics</span> teams jointly <span class="critical">define and fix</span> the exposure, white balance, and f-number.</li>
+        <li><span class="team">Software</span> and <span class="team">Hardware</span> teams jointly design the capture software to <span class="critical">minimize stereo-capture time difference</span>. During stereo capture, LEDs should preferably be <span class="critical">switched off</span>; if illumination is required, use <span class="critical">soft, diffuse LED light</span>.</li>
+      </ul>
+    </div>
+    <section class="summary" aria-label="Plan summary">
+      <div class="summary-item">
+        <span>Schedule basis</span>
+        <strong>Task duration, not calendar dates</strong>
+      </div>
+      <div class="summary-item">
+        <span>Team</span>
+        <strong>Liu · Etienne · Leo</strong>
+      </div>
+      <div class="summary-item">
+        <span>Shared outcome</span>
+        <strong>Develop a more stable, accurate algorithm for data collection</strong>
+      </div>
+    </section>
+
+    <section class="timeline-card" aria-label="Project timeline">
+      <div class="timeline-scroll">
+        <div class="timeline">
+          <div class="prerequisite-marker" role="img" aria-label="Prerequisites must be complete before work begins"></div>
+          <div class="axis">
+            <div class="axis-label">Workstream</div>
+            <div class="months" aria-label="Weekly timeline">
+              <span style="left: 0%">Week 1</span>
+              <span style="left: 5.56%">Week 2</span>
+              <span style="left: 11.11%">Week 3</span>
+              <span style="left: 16.67%">Week 4</span>
+              <span style="left: 22.22%">Week 5</span>
+              <span style="left: 27.78%">Week 6</span>
+              <span style="left: 33.33%">Week 7</span>
+              <span style="left: 38.89%">Week 8</span>
+              <span style="left: 44.44%">Week 9</span>
+              <span style="left: 50%">Week 10</span>
+              <span style="left: 55.56%">Week 11</span>
+              <span style="left: 61.11%">Week 12</span>
+              <span style="left: 66.67%">Week 13</span>
+              <span style="left: 72.22%">Week 14</span>
+              <span style="left: 77.78%">Week 15</span>
+              <span style="left: 83.33%">Week 16</span>
+            </div>
+          </div>
+
+          <div class="lane liu-lane">
+            <div class="person">
+              <div class="avatar" style="background: var(--liu)">LH</div>
+              <div>
+                <h2>Liu Hong</h2>
+                <p>FoundationStereo optimization, deployment compilation &amp; CUDA algorithm development</p>
+              </div>
+            </div>
+            <div class="track liu-track">
+              <span class="task-duration" style="grid-column: 1 / 15">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 1 / 15" data-task="liu-cuda" aria-controls="task-details">
+                <small>CUDA pre-processing</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>GPU memory holding for the second model.</li>
+                    <li>Resolution padding for DINO dimension fitting.</li>
+                    <li>CUDA-based preprocessing.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 15 / 43">4 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 15 / 43" data-task="liu-coarse" aria-controls="task-details">
+                <small>Coarse TensorRT engine</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Build a static 1232 × 1024 coarse TensorRT FoundationStereo engine.</li>
+                    <li>Develop a group-wise correlation cost-volume Triton plugin for TensorRT.</li>
+                    <li>Compute runtime dynamic-memory size for reuse by the refine engine.</li>
+                    <li>Test TF32 operations for backbone operations.</li>
+                    <li>Profile and fine-tune inference efficiency.</li>
+                    <li>Fine-tune maximum-disparity search behavior.</li>
+                    <li>Dynamically allocate output-tensor space for memory reuse.</li>
+                    <li>Iteration-cycle design.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 43 / 57">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 43 / 57" data-task="liu-transition" aria-controls="task-details">
+                <small>Coarse-to-refine model transition</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Coarse-output unpadding.</li>
+                    <li>Scale the 512 × 616 <code>init_disp</code> disparity tensor.</li>
+                    <li>Dynamic memory allocation for refine-model memory overwrite and reuse.</li>
+                    <li>Handle unwanted GWC intermediate data.</li>
+                    <li>Prepare the refine model’s three inputs: left, right, and <code>init_disp</code> tensors.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 57 / 85">4 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 57 / 85" data-task="liu-refine" aria-controls="task-details">
+                <small>Refine TensorRT engine</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Static inference with padded 2464 × 2048 inputs.</li>
+                    <li>GWC Triton plugin for TensorRT operation.</li>
+                    <li>Reuse raw input tensors, <code>init_disp</code>, and coarse-engine runtime memory.</li>
+                    <li>Fine-tune maximum-disparity search behavior.</li>
+                    <li>Iteration-cycle design.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 85 / 99">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 85 / 99" data-task="liu-post" aria-controls="task-details">
+                <small>CUDA post-processing</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Disparity unpadding.</li>
+                    <li>3D point-cloud projection.</li>
+                    <li>Invalid-disparity detection.</li>
+                    <li>Invisible-disparity prefiltering.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 99 / 113">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 99 / 113" data-task="liu-evaluation" aria-controls="task-details">
+                <small>End-to-end evaluation</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Profile GPU performance: latency, peak memory, and stability.</li>
+                    <li>Test deviation from Python/PyTorch FP32 inference.</li>
+                    <li>Fine-tune performance for the target GPU: Pro 4000 or Pro 2000.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration tbd" style="grid-column: 113 / 127">TBD</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 113 / 127" data-task="liu-deployment" aria-controls="task-details">
+                <small>FFS model deployment</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Provide a live disparity preview so users can capture higher-quality stereo images.</li>
+                    <li>Preserve a future path for scanning and SLAM reconstruction integrated with an IMU.</li>
+                  </ol>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div class="lane etienne-lane">
+            <div class="person">
+              <div class="avatar" style="background: var(--etienne)">E</div>
+              <div>
+                <h2>Etienne Dor</h2>
+                <p>Software integration, end-to-end framework design &amp; Windows deployment/testing</p>
+              </div>
+            </div>
+            <div class="track etienne-track">
+              <span class="task-duration etienne-duration" style="grid-column: 1 / 8">1 week</span>
+              <button class="bar etienne task-button compact-label" type="button" style="grid-column: 1 / 8" data-task="etienne-pipeline-review" aria-controls="task-details">
+                <small>Python pipeline review</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Read the existing Python code and understand the current end-to-end pipeline.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration etienne-duration" style="grid-column: 8 / 50">6 weeks</span>
+              <button class="bar etienne task-button" type="button" style="grid-column: 8 / 50" data-task="etienne-point-cloud" aria-controls="task-details">
+                <small>3D point-cloud processing</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Project valid disparity to a point cloud and hand it to Software for visualization; coordinate closely with the Software team.</li>
+                    <li>Apply CUDA point-cloud denoising using a volume-hash algorithm.</li>
+                    <li>Design constrained Delaunay triangulation to reconstruct a 3D mesh from 2D image-pixel relationships, fill holes caused by interior denoising, and allow valid edges to bridge small holes.</li>
+                    <li>Design mesh filtering and area computation, including mapping from a 2D segmentation mask to 3D mesh triangles.</li>
+                    <li>Coordinate with Software to present the mesh more effectively to users.</li>
+                    <li>Allow fast redraw and area recalculation when a user modifies the mask.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration etienne-duration" style="grid-column: 50 / 106">8 weeks</span>
+              <button class="bar etienne task-button" type="button" style="grid-column: 50 / 106" data-task="etienne-windows" aria-controls="task-details">
+                <small>Windows SW deployment</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Coordinate with Software to establish visualization, input, and output requirements.</li>
+                    <li>Design the pipeline permitted and supported in Windows.</li>
+                    <li>Develop the SDK, design the DLL, and deliver it to Software.</li>
+                    <li>Design Windows debugging, logging, and information-printing patterns.</li>
+                    <li>Test execution in Windows.</li>
+                    <li>Enable later point-cloud processing to run in Windows.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration etienne-duration" style="grid-column: 106 / 113">1 week</span>
+              <button class="bar etienne task-button compact-label" type="button" style="grid-column: 106 / 113" data-task="etienne-merge-liu" aria-controls="task-details">
+                <small>Merge Liu’s pipeline</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Merge Liu’s pipeline into the Windows software deployment pipeline.</li>
+                  </ol>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div class="lane">
+            <div class="person">
+              <div class="avatar" style="background: var(--leo)">L</div>
+              <div>
+                <h2>Leo</h2>
+                <p>Hardware integration, capture development, MSI quality assurance &amp; segmentation support</p>
+              </div>
+            </div>
+            <div class="track leo-track">
+              <span class="task-duration leo-duration" style="grid-column: 1 / 8">1 week</span>
+              <button class="bar leo task-button compact-label" type="button" style="grid-column: 1 / 8" data-task="leo-pipeline-review" aria-controls="task-details">
+                <small>Python pipeline review</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Read the existing Python code and understand the current end-to-end pipeline.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration leo-duration" style="grid-column: 8 / 50">6 weeks</span>
+              <button class="bar leo task-button" type="button" style="grid-column: 8 / 50" data-task="leo-capture" aria-controls="task-details">
+                <small>Capture development &amp; camera coordination</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Coordinate with Optics and Hardware on required camera parameters, and minimize imaging-head LED impact on RGB stereo images so illumination does not cause left/right feature inconsistency.</li>
+                    <li>Participate in camera and LED calibration; assess simultaneous MSI and stereo capture so neither image quality is adversely affected.</li>
+                    <li>Contribute to capture-code development and control the time lag of the stereo pair.</li>
+                    <li>Synchronize an IMU to preserve a future path for scanning.</li>
+                    <li>Evaluate and discuss adding a random-pattern projector if feasible.</li>
+                    <li>Evaluate removing the fisheye camera because a wide FOV may now be obtained directly.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration leo-duration" style="grid-column: 50 / 106">8 weeks</span>
+              <button class="bar leo task-button" type="button" style="grid-column: 50 / 106" data-task="leo-mvs" aria-controls="task-details">
+                <small>MVS replacement evaluation &amp; stability testing</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Evaluate replacing MVS with a 3D-projection algorithm; conduct Python tests and assess the impact on MSI segmentation.</li>
+                    <li>Evaluate an alternative that performs disparity matching between the two MSI cameras to replace MVS.</li>
+                    <li>Perform additional tests to ensure stability of both the stereo and MSI algorithms.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration leo-duration" style="grid-column: 106 / 113">1 week</span>
+              <button class="bar leo task-button compact-label" type="button" style="grid-column: 106 / 113" data-task="leo-test-etienne" aria-controls="task-details">
+                <small>Test Etienne’s pipeline</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Test Etienne’s pipeline.</li>
+                  </ol>
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="task-details" id="task-details" hidden aria-live="polite">
+        <h2 id="task-title">Liu Hong — CUDA pre-processing</h2>
+        <p id="task-period">Duration: 2 weeks</p>
+        <ul id="task-list">
+          <li>GPU memory holding for the second model.</li>
+          <li>Resolution padding for DINO dimension fitting.</li>
+          <li>CUDA-based preprocessing.</li>
+        </ul>
+      </section>
+
+    </section>
+  </main>
+  <script>
+    const taskDetails = document.querySelector("#task-details");
+    const taskTitle = document.querySelector("#task-title");
+    const taskPeriod = document.querySelector("#task-period");
+    const taskList = document.querySelector("#task-list");
+    const taskButtons = document.querySelectorAll(".task-button");
+    const taskData = {
+      "liu-cuda": {
+        title: "Liu Hong — CUDA pre-processing",
+        duration: "Duration: 2 weeks",
+        items: [
+          "GPU memory holding for the second model.",
+          "Resolution padding for DINO dimension fitting.",
+          "CUDA-based preprocessing."
+        ]
+      },
+      "liu-coarse": {
+        title: "Liu Hong — Coarse TensorRT engine",
+        duration: "Duration: 6 weeks",
+        items: [
+          "Build a static 1232 × 1024 coarse TensorRT FoundationStereo engine.",
+          "Develop a group-wise correlation cost-volume Triton plugin for TensorRT.",
+          "Compute runtime dynamic-memory size for reuse by the refine engine.",
+          "Test TF32 operations for backbone operations.",
+          "Profile and fine-tune inference efficiency.",
+          "Fine-tune maximum-disparity search behavior.",
+          "Dynamically allocate output-tensor space for memory reuse.",
+          "Iteration-cycle design."
+        ]
+      },
+      "liu-transition": {
+        title: "Liu Hong — Coarse-to-refine model transition",
+        duration: "Duration: 2 weeks",
+        items: [
+          "Coarse-output unpadding.",
+          "Scale the 512 × 616 init_disp disparity tensor.",
+          "Dynamic memory allocation for refine-model memory overwrite and reuse.",
+          "Handle unwanted GWC intermediate data.",
+          "Prepare the refine model’s three inputs: left, right, and init_disp tensors."
+        ]
+      },
+      "liu-refine": {
+        title: "Liu Hong — Refine TensorRT engine",
+        duration: "Duration: 4 weeks",
+        items: [
+          "Static inference with padded 2464 × 2048 inputs.",
+          "GWC Triton plugin for TensorRT operation.",
+          "Reuse raw input tensors, init_disp, and coarse-engine runtime memory.",
+          "Fine-tune maximum-disparity search behavior.",
+          "Iteration-cycle design."
+        ]
+      },
+      "liu-post": {
+        title: "Liu Hong — CUDA post-processing",
+        duration: "Duration: 2 weeks",
+        items: [
+          "Disparity unpadding.",
+          "3D point-cloud projection.",
+          "Invalid-disparity detection.",
+          "Invisible-disparity prefiltering."
+        ]
+      },
+      "liu-evaluation": {
+        title: "Liu Hong — End-to-end evaluation",
+        duration: "Duration: 2 weeks",
+        items: [
+          "Profile GPU performance: latency, peak memory, and stability.",
+          "Test deviation from Python/PyTorch FP32 inference.",
+          "Fine-tune performance for the target GPU: Pro 4000 or Pro 2000."
+        ]
+      },
+      "liu-deployment": {
+        title: "Liu Hong — FFS model deployment",
+        duration: "Duration: TBD",
+        items: [
+          "Provide a live disparity preview so users can capture higher-quality stereo images.",
+          "Preserve a future path for scanning and SLAM reconstruction integrated with an IMU."
+        ]
+      },
+      "etienne-point-cloud": {
+        title: "Etienne Dor — 3D point-cloud processing",
+        duration: "Duration: 6 weeks",
+        items: [
+          "Project valid disparity to a point cloud and hand it to Software for visualization; coordinate closely with the Software team.",
+          "Apply CUDA point-cloud denoising using a volume-hash algorithm.",
+          "Design constrained Delaunay triangulation to reconstruct a 3D mesh from 2D image-pixel relationships, fill holes caused by interior denoising, and allow valid edges to bridge small holes.",
+          "Design mesh filtering and area computation, including mapping from a 2D segmentation mask to 3D mesh triangles.",
+          "Coordinate with Software to present the mesh more effectively to users.",
+          "Allow fast redraw and area recalculation when a user modifies the mask."
+        ]
+      },
+      "etienne-pipeline-review": {
+        title: "Etienne Dor — Python pipeline review",
+        duration: "Duration: 1 week",
+        items: [
+          "Read the existing Python code and understand the current end-to-end pipeline."
+        ]
+      },
+      "etienne-windows": {
+        title: "Etienne Dor — Windows SW deployment",
+        duration: "Duration: 8 weeks",
+        items: [
+          "Coordinate with Software to establish visualization, input, and output requirements.",
+          "Design the pipeline permitted and supported in Windows.",
+          "Develop the SDK, design the DLL, and deliver it to Software.",
+          "Design Windows debugging, logging, and information-printing patterns.",
+          "Test execution in Windows.",
+          "Enable later point-cloud processing to run in Windows."
+        ]
+      },
+      "etienne-merge-liu": {
+        title: "Etienne Dor — Merge Liu’s pipeline",
+        duration: "Duration: 1 week",
+        items: [
+          "Merge Liu’s pipeline into the Windows software deployment pipeline."
+        ]
+      },
+      "leo-pipeline-review": {
+        title: "Leo — Python pipeline review",
+        duration: "Duration: 1 week",
+        items: [
+          "Read the existing Python code and understand the current end-to-end pipeline."
+        ]
+      },
+      "leo-capture": {
+        title: "Leo — Capture development & camera coordination",
+        duration: "Duration: 4 weeks",
+        items: [
+          "Coordinate with Optics and Hardware on required camera parameters, and minimize imaging-head LED impact on RGB stereo images so illumination does not cause left/right feature inconsistency.",
+          "Participate in camera and LED calibration; assess simultaneous MSI and stereo capture so neither image quality is adversely affected.",
+          "Contribute to capture-code development and control the time lag of the stereo pair.",
+          "Synchronize an IMU to preserve a future path for scanning.",
+          "Evaluate and discuss adding a random-pattern projector if feasible.",
+          "Evaluate removing the fisheye camera because a wide FOV may now be obtained directly."
+        ]
+      },
+      "leo-mvs": {
+        title: "Leo — MVS replacement evaluation & stability testing",
+        duration: "Duration: 8 weeks",
+        items: [
+          "Evaluate replacing MVS with a 3D-projection algorithm; conduct Python tests and assess the impact on MSI segmentation.",
+          "Evaluate an alternative that performs disparity matching between the two MSI cameras to replace MVS.",
+          "Perform additional tests to ensure stability of both the stereo and MSI algorithms."
+        ]
+      },
+      "leo-test-etienne": {
+        title: "Leo — Test Etienne’s pipeline",
+        duration: "Duration: 1 week",
+        items: [
+          "Test Etienne’s pipeline."
+        ]
+      }
+    };
+    let activeTask = null;
+
+    taskButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const task = taskData[button.dataset.task];
+        if (!task) return;
+
+        if (activeTask === button.dataset.task && !taskDetails.hidden) {
+          taskDetails.hidden = true;
+          activeTask = null;
+          return;
+        }
+
+        taskTitle.textContent = task.title;
+        taskPeriod.textContent = task.duration;
+        taskList.replaceChildren(...task.items.map((item) => {
+          const listItem = document.createElement("li");
+          listItem.textContent = item;
+          return listItem;
+        }));
+        taskDetails.hidden = false;
+        activeTask = button.dataset.task;
+      });
+    });
+  </script>
+</body>
+</html>

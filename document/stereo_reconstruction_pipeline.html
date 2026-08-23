@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stereo Reconstruction Pipeline</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d8dee9;
+      --canvas: #f4f7fb;
+      --card: #ffffff;
+      --blue: #2563eb;
+      --blue-soft: #eaf1ff;
+      --violet: #7c3aed;
+      --violet-soft: #f2ebff;
+      --teal: #0f9f7d;
+      --teal-soft: #e6f8f2;
+      --orange: #c76b00;
+      --orange-soft: #fff3df;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% -10%, #dce8ff 0, transparent 30rem),
+        var(--canvas);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 54px 0 72px; }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--blue);
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    h1 { margin: 0; font-size: clamp(2.1rem, 5vw, 4rem); letter-spacing: -.055em; line-height: 1; }
+    .intro { max-width: 740px; margin: 18px 0 0; color: var(--muted); font-size: 1.05rem; line-height: 1.7; }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 10px 20px; margin: 28px 0 18px; color: #475467; font-size: .84rem; }
+    .legend span { display: inline-flex; align-items: center; gap: 8px; }
+    .legend i { width: 11px; height: 11px; border-radius: 50%; }
+
+    .diagram {
+      overflow: hidden;
+      padding: 34px clamp(18px, 4vw, 54px) 46px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgb(255 255 255 / .9);
+      box-shadow: 0 18px 45px rgb(31 41 55 / 9%);
+    }
+
+    .pipeline { position: relative; width: min(960px, 100%); margin: 0 auto; }
+    .pipeline::before {
+      position: absolute;
+      z-index: 0;
+      top: 80px;
+      bottom: 92px;
+      left: 50%;
+      width: 2px;
+      background: linear-gradient(var(--blue), #90a4c8 60%, var(--teal));
+      content: "";
+      transform: translateX(-50%);
+    }
+
+    .stage { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 74px 1fr; align-items: center; min-height: 148px; }
+    .stage-number {
+      display: grid;
+      grid-column: 2;
+      grid-row: 1;
+      z-index: 2;
+      width: 42px;
+      height: 42px;
+      margin: 0 auto;
+      place-items: center;
+      border: 4px solid white;
+      border-radius: 50%;
+      color: white;
+      background: var(--blue);
+      box-shadow: 0 3px 12px rgb(37 99 235 / .25);
+      font-size: .9rem;
+      font-weight: 850;
+    }
+    .stage-number.capture { background: var(--orange); box-shadow: 0 3px 12px rgb(199 107 0 / .25); }
+    .stage-number.final { background: var(--teal); box-shadow: 0 3px 12px rgb(15 159 125 / .25); }
+
+    .card {
+      position: relative;
+      padding: 19px 21px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--card);
+      box-shadow: 0 7px 18px rgb(31 41 55 / 6%);
+    }
+    .stage:nth-child(odd) .card { grid-column: 1; }
+    .stage:nth-child(even) .card { grid-column: 3; }
+    .stage:nth-child(odd) .card::after,
+    .stage:nth-child(even) .card::after {
+      position: absolute;
+      top: 50%;
+      width: 38px;
+      height: 2px;
+      background: #a8b7ce;
+      content: "";
+    }
+    .stage:nth-child(odd) .card::after { right: -39px; }
+    .stage:nth-child(even) .card::after { left: -39px; }
+
+    .step-label { margin: 0 0 5px; color: var(--blue); font-size: .72rem; font-weight: 850; letter-spacing: .09em; text-transform: uppercase; }
+    .capture-card .step-label { color: var(--orange); }
+    .final-card .step-label { color: var(--teal); }
+    h2 { margin: 0; font-size: 1.1rem; letter-spacing: -.02em; }
+    .card p { margin: 8px 0 0; color: var(--muted); font-size: .9rem; line-height: 1.55; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
+    .chip { padding: 4px 8px; border-radius: 6px; color: #2451a5; background: var(--blue-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; font-weight: 700; }
+    .chip.orange { color: #9b5300; background: var(--orange-soft); }
+    .chip.green { color: #087258; background: var(--teal-soft); }
+    .chip.violet { color: #6331c3; background: var(--violet-soft); }
+
+    .camera-row { display: flex; gap: 10px; margin-top: 13px; }
+    .camera { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid #cbd8ef; border-radius: 8px; color: #315889; background: #f7faff; font-size: .75rem; font-weight: 750; }
+    .lens { width: 13px; height: 13px; border: 3px solid currentColor; border-radius: 50%; }
+
+    .branch {
+      position: relative;
+      z-index: 3;
+      width: calc(50% - 37px);
+      margin: -17px 0 2px auto;
+      padding: 16px;
+      border: 1px dashed #b9a4e8;
+      border-radius: 14px;
+      background: #fbf9ff;
+    }
+    .branch::before { position: absolute; top: -28px; left: 26px; width: 2px; height: 27px; background: #b9a4e8; content: ""; }
+    .branch::after { position: absolute; top: -30px; left: 21px; width: 10px; height: 10px; border-top: 2px solid #9672dc; border-left: 2px solid #9672dc; content: ""; transform: rotate(45deg); }
+    .branch-title { display: flex; justify-content: space-between; gap: 12px; align-items: center; color: #6331c3; font-size: .78rem; font-weight: 850; letter-spacing: .07em; text-transform: uppercase; }
+    .optional { padding: 3px 7px; border-radius: 20px; color: #6a45b5; background: var(--violet-soft); font-size: .65rem; letter-spacing: .04em; }
+    .branch p { margin: 7px 0 9px; color: #625b70; font-size: .83rem; line-height: 1.48; }
+    .branch-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: #5b3c9e; font-size: .71rem; font-weight: 750; }
+    .branch-flow b { color: #9a79d7; }
+
+    .capture-divider { position: relative; z-index: 2; display: flex; align-items: center; gap: 12px; margin: 18px 0 10px; color: #955000; font-size: .77rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .capture-divider::before, .capture-divider::after { height: 1px; flex: 1; background: #f0c98f; content: ""; }
+    .capture-divider span { padding: 7px 11px; border-radius: 20px; background: var(--orange-soft); }
+
+    .result { position: relative; z-index: 2; display: grid; max-width: 690px; min-height: 132px; margin: 8px auto 0; place-items: center; padding: 22px; border: 1px solid #a6ddcd; border-radius: 17px; text-align: center; background: linear-gradient(135deg, #f2fffa, #f8fffd); }
+    .result::before { position: absolute; top: -27px; left: 50%; width: 2px; height: 27px; background: var(--teal); content: ""; transform: translateX(-50%); }
+    .result h2 { color: #087258; }
+    .result p { max-width: 560px; margin: 8px 0 0; color: #477466; font-size: .9rem; line-height: 1.5; }
+
+    .note { margin: 20px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; text-align: center; }
+
+    @media (max-width: 700px) {
+      main { width: min(100% - 24px, 600px); padding-top: 34px; }
+      .diagram { padding: 22px 13px 32px; }
+      .pipeline::before { left: 21px; top: 65px; bottom: 82px; }
+      .stage { grid-template-columns: 42px 1fr; gap: 13px; min-height: 0; padding: 13px 0; align-items: start; }
+      .stage-number { grid-column: 1; grid-row: 1; width: 42px; height: 42px; margin-top: 12px; }
+      .stage:nth-child(odd) .card, .stage:nth-child(even) .card { grid-column: 2; grid-row: 1; }
+      .stage:nth-child(odd) .card::after, .stage:nth-child(even) .card::after { display: none; }
+      .branch { width: calc(100% - 55px); margin: 0 0 5px auto; }
+      .branch::before { top: -14px; left: -23px; width: 24px; height: 2px; }
+      .branch::after { top: -18px; left: -24px; transform: rotate(-45deg); }
+      .capture-divider { margin-left: 55px; }
+      .result { margin-left: 55px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">System overview · From pixels to measurement</p>
+    <h1>Stereo Reconstruction<br>Pipeline</h1>
+    <p class="intro">Synchronized stereo capture, calibration, disparity estimation, and high-resolution refinement—ending with a measurable 3D mesh generated from the target 2D mask.</p>
+
+    <div class="legend" aria-label="Legend">
+      <span><i style="background:#2563eb"></i>Core reconstruction path</span>
+      <span><i style="background:#7c3aed"></i>Optional real-time preview</span>
+      <span><i style="background:#c76b00"></i>User Capture trigger</span>
+      <span><i style="background:#0f9f7d"></i>Final geometry output</span>
+    </div>
+
+    <section class="diagram" aria-label="Stereo reconstruction vertical pipeline">
+      <div class="pipeline">
+        <article class="stage">
+          <div class="card">
+            <p class="step-label">Acquisition</p>
+            <h2>Synchronized stereo capture</h2>
+            <p>The left and right cameras capture the same scene at the same time, providing two viewpoints for every pixel.</p>
+            <div class="camera-row"><span class="camera"><i class="lens"></i>LEFT image</span><span class="camera"><i class="lens"></i>RIGHT image</span></div>
+          </div>
+          <div class="stage-number">1</div>
+        </article>
+
+        <article class="stage">
+          <div class="stage-number">2</div>
+          <div class="card">
+            <p class="step-label">Calibration + Rectification</p>
+            <h2>Calibrate and rectify both images</h2>
+            <p>Apply stereo calibration parameters to align corresponding points on the same horizontal epipolar line, enabling direct disparity estimation.</p>
+            <div class="chips"><span class="chip">RECTIFIED · 2048 × 2448</span><span class="chip">CALIBRATION</span></div>
+          </div>
+        </article>
+
+        <aside class="branch" aria-label="optional realtime preview branch">
+          <div class="branch-title">Realtime Preview <span class="optional">Optional</span></div>
+          <p>Run Fast FoundationStereo on downsampled images and continuously present the live result to the user.</p>
+          <div class="branch-flow"><span>Downsample</span><b>→</b><span>Fast FS</span><b>→</b><span>Disparity</span><b>→</b><span>3D point cloud</span></div>
+        </aside>
+
+        <div class="capture-divider"><span>User clicks Capture</span></div>
+
+        <article class="stage">
+          <div class="card capture-card">
+            <p class="step-label">High-quality capture</p>
+            <h2>Store high-quality inputs and estimate initial disparity</h2>
+            <p>Preload the full-resolution images into GPU memory. In parallel, send the downsampled images to coarse FoundationStereo to generate the initial disparity.</p>
+            <div class="chips"><span class="chip orange">GPU MEMORY</span><span class="chip orange">1024 × 1232</span><span class="chip orange">COARSE · 32 ITERATIONS</span><span class="chip violet">OUTPUT · init_disp</span></div>
+          </div>
+          <div class="stage-number capture">3</div>
+        </article>
+
+        <article class="stage">
+          <div class="stage-number">4</div>
+          <div class="card">
+            <p class="step-label">High-resolution refinement</p>
+            <h2>Refine with FoundationStereo</h2>
+            <p>Send the full-resolution left/right images and <code>init_disp</code> to the refinement model to recover fine detail and improve depth boundaries.</p>
+            <div class="chips"><span class="chip">FULL RES · 2048 × 2464</span><span class="chip violet">init_disp</span><span class="chip">REFINE FS</span></div>
+          </div>
+        </article>
+
+        <article class="stage">
+          <div class="card">
+            <p class="step-label">Geometry cleanup</p>
+            <h2>Post-filter disparity and the 3D point cloud</h2>
+            <p>Filter invalid disparity, noise, and 3D outliers to obtain a smoother, more reliable object point cloud.</p>
+            <div class="chips"><span class="chip">DISPARITY FILTER</span><span class="chip green">POINT CLOUD FILTER</span></div>
+          </div>
+          <div class="stage-number">5</div>
+        </article>
+
+        <article class="stage">
+          <div class="stage-number final">6</div>
+          <div class="card final-card">
+            <p class="step-label">Surface + Measurement</p>
+            <h2>2D mask → Mesh → Area</h2>
+            <p>Use the target 2D mask to select the valid region, then apply Delaunay triangulation to its corresponding 3D points to create a mesh and calculate surface area.</p>
+            <div class="chips"><span class="chip green">2D MASK</span><span class="chip green">DELAUNAY TRIANGULATION</span><span class="chip green">AREA</span></div>
+          </div>
+        </article>
+
+        <div class="result">
+          <div>
+            <h2>Output: Clean 3D Mesh &amp; Surface Area</h2>
+            <p>The final user-facing output: a filtered 3D surface model and a surface-area measurement accumulated from its triangle mesh.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+    <p class="note">Terminology: disparity is the horizontal shift between corresponding pixels in the left and right images. Together with camera calibration parameters, it can be back-projected into a 3D point cloud.</p>
+  </main>
+</body>
+</html>
