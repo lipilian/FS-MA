@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
         const cv::Mat& rectified_left = frame.rectified_left();
         const cv::Mat& rectified_right = frame.rectified_right();
 
-        // Continue processing rectified_left and rectified_right here.
+        // Continue processing the RGB rectified_left and rectified_right images here.
         std::cout << "Rectification completed in memory:\n"
                   << "  left:  " << rectified_left.cols << "x" << rectified_left.rows << '\n'
                   << "  right: " << rectified_right.cols << "x" << rectified_right.rows << '\n'

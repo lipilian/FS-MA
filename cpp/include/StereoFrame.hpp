@@ -6,12 +6,12 @@
 
 class StereoFrame {
 public:
-    /** Load a raw stereo pair and the project's OpenCV-style JSON calibration. */
+    /** Load a raw stereo pair as RGB and the project's OpenCV-style JSON calibration. */
     StereoFrame(const std::filesystem::path& left_image_path,
                 const std::filesystem::path& right_image_path,
                 const std::filesystem::path& calibration_path);
 
-    /** Undistort and rectify both images using cv::CALIB_ZERO_DISPARITY. */
+    /** Undistort and rectify both RGB images using cv::CALIB_ZERO_DISPARITY. */
     void rectify();
 
     const cv::Mat& left() const { return left_; }

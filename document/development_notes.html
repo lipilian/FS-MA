@@ -220,6 +220,22 @@
       line-height: 1.45;
     }
 
+    .warning {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin-top: 18px;
+      padding: 15px 17px;
+      border: 1px solid #fed7aa;
+      border-left: 4px solid #f97316;
+      border-radius: 10px;
+      color: #7c2d12;
+      background: #fff7ed;
+      line-height: 1.5;
+    }
+
+    .warning strong { white-space: nowrap; }
+
     code {
       padding: 0.12em 0.36em;
       border-radius: 5px;
@@ -330,7 +346,7 @@
       </p>
     </section>
     <section class="card" aria-labelledby="progress-heading">
-      <h2 id="progress-heading">Today’s Progress — 2026-08-25</h2>
+      <h2 id="progress-heading">2026-08-25</h2>
       <div class="progress-grid">
         <article class="progress-item">
           <div class="progress-icon" aria-hidden="true">⚙</div>
@@ -348,6 +364,10 @@
           <p>One-click Release build, test run, and debug are supported.</p>
         </article>
       </div>
+      <aside class="warning" role="note">
+        <strong>⚠ Color order</strong>
+        <span>OpenCV <code>imread</code> returns BGR. Convert images to RGB before passing them to the model: <code>cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB)</code>.</span>
+      </aside>
     </section>
   </main>
 </body>

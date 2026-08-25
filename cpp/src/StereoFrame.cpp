@@ -16,19 +16,24 @@ std::string as_string(const std::filesystem::path& path) {
     return path.string();
 }
 
+cv::Mat read_rgb_image(const std::filesystem::path& path, const char* side) {
+    const cv::Mat bgr = cv::imread(as_string(path), cv::IMREAD_COLOR);
+    if (bgr.empty()) {
+        throw std::runtime_error(std::string("Unable to read ") + side + " image: " + as_string(path));
+    }
+
+    cv::Mat rgb;
+    cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+    return rgb;
+}
+
 }  // namespace
 
 StereoFrame::StereoFrame(const std::filesystem::path& left_image_path,
                          const std::filesystem::path& right_image_path,
                          const std::filesystem::path& calibration_path) {
-    left_ = cv::imread(as_string(left_image_path), cv::IMREAD_UNCHANGED);
-    right_ = cv::imread(as_string(right_image_path), cv::IMREAD_UNCHANGED);
-    if (left_.empty()) {
-        throw std::runtime_error("Unable to read left image: " + as_string(left_image_path));
-    }
-    if (right_.empty()) {
-        throw std::runtime_error("Unable to read right image: " + as_string(right_image_path));
-    }
+    left_ = read_rgb_image(left_image_path, "left");
+    right_ = read_rgb_image(right_image_path, "right");
     require_same_size(left_, right_);
 
     cv::FileStorage calibration(as_string(calibration_path), cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON);
