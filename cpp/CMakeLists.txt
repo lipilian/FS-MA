@@ -10,6 +10,9 @@ find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs imgproc calib3d)
 
 add_executable(TSFS
     src/main.cpp
+    src/FS.cpp
+    src/InputPadder.cpp
+    src/Logger.cpp
     src/StereoFrame.cpp
 )
 

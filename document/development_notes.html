@@ -236,6 +236,55 @@
 
     .warning strong { white-space: nowrap; }
 
+    .pipeline-flow {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .pipeline-step {
+      position: relative;
+      min-height: 132px;
+      padding: 19px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #f8fafc;
+    }
+
+    .pipeline-step.complete {
+      border-color: #a6f4c5;
+      background: #f1fcf5;
+    }
+
+    .pipeline-step.next {
+      border-color: #fed7aa;
+      background: #fff7ed;
+    }
+
+    .pipeline-step h3 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+
+    .pipeline-step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .step-state {
+      display: inline-block;
+      margin-bottom: 12px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .complete .step-state { color: #067647; }
+    .next .step-state { color: #b54708; }
+
     code {
       padding: 0.12em 0.36em;
       border-radius: 5px;
@@ -250,6 +299,7 @@
       .card { padding: 21px; }
       th, td { padding: 12px; }
       .progress-grid { grid-template-columns: 1fr; }
+      .pipeline-flow { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -368,6 +418,26 @@
         <strong>⚠ Color order</strong>
         <span>OpenCV <code>imread</code> returns BGR. Convert images to RGB before passing them to the model: <code>cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB)</code>.</span>
       </aside>
+    </section>
+
+    <section class="card" aria-labelledby="pipeline-update-heading">
+      <h2 id="pipeline-update-heading">Stereo Preprocessing Update</h2>
+      <div class="pipeline-flow">
+        <article class="pipeline-step">
+          <h3>Rectified RGB Pair</h3>
+          <p>Input stereo images: <code>2048 × 2448</code>.</p>
+        </article>
+        <article class="pipeline-step complete">
+          <span class="step-state">✓ Complete</span>
+          <h3>Outer Pad · OpenCV CPU</h3>
+          <p>Replicate padding is complete: <code>2048 × 2448</code> → <code>2048 × 2464</code>.</p>
+        </article>
+        <article class="pipeline-step next">
+          <span class="step-state">Next</span>
+          <h3>Two-Model Sub-Pad</h3>
+          <p>Prepare the sub-padding flow for the two FoundationStereo model passes.</p>
+        </article>
+      </div>
     </section>
   </main>
 </body>

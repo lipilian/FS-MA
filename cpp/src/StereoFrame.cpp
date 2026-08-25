@@ -1,6 +1,8 @@
 #include "StereoFrame.hpp"
+#include "Logger.hpp"
 
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -89,6 +91,13 @@ void StereoFrame::rectify() {
     cv::initUndistortRectifyMap(k2_, d2_, r2_, p2_, image_size, kMapType, right_map_x, right_map_y);
     cv::remap(left_, rectified_left_, left_map_x, left_map_y, cv::INTER_LINEAR);
     cv::remap(right_, rectified_right_, right_map_x, right_map_y, cv::INTER_LINEAR);
+
+    std::ostringstream summary;
+    summary << "Rectification completed in memory.\n"
+            << "  left:  " << rectified_left_.cols << "x" << rectified_left_.rows << '\n'
+            << "  right: " << rectified_right_.cols << "x" << rectified_right_.rows << '\n'
+            << "Baseline: " << baseline_meters() << " m";
+    Logger::log(summary.str());
 }
 
 double StereoFrame::baseline_meters() const {

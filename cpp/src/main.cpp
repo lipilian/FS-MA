@@ -1,16 +1,16 @@
 #include <exception>
 #include <filesystem>
-#include <iostream>
 #include <string>
 
+#include "FS.hpp"
+#include "Logger.hpp"
 #include "StereoFrame.hpp"
 
 namespace {
 
 void print_usage(const char* executable) {
-    std::cerr << "Usage: " << executable
-              << " <capture-directory>\n"
-              << "\nThe directory must contain left.png, right.png, and calibration.json.\n";
+    Logger::error(std::string("Usage: ") + executable +
+                  " <capture-directory>\n\nThe directory must contain left.png, right.png, and calibration.json.");
 }
 
 }  // namespace
@@ -27,20 +27,19 @@ int main(int argc, char* argv[]) {
     const auto calibration_path = capture_directory / "calibration.json";
 
     try {
+        Logger::log("Loading stereo capture.");
         StereoFrame frame(left_path, right_path, calibration_path);
+        FS fs;
+
+        Logger::log("Rectifying RGB stereo pair.");
         frame.rectify();
 
-        const cv::Mat& rectified_left = frame.rectified_left();
-        const cv::Mat& rectified_right = frame.rectified_right();
+        fs.prepare_stereo_images(frame.rectified_left(), frame.rectified_right());
 
-        // Continue processing the RGB rectified_left and rectified_right images here.
-        std::cout << "Rectification completed in memory:\n"
-                  << "  left:  " << rectified_left.cols << "x" << rectified_left.rows << '\n'
-                  << "  right: " << rectified_right.cols << "x" << rectified_right.rows << '\n'
-                  << "Baseline: " << frame.baseline_meters() << " m\n";
+        // Continue processing frame.rectified_left() and frame.rectified_right() here.
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "stereo_rectify: " << error.what() << '\n';
+        Logger::error(std::string("stereo_rectify: ") + error.what());
         return 1;
     }
 }
