@@ -1,0 +1,7 @@
+{
+  "cmake.sourceDirectory": "${workspaceFolder}/cpp",
+  "cmake.buildDirectory": "${workspaceFolder}/cpp/build",
+  "cmake.configureSettings": {
+    "CMAKE_BUILD_TYPE": "Release"
+  }
+}

@@ -24,6 +24,7 @@ __all__ = [
 @dataclass(frozen=True)
 class InferenceResult:
     disparity: Any
+    init_disp: Any | None
     seconds: float
     memory_before_mib: dict[str, float]
     memory_after_mib: dict[str, float]
@@ -100,7 +101,8 @@ def _gpu_memory_mib(torch: Any, device: Any) -> dict[str, float]:
 
 def _infer_disparity(
     model: Any, left_rgb: Any, right_rgb: Any, device: Any, valid_iters: int, hiera: int
-) -> Any:
+) -> tuple[Any, Any | None]:
+    """Infer disparity and retain Hiera's quarter-resolution initialization."""
     import numpy as np
     import torch
     from core.utils.utils import InputPadder
@@ -109,17 +111,45 @@ def _infer_disparity(
     left = torch.from_numpy(np.ascontiguousarray(left_rgb)).to(device, dtype=torch.float32)
     right = torch.from_numpy(np.ascontiguousarray(right_rgb)).to(device, dtype=torch.float32)
     left, right = left.permute(2, 0, 1)[None], right.permute(2, 0, 1)[None]
-    padder = InputPadder(left.shape, divis_by=32, force_square=False)
-    left, right = padder.pad(left, right)
+    outer_padder = InputPadder(left.shape, divis_by=32, force_square=False)
+    left, right = outer_padder.pad(left, right)
     with torch.inference_mode():
         if hiera:
-            disparity = model.run_hierachical(
-                left, right, iters=valid_iters, test_mode=True, small_ratio=0.5
+            # Equivalent to FoundationStereo.run_hierachical, while retaining
+            # the exact 1/4-resolution init_disp supplied to the refine pass.
+            small_ratio = 0.5
+            _, _, full_height, full_width = left.shape
+            left_small = torch.nn.functional.interpolate(
+                left, scale_factor=small_ratio, mode="bilinear", align_corners=False
+            )
+            right_small = torch.nn.functional.interpolate(
+                right, scale_factor=small_ratio, mode="bilinear", align_corners=False
+            )
+            small_padder = InputPadder(left_small.shape[-2:], divis_by=32, force_square=False)
+            left_small, right_small = small_padder.pad(left_small, right_small)
+            disparity_small = model.forward(
+                left_small, right_small, iters=valid_iters, test_mode=True, low_memory=False
+            )
+            disparity_small = small_padder.unpad(disparity_small.float())
+            disparity_small_up = torch.nn.functional.interpolate(
+                disparity_small, size=(full_height, full_width), mode="bilinear", align_corners=True
+            ) * (1 / small_ratio)
+            disparity_small_up = disparity_small_up.clip(0, None)
+
+            full_padder = InputPadder(left.shape[-2:], divis_by=32, force_square=False)
+            left, right, disparity_small_up = full_padder.pad(left, right, disparity_small_up)
+            disparity_small_up += full_padder._pad[0]
+            init_disp = torch.nn.functional.interpolate(
+                disparity_small_up, scale_factor=0.25, mode="bilinear", align_corners=True
+            ) * 0.25
+            disparity = model.forward(
+                left, right, iters=valid_iters, test_mode=True, low_memory=False, init_disp=init_disp
             )
         else:
             disparity = model.forward(left, right, iters=valid_iters, test_mode=True)
-    disparity = padder.unpad(disparity.float())
-    return disparity.squeeze().reshape(height, width)
+            init_disp = None
+    disparity = outer_padder.unpad(disparity.float())
+    return disparity.squeeze().reshape(height, width), init_disp
 
 
 def run_foundation_stereo_inference(
@@ -137,10 +167,13 @@ def run_foundation_stereo_inference(
     torch.cuda.reset_peak_memory_stats(device)
     memory_before = _gpu_memory_mib(torch, device)
     started_at = time.perf_counter()
-    disparity = _infer_disparity(model, left_rgb, right_rgb, device, valid_iters, hiera)
+    disparity, init_disp = _infer_disparity(
+        model, left_rgb, right_rgb, device, valid_iters, hiera
+    )
     torch.cuda.synchronize(device)
     return InferenceResult(
         disparity=disparity,
+        init_disp=init_disp,
         seconds=time.perf_counter() - started_at,
         memory_before_mib=memory_before,
         memory_after_mib=_gpu_memory_mib(torch, device),
