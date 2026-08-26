@@ -25,7 +25,8 @@ void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
     cv::resize(outer_left_, small_left_, cv::Size(), kSmallRatio, kSmallRatio, cv::INTER_LINEAR);
     cv::resize(outer_right_, small_right_, cv::Size(), kSmallRatio, kSmallRatio, cv::INTER_LINEAR);
 
-    
-
+    coarse_padder_ = std::make_unique<InputPadder>(small_left_.size());
+    small_left_ = coarse_padder_->pad(small_left_);
+    small_right_ = coarse_padder_->pad(small_right_);
 
 }

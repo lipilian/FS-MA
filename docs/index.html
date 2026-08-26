@@ -304,11 +304,11 @@
     .complete .step-state { color: #067647; }
     .next .step-state { color: #b54708; }
 
-    .outer-pad-card {
+    .padding-card {
       cursor: zoom-in;
     }
 
-    .outer-pad-card:focus-visible {
+    .padding-card:focus-visible {
       outline: 3px solid #175cd3;
       outline-offset: 3px;
     }
@@ -324,8 +324,8 @@
       transition: max-height 220ms ease, margin 220ms ease, opacity 180ms ease, transform 220ms ease;
     }
 
-    .outer-pad-card:hover .padding-diagram,
-    .outer-pad-card:focus-within .padding-diagram {
+    .padding-card:hover .padding-diagram,
+    .padding-card:focus-within .padding-diagram {
       max-height: 180px;
       margin-top: 16px;
       opacity: 1;
@@ -376,6 +376,86 @@
       gap: 7px;
       margin: 0;
       font-weight: 750;
+    }
+
+    .interpolation-card {
+      cursor: zoom-in;
+    }
+
+    .interpolation-card:focus-visible {
+      outline: 3px solid #175cd3;
+      outline-offset: 3px;
+    }
+
+    .interpolation-diagram {
+      display: grid;
+      gap: 10px;
+      max-height: 0;
+      margin-top: 0;
+      opacity: 0;
+      overflow: hidden;
+      transform: translateY(-4px);
+      transition: max-height 220ms ease, margin 220ms ease, opacity 180ms ease, transform 220ms ease;
+    }
+
+    .interpolation-card:hover .interpolation-diagram,
+    .interpolation-card:focus-within .interpolation-diagram {
+      max-height: 180px;
+      margin-top: 16px;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .interpolation-diagram-title {
+      margin: 0;
+      color: #3730a3;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .resolution-visual {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      min-height: 112px;
+      padding: 10px;
+      border: 1px solid #c4b5fd;
+      border-radius: 9px;
+      background: #f5f3ff;
+    }
+
+    .resolution-sample {
+      display: grid;
+      justify-items: center;
+      gap: 6px;
+      color: #4c1d95;
+      font-size: 0.7rem;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .resolution-image {
+      display: grid;
+      place-items: center;
+      aspect-ratio: 2464 / 2048;
+      border: 2px solid #7c3aed;
+      border-radius: 5px;
+      color: #4c1d95;
+      background: repeating-linear-gradient(45deg, #ddd6fe 0 7px, #c4b5fd 7px 14px);
+      box-shadow: inset 0 0 0 1px rgb(255 255 255 / 65%);
+      font-size: 0.66rem;
+      font-weight: 850;
+      line-height: 1.15;
+    }
+
+    .resolution-image.full { width: 132px; }
+    .resolution-image.half { width: 66px; }
+
+    .resolution-arrow {
+      color: #6d28d9;
+      font-size: 1.35rem;
+      font-weight: 900;
     }
 
     code {
@@ -537,7 +617,7 @@
           <h3>Rectified RGB Pair</h3>
           <p>Input stereo images: <code>2048 × 2448</code>.</p>
         </article>
-        <article class="pipeline-step complete outer-pad-card" tabindex="0" aria-describedby="outer-pad-diagram">
+        <article class="pipeline-step complete padding-card" tabindex="0" aria-describedby="outer-pad-diagram">
           <h3>Outer Pad · OpenCV CPU</h3>
           <p><code>2048 × 2448</code> → <code>2048 × 2464</code></p>
           <div id="outer-pad-diagram" class="padding-diagram">
@@ -551,9 +631,37 @@
             <p class="padding-result"><code>2048 × 2448</code><span aria-hidden="true">→</span><code>2048 × 2464</code></p>
           </div>
         </article>
-        <article class="pipeline-step complete">
+        <article class="pipeline-step complete interpolation-card" tabindex="0" aria-describedby="interpolation-diagram">
           <h3>Bilinear Interpolation · OpenCV CPU</h3>
           <p>Convert the outer-padded images to <code>float32</code>, then scale <code>2048 × 2464</code> → <code>1024 × 1232</code> with bilinear interpolation.</p>
+          <div id="interpolation-diagram" class="interpolation-diagram">
+            <p class="interpolation-diagram-title">Each dimension is scaled by <code>0.5</code>.</p>
+            <div class="resolution-visual" aria-label="Bilinear interpolation halves the 2048 by 2464 outer-padded image to 1024 by 1232">
+              <div class="resolution-sample">
+                <span>Outer padded</span>
+                <div class="resolution-image full">2048 × 2464</div>
+              </div>
+              <span class="resolution-arrow" aria-hidden="true">→ ½</span>
+              <div class="resolution-sample">
+                <span>Small image</span>
+                <div class="resolution-image half">1024 × 1232</div>
+              </div>
+            </div>
+          </div>
+        </article>
+        <article class="pipeline-step complete padding-card" tabindex="0" aria-describedby="coarse-pad-diagram">
+          <h3>Coarse Pad · OpenCV CPU</h3>
+          <p>Replicate-pad the small <code>float32</code> images to a 32-pixel boundary: <code>1024 × 1232</code> → <code>1024 × 1248</code>.</p>
+          <div id="coarse-pad-diagram" class="padding-diagram">
+            <p class="padding-diagram-title">Matches Python <code>small_padder = InputPadder(..., divis_by=32, force_square=False)</code>.</p>
+            <p class="padding-diagram-title"><code>cv::copyMakeBorder(..., cv::BORDER_REPLICATE)</code> · 8 px on each horizontal edge</p>
+            <div class="padding-visual" aria-label="8 pixels of replicated padding on each side of a 1232-pixel-wide small image">
+              <span class="padding-edge">8 px</span>
+              <span class="source-image">Small image · 1232 px wide</span>
+              <span class="padding-edge">8 px</span>
+            </div>
+            <p class="padding-result"><code>1024 × 1232</code><span aria-hidden="true">→</span><code>1024 × 1248</code></p>
+          </div>
         </article>
       </div>
       </div>
