@@ -24,4 +24,6 @@ private:
     std::unique_ptr<InputPadder> outer_padder_ = nullptr; // outer padder to pad 2048x2448 to 2048x2464
     cv::Mat outer_left_; // The outer padded left image, should be 2048x2464
     cv::Mat outer_right_; // The outer padded right image, should be 2048x2464
+    cv::Mat small_left_; // The small left image
+    cv::Mat small_right_; // The small right image
 };

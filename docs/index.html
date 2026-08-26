@@ -189,6 +189,24 @@
       gap: 14px;
     }
 
+    .preprocessing-layout {
+      display: grid;
+      grid-template-columns: minmax(160px, 0.72fr) minmax(0, 2fr);
+      gap: 28px;
+      align-items: start;
+    }
+
+    .preprocessing-title {
+      min-height: 154px;
+      padding-right: 28px;
+      border-right: 1px solid var(--line);
+    }
+
+    .preprocessing-title h2 {
+      font-size: clamp(1.5rem, 3vw, 2rem);
+      line-height: 1.1;
+    }
+
     .progress-item {
       min-height: 154px;
       padding: 20px;
@@ -239,7 +257,7 @@
 
     .pipeline-flow {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: 1fr;
       gap: 14px;
     }
 
@@ -286,6 +304,80 @@
     .complete .step-state { color: #067647; }
     .next .step-state { color: #b54708; }
 
+    .outer-pad-card {
+      cursor: zoom-in;
+    }
+
+    .outer-pad-card:focus-visible {
+      outline: 3px solid #175cd3;
+      outline-offset: 3px;
+    }
+
+    .padding-diagram {
+      display: grid;
+      gap: 10px;
+      max-height: 0;
+      margin-top: 0;
+      opacity: 0;
+      overflow: hidden;
+      transform: translateY(-4px);
+      transition: max-height 220ms ease, margin 220ms ease, opacity 180ms ease, transform 220ms ease;
+    }
+
+    .outer-pad-card:hover .padding-diagram,
+    .outer-pad-card:focus-within .padding-diagram {
+      max-height: 180px;
+      margin-top: 16px;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .padding-diagram-title {
+      margin: 0;
+      color: #067647;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .padding-visual {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr) 58px;
+      min-height: 64px;
+      border: 1px solid #86d7a8;
+      border-radius: 9px;
+      overflow: hidden;
+    }
+
+    .padding-edge {
+      display: grid;
+      place-items: center;
+      padding: 5px;
+      color: #064e3b;
+      background: repeating-linear-gradient(90deg, #a7f3d0 0 6px, #6ee7b7 6px 12px);
+      font-size: 0.72rem;
+      font-weight: 850;
+      line-height: 1.1;
+      text-align: center;
+    }
+
+    .source-image {
+      display: grid;
+      place-items: center;
+      padding: 8px;
+      color: #075985;
+      background: linear-gradient(135deg, #e0f2fe, #bae6fd);
+      font-size: 0.8rem;
+      text-align: center;
+    }
+
+    .padding-result {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0;
+      font-weight: 750;
+    }
+
     code {
       padding: 0.12em 0.36em;
       border-radius: 5px;
@@ -300,6 +392,16 @@
       .card { padding: 21px; }
       th, td { padding: 12px; }
       .progress-grid { grid-template-columns: 1fr; }
+      .preprocessing-layout {
+        grid-template-columns: 1fr;
+        gap: 20px;
+      }
+      .preprocessing-title {
+        min-height: 0;
+        padding: 0 0 16px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
       .pipeline-flow { grid-template-columns: 1fr; }
     }
   </style>
@@ -401,7 +503,7 @@
       </p>
     </section>
     <section class="card" aria-labelledby="progress-heading">
-      <h2 id="progress-heading">2026-08-25</h2>
+      <h2 id="progress-heading">Environment Setup</h2>
       <div class="progress-grid">
         <article class="progress-item">
           <div class="progress-icon" aria-hidden="true">⚙</div>
@@ -425,23 +527,35 @@
       </aside>
     </section>
 
-    <section class="card" aria-labelledby="pipeline-update-heading">
-      <h2 id="pipeline-update-heading">Stereo Preprocessing Update</h2>
-      <div class="pipeline-flow">
-        <article class="pipeline-step">
+    <section class="card preprocessing-layout" aria-labelledby="pipeline-update-heading">
+      <div class="preprocessing-title">
+        <h2 id="pipeline-update-heading">Stereo Preprocessing</h2>
+      </div>
+      <div class="preprocessing-content">
+        <div class="pipeline-flow">
+        <article class="pipeline-step complete">
           <h3>Rectified RGB Pair</h3>
           <p>Input stereo images: <code>2048 × 2448</code>.</p>
         </article>
-        <article class="pipeline-step complete">
-          <span class="step-state">✓ Complete</span>
+        <article class="pipeline-step complete outer-pad-card" tabindex="0" aria-describedby="outer-pad-diagram">
           <h3>Outer Pad · OpenCV CPU</h3>
-          <p>Replicate padding is complete: <code>2048 × 2448</code> → <code>2048 × 2464</code>.</p>
+          <p><code>2048 × 2448</code> → <code>2048 × 2464</code></p>
+          <div id="outer-pad-diagram" class="padding-diagram">
+            <p class="padding-diagram-title">OpenCV replicate padding replaces Python <code>F.pad(x, self._pad, mode='replicate')</code>.</p>
+            <p class="padding-diagram-title"><code>cv::copyMakeBorder(image, padded, top, bottom, left, right, cv::BORDER_REPLICATE)</code> · 8 px on each horizontal edge</p>
+            <div class="padding-visual" aria-label="8 pixels of replicated padding on each side of a 2448-pixel-wide image">
+              <span class="padding-edge">8 px</span>
+              <span class="source-image">Original image · 2448 px wide</span>
+              <span class="padding-edge">8 px</span>
+            </div>
+            <p class="padding-result"><code>2048 × 2448</code><span aria-hidden="true">→</span><code>2048 × 2464</code></p>
+          </div>
         </article>
-        <article class="pipeline-step next">
-          <span class="step-state">Next</span>
-          <h3>Two-Model Sub-Pad</h3>
-          <p>Prepare the sub-padding flow for the two FoundationStereo model passes.</p>
+        <article class="pipeline-step complete">
+          <h3>Bilinear Interpolation · OpenCV CPU</h3>
+          <p>Convert the outer-padded images to <code>float32</code>, then scale <code>2048 × 2464</code> → <code>1024 × 1232</code> with bilinear interpolation.</p>
         </article>
+      </div>
       </div>
     </section>
   </main>
