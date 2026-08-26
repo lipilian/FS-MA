@@ -292,6 +292,39 @@
       line-height: 1.45;
     }
 
+    .engine-interface {
+      display: grid;
+      gap: 6px;
+      margin-top: 12px;
+    }
+
+    .coarse-engine-card {
+      cursor: zoom-in;
+    }
+
+    .coarse-engine-card:focus-visible {
+      outline: 3px solid #175cd3;
+      outline-offset: 3px;
+    }
+
+    .coarse-engine-details {
+      display: grid;
+      max-height: 0;
+      margin-top: 0;
+      opacity: 0;
+      overflow: hidden;
+      transform: translateY(-4px);
+      transition: max-height 220ms ease, margin 220ms ease, opacity 180ms ease, transform 220ms ease;
+    }
+
+    .coarse-engine-card:hover .coarse-engine-details,
+    .coarse-engine-card:focus-within .coarse-engine-details {
+      max-height: 720px;
+      margin-top: 16px;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
     .step-state {
       display: inline-block;
       margin-bottom: 12px;
@@ -663,7 +696,54 @@
             <p class="padding-result"><code>1024 × 1232</code><span aria-hidden="true">→</span><code>1024 × 1248</code></p>
           </div>
         </article>
+        <article class="pipeline-step next">
+          <span class="step-state">TODO</span>
+          <h3>GPU Run Time Memory Allocate</h3>
+          <p>Allocate the GPU runtime memory required for the prepared stereo inputs and subsequent inference.</p>
+        </article>
       </div>
+      </div>
+    </section>
+
+    <section class="card preprocessing-layout" aria-labelledby="coarse-engine-heading">
+      <div class="preprocessing-title">
+        <h2 id="coarse-engine-heading">Coarse Engine</h2>
+      </div>
+      <div class="preprocessing-content">
+        <div class="pipeline-flow">
+          <article class="pipeline-step complete coarse-engine-card" tabindex="0" aria-describedby="coarse-export-details">
+            <h3>Export Coarse Model · ONNX</h3>
+            <p>Run <a href="https://github.com/smd-ai/FS_Engine/blob/main/python/make_coarse_onnx.py" target="_blank" rel="noopener noreferrer"><code>conda run -n fs python python/make_coarse_onnx.py</code></a> to generate <code>onnx/coarse_engine_1024x1248_iters32.onnx</code>.</p>
+            <div id="coarse-export-details" class="coarse-engine-details">
+              <div class="engine-interface">
+                <p><strong>Input:</strong> <code>left</code>, <code>right</code> · RGB <code>float32[1, 3, 1024, 1248]</code> · range <code>0–255</code></p>
+                <p><strong>Output:</strong> <code>disp</code> · <code>float32[1, 1, 1024, 1248]</code></p>
+              </div>
+              <div class="warning">
+                <strong>❗ Important</strong>
+                <span>xFormers is disabled during export. The ONNX graph uses standard PyTorch attention/FFN operators, so TensorRT can automatically select and fuse implementations suited to the GPU.</span>
+              </div>
+            </div>
+          </article>
+          <article class="pipeline-step next coarse-engine-card" tabindex="0" aria-describedby="coarse-build-details">
+            <h3>Build Engine · Baseline Test</h3>
+            <p>Build a static TensorRT engine without the aggressive <code>--fp16</code> tactic flag.</p>
+            <div id="coarse-build-details" class="coarse-engine-details">
+              <div class="engine-interface">
+                <p><strong>Build:</strong> <code>trtexec --onnx=onnx/coarse_engine_1024x1248_iters32.onnx --saveEngine=onnx/coarse_engine_1024x1248_autocast_l3.engine --builderOptimizationLevel=3 --profilingVerbosity=detailed --skipInference</code></p>
+                <p><strong>Precision:</strong> retain only the FP16 casts already present from PyTorch autocast; do not add TensorRT <code>--fp16</code> tactics.</p>
+              </div>
+              <div class="warning">
+                <strong>❗ Resolution matters</strong>
+                <span>The 512 × 608 ONNX exported by <code>make_onnx_liu.py</code> builds successfully. At the target 1024 × 1248 resolution, both exporters reproduce a Myelin failure: <code>No valid tactics to print (all tactics failed)</code>, followed by <code>MyelinCheckException: Must have costs</code> and <code>Could not find any implementation for ForeignNode[ONNXTRT_ShapeShuffle ... /Unsqueeze_724]</code>. TensorRT creates only a 0 MiB empty engine. TensorRT chooses tactics for the fixed tensor shapes at build time: increasing resolution changes intermediate tensor sizes, memory demand, and fusion choices, so a tactic valid at 512 × 608 may be unavailable at 1024 × 1248.</span>
+              </div>
+              <div class="warning">
+                <strong>❗ Profile first</strong>
+                <span>Use <code>--profilingVerbosity=detailed</code> for layer inspection. After profiling, rebuild a clean benchmark engine without detailed profiling verbosity to avoid its enqueue overhead.</span>
+              </div>
+            </div>
+          </article>
+        </div>
       </div>
     </section>
   </main>
