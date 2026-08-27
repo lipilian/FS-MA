@@ -255,6 +255,13 @@
 
     .warning strong { white-space: nowrap; }
 
+    .todo {
+      color: #b42318 !important;
+      font-weight: 600;
+    }
+
+    .todo code { color: inherit; }
+
     .pipeline-flow {
       display: grid;
       grid-template-columns: 1fr;
@@ -721,7 +728,7 @@
               </div>
               <div class="warning">
                 <strong>❗ Important</strong>
-                <span>xFormers is disabled during export. The ONNX graph uses standard PyTorch attention/FFN operators, so TensorRT can automatically select and fuse implementations suited to the GPU.</span>
+                <span>xFormers is disabled during export because its CUDA kernels are not representable as standard ONNX operators. This makes the graph parseable by TensorRT, but does not guarantee fused attention.</span>
               </div>
             </div>
           </article>
@@ -738,14 +745,32 @@
                 <span>The 512 × 608 ONNX exported by <code>make_onnx_liu.py</code> builds successfully. At the target 1024 × 1248 resolution, both exporters reproduce a Myelin failure: <code>No valid tactics to print (all tactics failed)</code>, followed by <code>MyelinCheckException: Must have costs</code> and <code>Could not find any implementation for ForeignNode[ONNXTRT_ShapeShuffle ... /Unsqueeze_724]</code>. TensorRT creates only a 0 MiB empty engine. TensorRT chooses tactics for the fixed tensor shapes at build time: increasing resolution changes intermediate tensor sizes, memory demand, and fusion choices, so a tactic valid at 512 × 608 may be unavailable at 1024 × 1248.</span>
               </div>
               <div class="warning">
-                <strong>❗ Profile first</strong>
-                <span>Use <code>--profilingVerbosity=detailed</code> for layer inspection. After profiling, rebuild a clean benchmark engine without detailed profiling verbosity to avoid its enqueue overhead.</span>
+                <strong>❗ Root cause found</strong>
+                <span>The Myelin build failure is triggered by the GRU iterations section that repeatedly updates disparity at 1/4 resolution, including its final disparity upsampling path. For the current experiment, this loop is commented out in <code>FoundationStereo/core/foundation_stereo.py</code>; the model instead returns the interpolated initial disparity, so it is not a full FoundationStereo result.</span>
+              </div>
+              <p class="todo"><strong>TODO:</strong> restore the GRU iterations after replacing or restructuring the TensorRT-incompatible path and validating that the full disparity-refinement output builds correctly.</p>
+            </div>
+          </article>
+          <article class="pipeline-step next coarse-engine-card" tabindex="0" aria-describedby="dino-attention-details">
+            <h3>DINOv2 Attention Fusion Analysis</h3>
+            <p>PyTorch+xFormers executes memory-efficient MHA; the exported TensorRT engine retains the separate attention primitive operations.</p>
+            <div id="dino-attention-details" class="coarse-engine-details">
+              <p>DINOv2 ViT-L has 24 sequential Transformer blocks. Each block contains multi-head self-attention; “24 blocks” is the Transformer depth, not the number of attention heads.</p>
+              <div class="warning">
+                <strong>❗ Exported graph is not fused MHA</strong>
+                <span>In native PyTorch, xFormers runs the attention as memory-efficient MHA and avoids materializing the complete attention matrix. xFormers must be disabled for ONNX export because its CUDA kernel is not representable as standard ONNX. The exported TensorRT graph consequently consists of primitive operations: <code>QK<sup>T</sup></code> <code>MatMul</code> → scale → <code>Softmax</code> → <code>AV</code> <code>MatMul</code>, with reshape, transpose, and output-projection operations around them.</span>
+              </div>
+              <div class="engine-interface">
+                <p><strong>Observed in TensorRT 10.16:</strong> both the <code>512 × 512</code> and <code>1024 × 1248</code> engines retain separate <code>/feature/dino/blocks.N/attn/MatMul</code>, <code>MatMul_1</code>, and projection layers for all 24 blocks; no MHA / FlashAttention layer is emitted.</p>
+                <p><strong>Implication:</strong> decreasing resolution reduces the token count and latency, but does not change this graph-level fusion result. Recovering xFormers-like execution requires constructing attention with TensorRT native <code>IAttention</code> or supplying a FlashAttention TensorRT plugin.</p>
+                <p class="todo"><strong>TODO:</strong> compile FoundationStereo with the TensorRT container workflow provided by the original repository, then inspect that engine to determine whether its DINOv2 attention is likewise left as separate <code>QK<sup>T</sup></code>, <code>Softmax</code>, and <code>AV</code> operations.</p>
               </div>
             </div>
           </article>
         </div>
       </div>
     </section>
+
   </main>
 </body>
 </html>

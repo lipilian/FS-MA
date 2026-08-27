@@ -228,20 +228,27 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         disp_preds = []
 
         # GRUs iterations to update disparity (1/4 resolution)
-        for itr in range(iters):
-            disp = disp.detach()
-            geo_feat = geo_fn(disp, coords, low_memory=low_memory)
-            with torch.amp.autocast("cuda", enabled=self.args.mixed_precision):
-              net_list, mask_feat_4, delta_disp = self.update_block(net_list, inp_list, geo_feat, disp, att)
+        # for itr in range(iters):
+        #     disp = disp.detach()
+        #     geo_feat = geo_fn(disp, coords, low_memory=low_memory)
+        #     with torch.amp.autocast("cuda", enabled=self.args.mixed_precision):
+        #       net_list, mask_feat_4, delta_disp = self.update_block(net_list, inp_list, geo_feat, disp, att)
 
-            disp = disp + delta_disp.float()
-            if test_mode and itr < iters-1:
-                continue
+        #     disp = disp + delta_disp.float()
+        #     if test_mode and itr < iters-1:
+        #         continue
 
-            # upsample predictions
-            disp_up = self.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
-            disp_preds.append(disp_up)
+        #     # upsample predictions
+        #     disp_up = self.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
+        #     disp_preds.append(disp_up)
 
+        
+        disp_up = F.interpolate(
+            init_disp,
+            size=image1.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ) * 4.0
 
         if test_mode:
             return disp_up
