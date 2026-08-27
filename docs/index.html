@@ -712,6 +712,26 @@
       </div>
     </section>
 
+    <section class="card preprocessing-layout" aria-labelledby="container-validation-heading">
+      <div class="preprocessing-title">
+        <h2 id="container-validation-heading">Validation Hypothesis</h2>
+      </div>
+      <div class="preprocessing-content">
+        <div class="pipeline-flow">
+          <article class="pipeline-step next">
+            <span class="step-state">HYPOTHESIS</span>
+            <h3>Original FoundationStereo TensorRT Container</h3>
+            <p>Question whether the ONNX/TensorRT Docker build workflow from the original FoundationStereo README materially improves inference latency or GPU memory for this model.</p>
+            <div class="engine-interface">
+              <p><strong>Suspicion:</strong> the original container may build a valid engine but still retain the DINOv2 attention as separate <code>QK<sup>T</sup></code> <code>MatMul</code>, <code>Softmax</code>, and <code>AV</code> <code>MatMul</code> operations. If so, it may not provide a meaningful speed or inference-memory improvement over the current conversion.</p>
+              <p><strong>Validation:</strong> use the README container workflow at its original static <code>1 × 3 × 448 × 672</code> input shape; inspect the engine layers for <code>mha</code>, then compare GPU compute latency and runtime GPU memory with PyTorch/xFormers at that same shape.</p>
+              <p class="todo"><strong>TODO:</strong> run the original FoundationStereo container build and record its engine layer graph, inference latency, and GPU memory before deciding whether to adopt that workflow.</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
     <section class="card preprocessing-layout" aria-labelledby="coarse-engine-heading">
       <div class="preprocessing-title">
         <h2 id="coarse-engine-heading">Coarse Engine</h2>
