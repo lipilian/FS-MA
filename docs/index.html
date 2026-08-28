@@ -1120,13 +1120,12 @@
               <h3>FoundationStereo ViT-L · PyTorch</h3>
               <div class="engine-interface">
                 <p><strong>Benchmark conditions:</strong> direct PyTorch inference, <code>vitl</code>, fixed <code>576 × 960</code> input, xFormers (potential), and no Hiera path.</p>
-                <p><strong>Mean complete forward latency:</strong> <code>700.31 ms</code></p>
-                <p class="benchmark-submetric">↳ <strong>Feature/DINO within full forward:</strong> <code>149.25 ms</code></p>
-                <p class="benchmark-submetric">↳ <strong>Cost volume / 3D aggregation within full forward:</strong> <code>100.21 ms</code></p>
-                <p class="benchmark-submetric">↳ <strong>GRU update, mean per iteration:</strong> <code>11.22 ms</code></p>
-                <p class="benchmark-submetric">↳ <strong>GRU update, mean total per forward:</strong> <code>358.97 ms</code></p>
-                <p class="benchmark-submetric">↳ <strong>Disparity upsample within full forward:</strong> <code>1.14 ms</code></p>
-                <p><strong>Peak allocated CUDA memory:</strong> <code>3,162.63 MiB</code></p>
+                <p><strong>Mean complete forward latency:</strong> <code>697.35 ms</code></p>
+                <p class="benchmark-submetric">↳ <strong>Feature/DINO within full forward:</strong> <code>150.41 ms</code></p>
+                <p class="benchmark-submetric">↳ <strong>Cost volume / 3D aggregation within full forward:</strong> <code>100.55 ms</code></p>
+                <p class="benchmark-submetric">↳ <strong>Context + iterative GRU within full forward:</strong> <code>444.39 ms</code></p>
+                <p class="benchmark-submetric">↳ <strong>Disparity upsample within full forward:</strong> <code>1.16 ms</code></p>
+                <p><strong>Peak allocated CUDA memory:</strong> <code>3,162.54 MiB</code></p>
               </div>
             </article>
             <article class="pipeline-step tensorrt-comparison" aria-label="Reserved for TensorRT comparison results"></article>
