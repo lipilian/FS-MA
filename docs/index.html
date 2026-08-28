@@ -527,6 +527,19 @@
       margin-top: 12px;
     }
 
+    .trtexec-command-details {
+      margin-top: 12px;
+    }
+
+    .trtexec-command-details summary {
+      cursor: pointer;
+      color: #175cd3;
+    }
+
+    .trtexec-command-details pre {
+      margin: 12px 0 0;
+    }
+
     .benchmark-submetric {
       padding-left: 16px;
       font-size: 0.84rem !important;
@@ -1139,15 +1152,33 @@
               <span class="step-state">FS NGC MODEL</span>
               <h3>FS NGC Model · TensorRT</h3>
               <div class="engine-interface">
-                <p><strong>Environment:</strong> <code>Driver 610.43.02</code> + <code>CUDA 13.3</code> + <code>TensorRT 11.2.1</code></p>
-                <p><strong>Benchmark conditions:</strong></p>
-                <pre><code>trtexec \
+                <p><strong>Environment:</strong> <code>Driver 610.43.02</code> + <code>CUDA 13.3</code><br>
+                  <code>TensorRT 11.2.1</code></p>
+                <details class="trtexec-command-details">
+                  <summary><strong>Benchmark conditions:</strong> trtexec command</summary>
+                  <pre><code>trtexec \
   --onnx=onnx/deployable_foundationstereo_small_576x960_v2.0.onnx \
   --saveEngine=onnx/fs_576x960_l3_detailed.engine \
   --builderOptimizationLevel=3 \
   --profilingVerbosity=detailed \
   --exportLayerInfo=onnx/fs_576x960_l3_layers.json \
   --skipInference</code></pre>
+                </details>
+                <details class="trtexec-command-details">
+                  <summary><strong>Inference command:</strong> trtexec command</summary>
+                  <pre><code>trtexec \
+  --loadEngine=onnx/fs_576x960_l3_detailed.engine \
+  --profilingVerbosity=none \
+  --warmUp=1000 \
+  --duration=60 \
+  --iterations=1</code></pre>
+                </details>
+                <p><strong>Total GPU memory required:</strong> <code>15,024 MiB</code></p>
+                <p><strong>Mean inference latency:</strong> <code>1,020.61 ms</code></p>
+                <div class="warning">
+                  <strong>Conclusion</strong>
+                  <span>In this measured configuration, even NVIDIA's NGC deployable TensorRT build is slower and requires more GPU memory than xFormers-accelerated PyTorch inference. The gap is less apparent at smaller input resolutions and can be obscured by apparent gains from FP16 quantization.</span>
+                </div>
               </div>
             </article>
           </div>
