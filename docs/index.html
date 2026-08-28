@@ -774,6 +774,11 @@
       color: var(--muted);
     }
 
+    .sunny-status {
+      color: #2563eb;
+      font-weight: 800;
+    }
+
     .deployment-stats {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1331,6 +1336,7 @@
       <p class="bottleneck-kicker">Deployment solution</p>
       <h2 id="deployment-solution-heading" class="deployment-heading">Backup Plan</h2>
       <p class="deployment-summary">A fixed-resolution <strong>800 × 960</strong> TensorRT engine that builds and runs within the available GPU memory.</p>
+      <p class="deployment-summary">Status: the TensorRT engine inference results have been delivered to <strong class="sunny-status">Sunny</strong> and are awaiting validation and evaluation.</p>
       <div class="deployment-stats">
         <article class="deployment-stat">
           <span>Mean inference</span>
