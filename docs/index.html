@@ -758,11 +758,74 @@
       font-size: 0.9em;
     }
 
+    .bottleneck-card { overflow: hidden; }
+
+    .bottleneck-kicker {
+      margin: 0 0 8px;
+      color: #b45309;
+      font-size: 0.74rem;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .bottleneck-heading {
+      margin-bottom: 7px;
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      letter-spacing: -0.05em;
+    }
+
+    .bottleneck-question {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 1.02rem;
+    }
+
+    .bottleneck-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .bottleneck-stage {
+      display: block;
+      min-height: 150px;
+      padding: 17px;
+      border: 1px solid;
+      border-left-width: 5px;
+      border-radius: 13px;
+      color: var(--ink);
+      text-decoration: none;
+      transition: transform 160ms ease, box-shadow 160ms ease;
+    }
+
+    .bottleneck-stage:hover,
+    .bottleneck-stage:focus-visible {
+      box-shadow: 0 10px 22px rgb(15 23 42 / 13%);
+      transform: translateY(-3px);
+    }
+
+    .bottleneck-stage:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
+    .bottleneck-stage h3 { margin: 15px 0 6px; font-size: 1rem; }
+    .bottleneck-stage p { margin: 0; color: var(--muted); font-size: 0.84rem; line-height: 1.42; }
+
+    .bottleneck-number {
+      font-size: 0.73rem;
+      font-weight: 850;
+      letter-spacing: 0.1em;
+    }
+
+    .bottleneck-feature { border-color: #60a5fa; background: rgb(37 99 235 / 0.17); }
+    .bottleneck-cost { border-color: #c084fc; background: rgb(147 51 234 / 0.17); }
+    .bottleneck-gru { border-color: #fb923c; background: rgb(234 88 12 / 0.17); }
+    .bottleneck-upsample { border-color: #4ade80; background: rgb(22 163 74 / 0.17); }
+
     @media (max-width: 600px) {
       main { width: min(100% - 28px, 960px); padding-top: 36px; }
       .card { padding: 21px; }
       th, td { padding: 12px; }
       .progress-grid { grid-template-columns: 1fr; }
+      .bottleneck-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .preprocessing-layout {
         grid-template-columns: 1fr;
         gap: 20px;
@@ -1186,6 +1249,34 @@
       </div>
     </section>
 
+
+    <section class="card bottleneck-card" aria-labelledby="bottleneck-heading">
+      <p class="bottleneck-kicker">Four suspects</p>
+      <h2 id="bottleneck-heading" class="bottleneck-heading">The Real Culprit?</h2>
+      <p class="bottleneck-question">Feature encode, AHCF, GRU iterations, or disparity upsampling?</p>
+      <div class="bottleneck-grid">
+        <a class="bottleneck-stage bottleneck-feature" href="#forward-feature">
+          <span class="bottleneck-number">01</span>
+          <h3>Feature Encode</h3>
+          <p>STA / DINO encoder</p>
+        </a>
+        <a class="bottleneck-stage bottleneck-cost" href="#forward-cost">
+          <span class="bottleneck-number">02</span>
+          <h3>AHCF</h3>
+          <p>Cost volume + aggregation</p>
+        </a>
+        <a class="bottleneck-stage bottleneck-gru" href="#forward-gru">
+          <span class="bottleneck-number">03</span>
+          <h3>GRU Iterations</h3>
+          <p>Context + disparity refinement</p>
+        </a>
+        <a class="bottleneck-stage bottleneck-upsample" href="#forward-upsample">
+          <span class="bottleneck-number">04</span>
+          <h3>Upsampling</h3>
+          <p>Learned disparity output</p>
+        </a>
+      </div>
+    </section>
 
   </main>
 </body>
