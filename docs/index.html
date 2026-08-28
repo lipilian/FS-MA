@@ -292,9 +292,28 @@
       background: #fef2f2;
     }
 
+    .pipeline-step.archived {
+      border-color: #d0d5dd;
+      background: #f8fafc;
+    }
+
     .pipeline-step.validation-path {
       border-color: #a6f4c5;
       background: #f1fcf5;
+    }
+
+    .ngc-model-overview {
+      margin: 14px 0 18px;
+      overflow: hidden;
+      border: 1px solid #a6f4c5;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .ngc-model-overview img {
+      display: block;
+      width: 100%;
+      height: auto;
     }
 
     .ngc-comparison-layout {
@@ -316,6 +335,101 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
     }
+
+    .forward-visualization {
+      margin-top: 18px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 8px 18px rgb(16 24 40 / 0.06);
+    }
+
+    .forward-visualization h3 {
+      margin: 0;
+      color: var(--ink);
+      font-size: 1rem;
+    }
+
+    .forward-visualization > p {
+      margin: 7px 0 14px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .forward-code {
+      margin: 0;
+      color: #24292f;
+      font: 0.78rem/1.58 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .py-keyword, .py-literal { color: #8250df; }
+    .py-function { color: #0550ae; }
+    .py-self, .py-call { color: #0969da; }
+    .py-string { color: #0a7b2e; }
+    .py-number { color: #953800; }
+
+    .forward-inline-stage {
+      position: relative;
+      display: inline;
+      padding: 2px 4px;
+      border: 1px solid #4ade80;
+      border-radius: 4px;
+      background: rgb(22 163 74 / 0.17);
+      cursor: help;
+    }
+
+    .forward-stage {
+      position: relative;
+      display: block;
+      margin: 7px 0;
+      padding: 8px 10px;
+      border: 1px solid;
+      border-left-width: 4px;
+      border-radius: 8px;
+      cursor: help;
+    }
+
+    .forward-stage::after,
+    .forward-inline-stage::after {
+      position: absolute;
+      z-index: 2;
+      top: -34px;
+      left: 10px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: #0f172a;
+      box-shadow: 0 4px 12px rgb(15 23 42 / 0.32);
+      color: #fff;
+      content: attr(data-stage-name);
+      font: 700 0.72rem/1.2 Inter, system-ui, sans-serif;
+      letter-spacing: 0.01em;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 140ms ease, transform 140ms ease;
+    }
+
+    .forward-stage:hover::after,
+    .forward-stage:focus-visible::after,
+    .forward-inline-stage:hover::after,
+    .forward-inline-stage:focus-visible::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .forward-stage:focus-visible,
+    .forward-inline-stage:focus-visible {
+      outline: 3px solid #1d4ed8;
+      outline-offset: 2px;
+    }
+
+    .forward-feature { border-color: #60a5fa; background: rgb(37 99 235 / 0.17); }
+    .forward-cost { border-color: #c084fc; background: rgb(147 51 234 / 0.17); }
+    .forward-gru { border-color: #fb923c; background: rgb(234 88 12 / 0.17); }
+    .forward-upsample { border-color: #4ade80; background: rgb(22 163 74 / 0.17); }
 
     .pipeline-step.pytorch-baseline {
       border-color: #bfdbfe;
@@ -389,6 +503,7 @@
     .complete .step-state { color: #067647; }
     .next .step-state { color: #b54708; }
     .blocked .step-state { color: #b42318; }
+    .archived .step-state { color: #475467; }
     .validation-path .step-state { color: #067647; }
     .pytorch-baseline .step-state { color: #175cd3; }
     .tensorrt-comparison .step-state { color: #c11574; }
@@ -769,9 +884,9 @@
       </div>
       <div class="preprocessing-content">
         <div class="pipeline-flow">
-          <article class="pipeline-step blocked">
-            <span class="step-state">BLOCKED</span>
-            <h3>Original FoundationStereo TensorRT Container</h3>
+          <article class="pipeline-step archived">
+            <span class="step-state">ARCHIVED</span>
+            <h3><s>Archived · Original FoundationStereo TensorRT Container</s></h3>
             <p>The original ONNX/TensorRT container workflow cannot be validated on the current Blackwell workstation.</p>
             <div class="engine-interface">
               <p><strong>Observed:</strong> the workstation GPU is NVIDIA RTX PRO 4000 Blackwell (<code>sm_120</code>). The container's PyTorch <code>2.4.1+cu124</code> reports support only through <code>sm_90</code> and fails before ONNX export with <code>CUDA error: no kernel image is available for execution on the device</code>.</p>
@@ -792,15 +907,86 @@
           <article class="pipeline-step validation-path">
             <span class="step-state">NGC VALIDATION MODEL</span>
             <h3>FoundationStereo Deployable Model · NGC</h3>
+            <figure class="ngc-model-overview">
+              <img src="assets/FS_model_overview.jpg" alt="FoundationStereo architecture overview: feature extraction, AHCF cost filtering, and iterative ConvGRU disparity refinement">
+            </figure>
             <p>Use NVIDIA's deployable FoundationStereo model as the alternative validation path instead of exporting ONNX with the unsupported legacy PyTorch container.</p>
             <div class="engine-interface">
               <p><strong>Download:</strong> <code>ngc registry model download-version nvidia/tao/foundationstereo:deployable_v2.0 --dest onnx</code></p>
               <p><strong>Build fixed-shape engine:</strong> <code>trtexec --onnx=onnx/deployable_foundationstereo_small_576x960_v2.0.onnx --saveEngine=onnx/foundationstereo_576x960.engine</code></p>
             </div>
+            <section class="forward-visualization" aria-labelledby="forward-stage-map-heading">
+              <h3 id="forward-stage-map-heading">FoundationStereo.forward · Paper-aligned stage map</h3>
+              <p>Four profiling stages are mapped to the paper architecture. Hover or focus a colored block to reveal its stage name.</p>
+              <pre class="forward-code"><code><span class="py-keyword">def</span> <span class="py-function">forward</span>(<span class="py-self">self</span>, image1, image2, iters=<span class="py-number">12</span>, flow_init=<span class="py-literal">None</span>, test_mode=<span class="py-literal">False</span>, low_memory=<span class="py-literal">False</span>, init_disp=<span class="py-literal">None</span>):
+    B = <span class="py-call">len</span>(image1)
+    low_memory = low_memory or <span class="py-self">self</span>.args.get(<span class="py-string">"low_memory"</span>, <span class="py-literal">False</span>)
+    image1 = <span class="py-call">normalize_image</span>(image1)
+    image2 = <span class="py-call">normalize_image</span>(image2)
+<span class="forward-stage forward-feature" tabindex="0" data-stage-name="STA / Hybrid Feature Encoder">    <span class="py-keyword">with</span> <span class="py-call">torch.amp.autocast</span>(<span class="py-string">"cuda"</span>, enabled=<span class="py-self">self</span>.args.mixed_precision):
+        out, vit_feat = <span class="py-self">self</span>.feature(torch.cat([image1, image2], dim=<span class="py-number">0</span>))
+        vit_feat = vit_feat[:B]
+        features_left = [o[:B] <span class="py-keyword">for</span> o <span class="py-keyword">in</span> out]
+        features_right = [o[B:] <span class="py-keyword">for</span> o <span class="py-keyword">in</span> out]</span>
+        <span class="forward-inline-stage" tabindex="0" data-stage-name="Learned disparity upsampling · feature preparation">stem_2x = <span class="py-self">self</span>.stem_2(image1)</span>
+<span class="forward-stage forward-cost" tabindex="0" data-stage-name="AHCF / Cost-volume filtering + initial disparity">        gwc_volume = <span class="py-call">build_gwc_volume</span>(features_left[<span class="py-number">0</span>], features_right[<span class="py-number">0</span>], <span class="py-self">self</span>.args.max_disp//<span class="py-number">4</span>, <span class="py-self">self</span>.cv_group)
+        left_tmp = <span class="py-self">self</span>.proj_cmb(features_left[<span class="py-number">0</span>])
+        right_tmp = <span class="py-self">self</span>.proj_cmb(features_right[<span class="py-number">0</span>])
+        concat_volume = <span class="py-call">build_concat_volume</span>(left_tmp, right_tmp, maxdisp=<span class="py-self">self</span>.args.max_disp//<span class="py-number">4</span>)
+        <span class="py-keyword">del</span> left_tmp, right_tmp
+        comb_volume = torch.cat([gwc_volume, concat_volume], dim=<span class="py-number">1</span>)
+        comb_volume = <span class="py-self">self</span>.corr_stem(comb_volume)
+        comb_volume = <span class="py-self">self</span>.corr_feature_att(comb_volume, features_left[<span class="py-number">0</span>])
+        comb_volume = <span class="py-self">self</span>.cost_agg(comb_volume, features_left)
+        prob = F.softmax(<span class="py-self">self</span>.classifier(comb_volume).squeeze(<span class="py-number">1</span>), dim=<span class="py-number">1</span>)
+        <span class="py-keyword">if</span> init_disp <span class="py-keyword">is</span> <span class="py-literal">None</span>:
+            init_disp = <span class="py-call">disparity_regression</span>(prob, <span class="py-self">self</span>.args.max_disp//<span class="py-number">4</span>)</span>
+<span class="forward-stage forward-gru" tabindex="0" data-stage-name="Context + iterative GRU refinement">        cnet_list = <span class="py-call">list</span>(
+            <span class="py-self">self</span>.cnet(
+                image1,
+                vit_feat=vit_feat,
+                num_layers=<span class="py-self">self</span>.args.n_gru_layers,
+            )
+        )
+        net_list = [torch.tanh(x[<span class="py-number">0</span>]) <span class="py-keyword">for</span> x <span class="py-keyword">in</span> cnet_list]
+        inp_list = [torch.relu(x[<span class="py-number">1</span>]) <span class="py-keyword">for</span> x <span class="py-keyword">in</span> cnet_list]
+        inp_list = [<span class="py-self">self</span>.cam(x) * x <span class="py-keyword">for</span> x <span class="py-keyword">in</span> inp_list]
+        att = [<span class="py-self">self</span>.sam(x) <span class="py-keyword">for</span> x <span class="py-keyword">in</span> inp_list]
+    geo_fn = <span class="py-call">Combined_Geo_Encoding_Volume</span>(
+        features_left[<span class="py-number">0</span>].float(),
+        features_right[<span class="py-number">0</span>].float(),
+        comb_volume.float(),
+        num_levels=<span class="py-self">self</span>.args.corr_levels,
+        dx=<span class="py-self">self</span>.dx,
+    )
+    b, c, h, w = features_left[<span class="py-number">0</span>].shape
+    coords = torch.arange(
+        w, dtype=torch.float, device=init_disp.device
+    ).reshape(
+        <span class="py-number">1</span>, <span class="py-number">1</span>, w, <span class="py-number">1</span>
+    ).repeat(b, h, <span class="py-number">1</span>, <span class="py-number">1</span>)
+    disp = init_disp.float()
+    disp_preds = []
+    <span class="py-keyword">for</span> itr <span class="py-keyword">in</span> <span class="py-call">range</span>(iters):
+        disp = disp.detach()
+        geo_feat = geo_fn(disp, coords, low_memory=low_memory)
+        <span class="py-keyword">with</span> <span class="py-call">torch.amp.autocast</span>(<span class="py-string">"cuda"</span>, enabled=<span class="py-self">self</span>.args.mixed_precision):
+            net_list, mask_feat_4, delta_disp = <span class="py-self">self</span>.update_block(
+                net_list, inp_list, geo_feat, disp, att
+            )
+        disp = disp + delta_disp.float()</span>
+<span class="forward-stage forward-upsample" tabindex="0" data-stage-name="Learned disparity upsampling / output head">        <span class="py-keyword">if</span> test_mode and itr &lt; iters - <span class="py-number">1</span>:
+            <span class="py-keyword">continue</span>
+        disp_up = <span class="py-self">self</span>.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
+        disp_preds.append(disp_up)</span>
+    <span class="py-keyword">if</span> test_mode:
+        <span class="py-keyword">return</span> disp_up
+    <span class="py-keyword">return</span> init_disp, disp_preds</code></pre>
+            </section>
           </article>
           <div class="ngc-comparison-grid">
             <article class="pipeline-step pytorch-baseline">
-              <span class="step-state">PYTORCH BASELINE</span>
+              <span class="step-state">PYTORCH</span>
               <h3>FoundationStereo ViT-L · PyTorch</h3>
               <div class="engine-interface">
                 <p><strong>Benchmark conditions:</strong> direct PyTorch inference, <code>vitl</code>, fixed <code>576 × 960</code> input, xFormers (potential), and no Hiera path.</p>
