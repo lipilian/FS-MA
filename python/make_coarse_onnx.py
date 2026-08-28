@@ -17,8 +17,7 @@ BATCH_SIZE = 1
 CHANNELS = 3
 HEIGHT = 1024
 WIDTH = 1248
-VALID_ITERS = 32
-OPSET_VERSION = 16
+VALID_ITERS = 12
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION_STEREO_ROOT = REPO_ROOT / "FoundationStereo"
@@ -156,7 +155,6 @@ def main() -> None:
         output_path,
         input_names=["left", "right"],
         output_names=["disp"],
-        opset_version=OPSET_VERSION,
         dynamo=False,
         external_data=True,
     )

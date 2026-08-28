@@ -758,6 +758,55 @@
       font-size: 0.9em;
     }
 
+    .deployment-solution {
+      border-color: #86efac;
+      background: linear-gradient(145deg, #f0fdf4, #ecfdf5);
+    }
+
+    .deployment-heading {
+      margin-bottom: 7px;
+      font-size: clamp(1.8rem, 4vw, 2.7rem);
+      letter-spacing: -0.045em;
+    }
+
+    .deployment-summary {
+      margin: 0 0 20px;
+      color: var(--muted);
+    }
+
+    .deployment-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .deployment-stat {
+      padding: 17px;
+      border: 1px solid #bbf7d0;
+      border-radius: 13px;
+      background: rgb(255 255 255 / 78%);
+    }
+
+    .deployment-stat span {
+      display: block;
+      color: #166534;
+      font-size: 0.8rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .deployment-stat strong {
+      display: block;
+      margin-top: 6px;
+      color: #14532d;
+      font-size: 2.2rem;
+      letter-spacing: -0.05em;
+      line-height: 1;
+    }
+
+    .deployment-stat small { font-size: 0.95rem; letter-spacing: 0; }
+
     .bottleneck-card { overflow: hidden; }
 
     .bottleneck-kicker {
@@ -1275,6 +1324,22 @@
           <h3>Upsampling</h3>
           <p>Learned disparity output</p>
         </a>
+      </div>
+    </section>
+
+    <section class="card deployment-solution" aria-labelledby="deployment-solution-heading">
+      <p class="bottleneck-kicker">Deployment solution</p>
+      <h2 id="deployment-solution-heading" class="deployment-heading">Backup Plan</h2>
+      <p class="deployment-summary">A fixed-resolution <strong>800 × 960</strong> TensorRT engine that builds and runs within the available GPU memory.</p>
+      <div class="deployment-stats">
+        <article class="deployment-stat">
+          <span>Mean inference</span>
+          <strong>578 <small>ms</small></strong>
+        </article>
+        <article class="deployment-stat">
+          <span>Peak GPU memory</span>
+          <strong>4,374 <small>MiB</small></strong>
+        </article>
       </div>
     </section>
 
