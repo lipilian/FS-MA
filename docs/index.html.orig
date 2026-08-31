@@ -1477,13 +1477,13 @@
             <tr><th scope="col">Profile stage / runtime metric</th><th scope="col">576 × 960 · deployable ViT-S</th><th scope="col">800 × 960 · local ViT-L</th><th scope="col">Comparison</th></tr>
           </thead>
           <tbody>
-            <tr><th scope="row">1. Feature / DINO</th><td>85.5 ms</td><td>174.2 ms</td><td>ViT-S is 88.7 ms faster</td></tr>
-            <tr><th scope="row">2. AHCF / cost volume</th><td><strong>530.7 ms</strong></td><td><strong>39.8 ms</strong></td><td>576 is 491 ms slower</td></tr>
+            <tr><th scope="row">1. Feature / DINO</th><td>85.5 ms</td><td>174.2 ms</td><td>Normal, large ViT requires more time</td></tr>
+            <tr><th scope="row">2. AHCF / cost volume</th><td><strong style="display: inline-block; padding: 0.18em 0.45em; border: 2px solid #dc2626; border-radius: 6px; color: #b91c1c; background: #fef2f2; line-height: 1.1;">530.7 ms</strong></td><td><strong>39.8 ms</strong></td><td>576 is 491 ms slower</td></tr>
             <tr><th scope="row">3. Context + GRU</th><td>382.8 ms</td><td>343.7 ms</td><td>576 is 39 ms slower</td></tr>
             <tr><th scope="row">4. Upsampling</th><td>1.62 ms</td><td>0.82 ms</td><td>Minimal impact</td></tr>
             <tr><th scope="row">Profile layer total</th><td>1,033.2 ms</td><td>588.3 ms</td><td>Consistent with 1,020.61 / 578 ms end-to-end inference</td></tr>
-          </tbody>
             <tr><th scope="row">Total GPU memory required</th><td>15,024 MiB</td><td>4,374 MiB</td><td>576 requires 10,650 MiB more</td></tr>
+          </tbody>
         </table>
       </div>
       <p class="note">Memory result: total GPU memory required is <code>15,024 MiB</code> at 576 × 960 versus <code>4,374 MiB</code> at 800 × 960; TensorRT activation / max scratch is <code>14,293.65 MiB</code> versus <code>3,110.77 MiB</code>.</p>
@@ -1493,19 +1493,6 @@
         <span>The 576 × 960 deployable graph is dominated by AHCF/cost-volume work: it adds about 491 ms versus the local 800 × 960 graph. The ViT-S encoder saves about 89 ms, but that saving is overwhelmed before disparity refinement begins.</span>
       </div>
 
-      <h3>Evidence from layer analysis</h3>
-      <p>The 576 × 960 deployable graph creates a <code>[1, 28, 104, 144, 240]</code> FP32 cost volume. Its <code>D = 104</code> disparity axis implies approximately <code>max_disp = 416</code> under the model's <code>max_disp / 4</code> convention. The local 800 × 960 graph instead uses <code>[1, 28, 48, 200, 240]</code> FP16 with <code>max_disp = 192</code>.</p>
-      <p>The deployable graph explicitly materializes an FP32 attention score of <code>[34,560, 4, 104, 104]</code>. One such score tensor is about <code>5.57 GiB</code>, and there are four sequential disparity-attention blocks. Its quadratic <code>D²</code> term drives the activation peak.</p>
-      <p>Although 576 × 960 has fewer image pixels, its cost volume has <code>1.56×</code> more elements; combined with FP32 instead of FP16, it represents <code>3.12×</code> the byte volume. Profile layer outputs are FP32 for <code>99.49%</code> of measured 576 time, versus FP16 for <code>87.91%</code> of measured 800 time.</p>
-      <p>A same-graph control confirms normal scaling: the local ViT-L 576 × 960 build uses <code>2,228.92 MiB</code> activation memory versus <code>3,110.77 MiB</code> at 800 × 960, a <code>0.717×</code> ratio that closely matches the <code>0.720×</code> input-pixel ratio.</p>
-
-      <h3>Implications for a fair benchmark and deployment</h3>
-      <ol>
-        <li>Use the existing local <code>foundationstereo_576x960</code> engine as the resolution-only control against local <code>foundationstereo_800x960</code>.</li>
-        <li>For a model comparison, hold architecture, <code>max_disp</code>, exporter behavior, and AHCF precision constant. TensorRT alone does not make different ONNX graphs equivalent.</li>
-        <li>If deployable v2.0 is mandatory, target AHCF: validate an actual FP16 export, reduce <code>max_disp</code> when the scene range permits it, and avoid materializing full-resolution <code>D × D</code> attention scores with a downsampled or fused attention implementation.</li>
-      </ol>
-      <p class="note">Stage totals are grouped from TensorRT layer metadata. A few fused/generic layers cannot be assigned uniquely, but the AHCF and activation-memory gaps are much larger than that ambiguity. Lowering workspace or changing only TensorRT builder optimization level will not remove a real materialized attention activation.</p>
     </section>
 
 
@@ -1521,8 +1508,8 @@
         </a>
         <a class="bottleneck-stage bottleneck-cost" href="#forward-cost">
           <span class="bottleneck-number">02</span>
-          <h3>AHCF</h3>
-          <p>Cost volume + aggregation</p>
+          <h3>AHCF <span style="display: inline-block; color: #dc2626; font-size: 1.65em; font-weight: 900; line-height: 0.7; vertical-align: -0.12em;" aria-label="confirmed bottleneck">✓</span></h3>
+          <p>Cost volume + aggregation · confirmed bottleneck</p>
         </a>
         <a class="bottleneck-stage bottleneck-gru" href="#forward-gru">
           <span class="bottleneck-number">03</span>
@@ -1534,6 +1521,54 @@
           <h3>Upsampling</h3>
           <p>Learned disparity output</p>
         </a>
+      </div>
+      <div class="warning">
+        <strong>01 · AHCF</strong>
+        <span>The 576 × 960 version creates a <code>5.57 GiB</code> FP32 attention matrix. This explicitly materialized score dominates activation memory and confirms AHCF as the bottleneck.</span>
+      </div>
+
+      <div class="engine-interface">
+        <h3>Layer-info and activation summary</h3>
+        <pre><code>corr volume: [1, 28, 104, 144, 240] FP32
+attention score: [34,560, 4, 104, 104] FP32</code></pre>
+        <p><code>34,560 = 144 × 240</code>. One attention score occupies <code>144 × 240 × 4 heads × 104 × 104 × 4 bytes ≈ 5.57 GiB</code>.</p>
+        <p>There are four sequential attention blocks. TensorRT reuses part of the buffer, but the activation requirement remains substantially higher.</p>
+      </div>
+        <h3>The two AHCF implementations are not equivalent</h3>
+        <h4>1. Different disparity ranges</h4>
+        <p>The 576 cost-volume disparity dimension is <code>D = 104</code>; under FoundationStereo's <code>max_disp / 4</code> construction, this implies approximately:</p>
+        <pre><code>max_disp = 104 × 4 = 416
+800 local model: max_disp = 192
+D = 192 / 4 = 48</code></pre>
+        <p>See the <a href="https://github.com/smd-ai/FS_Engine/blob/main/FoundationStereo/core/foundation_stereo.py#L202" target="_blank" rel="noopener noreferrer"><code>max_disp / 4</code> cost-volume construction</a>.</p>
+        <pre><code>576 cost-volume elements / 800 cost-volume elements
+= 104 × 144 × 240 / (48 × 200 × 240)
+= 1.56</code></pre>
+        <p>After FP32 for 576 versus FP16 for 800, the byte-volume ratio is <code>1.56 × 2 = 3.12×</code>. Fewer image pixels cannot offset the larger disparity range.</p>
+        <h4>2. Full-resolution D × D attention in the deployable graph</h4>
+        <p>The NGC 576 graph computes an attention score over the full cost-volume disparity axis:</p>
+        <pre><code>[H/4 × W/4, heads, D, D]
+= [34,560, 4, 104, 104] FP32</code></pre>
+        <p>The <code>cost_vol_disp</code> attention alone consumes about <strong>257.9 ms</strong>.</p>
+        <ul>
+          <li><code>corr_stem</code>: <strong>160.2 ms</strong></li>
+          <li><code>classifier</code>: <strong>53.7 ms</strong></li>
+          <li>Other cost aggregation: <strong>56.5 ms</strong></li>
+        </ul>
+        <p>The local FoundationStereo implementation applies <a href="https://github.com/smd-ai/FS_Engine/blob/main/FoundationStereo/core/foundation_stereo.py#L80" target="_blank" rel="noopener noreferrer"><code>conv_patch(kernel=4, stride=4)</code></a> before attention. The corresponding 800 attention input is only <code>[3,000, 12, 28]</code> FP16, and its full pyramid-attention path uses about <strong>1.04 ms</strong>.</p>
+    </section>
+
+    <section class="card" aria-labelledby="attention-axis-heading">
+      <p class="bottleneck-kicker" style="color: #dc2626; font-weight: 900; letter-spacing: 0.12em;">BUG FOUND</p>
+      <h2 id="attention-axis-heading" style="color: #dc2626; font-size: clamp(2rem, 4vw, 3.4rem);">Attention-axis issue</h2>
+      <p>The local <code>FlashMultiheadAttention</code> reshapes Q/K/V as <code>[B, L, heads, head_dim]</code> and passes them directly to PyTorch <code>scaled_dot_product_attention</code> (SDPA). However, SDPA expects the head dimension before the sequence dimension: <code>[B, heads, L, head_dim]</code>.</p>
+      <p>As documented in <a href="https://github.com/NVlabs/FoundationStereo/issues/239" target="_blank" rel="noopener noreferrer">FoundationStereo Issue #239</a>, this likely originated when the implementation changed from <code>flash_attn_func</code> to PyTorch SDPA without changing tensor layout. Under the current layout, SDPA interprets <code>heads = 4</code> as the sequence length, computing <code>4 × 4</code> cross-head attention rather than the intended disparity-axis attention.</p>
+      <pre><code>current:  [B, D, heads, head_dim] → score [B, D, 4, 4]
+intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
+      <p>The required correction is to transpose Q/K/V with <code>.transpose(1, 2)</code> before SDPA and transpose the output back afterwards. The dimension convention is specified in the <a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html" target="_blank" rel="noopener noreferrer">PyTorch SDPA documentation</a>.</p>
+      <div class="warning">
+        <strong>Benchmark implication</strong>
+        <span>The 800 model's very low pyramid-attention time is not directly comparable to the deployable 576 graph's disparity attention. After correcting the axis, re-export TensorRT and validate accuracy, latency, and GPU memory before using it as a benchmark or deployment engine.</span>
       </div>
     </section>
 

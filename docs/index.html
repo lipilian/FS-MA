@@ -1558,6 +1558,16 @@ D = 192 / 4 = 48</code></pre>
         <p>The local FoundationStereo implementation applies <a href="https://github.com/smd-ai/FS_Engine/blob/main/FoundationStereo/core/foundation_stereo.py#L80" target="_blank" rel="noopener noreferrer"><code>conv_patch(kernel=4, stride=4)</code></a> before attention. The corresponding 800 attention input is only <code>[3,000, 12, 28]</code> FP16, and its full pyramid-attention path uses about <strong>1.04 ms</strong>.</p>
     </section>
 
+    <section class="card" aria-labelledby="attention-axis-heading">
+      <p class="bottleneck-kicker" style="color: #dc2626; font-weight: 900; letter-spacing: 0.12em;">BUG FOUND</p>
+      <h2 id="attention-axis-heading" style="color: #dc2626; font-size: clamp(2rem, 4vw, 3.4rem);">Attention-axis issue</h2>
+      <p>The local <code>FlashMultiheadAttention</code> reshapes Q/K/V as <code>[B, L, heads, head_dim]</code> and passes them directly to PyTorch <code>scaled_dot_product_attention</code> (SDPA). However, SDPA expects the head dimension before the sequence dimension: <code>[B, heads, L, head_dim]</code>.</p>
+      <p>As documented in <a href="https://github.com/NVlabs/FoundationStereo/issues/239" target="_blank" rel="noopener noreferrer">FoundationStereo Issue #239</a>, this likely originated when the implementation changed from <code>flash_attn_func</code> to PyTorch SDPA without changing tensor layout. Under the current layout, SDPA interprets <code>heads = 4</code> as the sequence length, computing <code>4 × 4</code> cross-head attention rather than the intended disparity-axis attention.</p>
+      <pre><code>current:  [B, D, heads, head_dim] → score [B, D, 4, 4]
+intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
+      <p>The required correction is to transpose Q/K/V with <code>.transpose(1, 2)</code> before SDPA and transpose the output back afterwards. The dimension convention is specified in the <a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html" target="_blank" rel="noopener noreferrer">PyTorch SDPA documentation</a>.</p>
+    </section>
+
     <section class="card deployment-solution" aria-labelledby="deployment-solution-heading">
       <p class="bottleneck-kicker">Deployment solution</p>
       <h2 id="deployment-solution-heading" class="deployment-heading">Backup Plan</h2>
