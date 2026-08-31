@@ -1566,6 +1566,23 @@ D = 192 / 4 = 48</code></pre>
       <pre><code>current:  [B, D, heads, head_dim] → score [B, D, 4, 4]
 intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
       <p>The required correction is to transpose Q/K/V with <code>.transpose(1, 2)</code> before SDPA and transpose the output back afterwards. The dimension convention is specified in the <a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html" target="_blank" rel="noopener noreferrer">PyTorch SDPA documentation</a>.</p>
+      <div class="engine-interface">
+        <h3>What the original paper specifies</h3>
+        <p>Section 3.2 calls this module the Disparity Transformer (DT), which performs <q>full self-attention over the disparity dimension</q>. The paper first applies <code>Conv 4×4×4</code> to the cost volume, then reshapes it into token sequences whose length is disparity, followed by four Transformer encoder blocks with FlashAttention. See the <a href="https://openaccess.thecvf.com/content/CVPR2025/html/Wen_FoundationStereo_Zero-Shot_Stereo_Matching_CVPR_2025_paper.html" target="_blank" rel="noopener noreferrer">FoundationStereo CVPR 2025 paper</a>.</p>
+        <pre><code>DT token layout in the paper: [(H / 16) × (W / 16), C, D / 16]&#10;max_disp = 192 → disparity-token length = 192 / 16 = 12</code></pre>
+        <div style="display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.65rem; margin: 1.25rem 0;">
+          <div style="flex: 1 1 9rem; padding: 0.9rem; border: 1px solid #94a3b8; border-radius: 10px; text-align: center; background: #f8fafc;"><strong>Full-resolution range</strong><br><code>max_disp = 192 px</code></div>
+          <div style="align-self: center; font-size: 1.4rem; color: #64748b;">→</div>
+          <div style="flex: 1 1 9rem; padding: 0.9rem; border: 1px solid #94a3b8; border-radius: 10px; text-align: center; background: #f8fafc;"><strong>Cost volume</strong><br><code>192 / 4 = 48 bins</code><br><small>1/4-resolution disparity</small></div>
+          <div style="align-self: center; font-size: 1.4rem; color: #64748b;">→</div>
+          <div style="flex: 1 1 10rem; padding: 0.9rem; border: 2px solid #16a34a; border-radius: 10px; text-align: center; background: #f0fdf4;"><strong>Conv <code>4×4×4</code></strong><br><code>stride = 4</code><br><small>downsample D by 4</small></div>
+          <div style="align-self: center; font-size: 1.4rem; color: #64748b;">→</div>
+          <div style="flex: 1 1 10rem; padding: 0.9rem; border: 2px solid #16a34a; border-radius: 10px; text-align: center; background: #f0fdf4;"><strong>Disparity Transformer</strong><br><code>48 / 4 = 12 tokens</code><br><small>≈ 16 original pixels / token</small></div>
+          <div style="align-self: center; font-size: 1.4rem; color: #64748b;">→</div>
+          <div style="flex: 1 1 11rem; padding: 0.9rem; border: 2px solid #dc2626; border-radius: 10px; text-align: center; background: #fef2f2;"><strong>Fixed attention score</strong><br><code>[3000, 4, 12, 12]</code><br><small>heads × D × D</small></div>
+        </div>
+        <p>Therefore, the fixed 800 engine score <code>[3000, 4, 12, 12]</code> has the intended head/sequence ordering. Its <code>D = 12</code> is the paper's downsampled disparity-token length, not a 12-pixel maximum disparity.</p>
+      </div>
     </section>
 
     <section class="card" aria-labelledby="bug-fixed-heading">
@@ -1592,6 +1609,57 @@ intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
       <pre><code>self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)</code></pre>
       <p><strong>After</strong></p>
       <pre><code>self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, stride=1, bias=bias, padding=padding)</code></pre>
+    </section>
+
+    <section class="card" aria-labelledby="cost-volume-plugin-heading" style="border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #ffffff, #fffbeb);">
+      <p class="bottleneck-kicker" style="color: #b45309; font-weight: 900; letter-spacing: 0.12em;">NEXT OPTIMIZATION · TODO</p>
+      <h2 id="cost-volume-plugin-heading" style="color: #92400e; font-size: clamp(1.8rem, 3.5vw, 3rem);">Cost Volume Fused Plugin</h2>
+      <p class="deployment-summary">Replace the exporter-unrolled cost-volume graph with a dedicated TensorRT plugin that constructs the group-wise correlation and concatenation volumes directly.</p>
+
+      <div class="warning">
+        <strong>Why this is the next target</strong>
+        <span>The attention-axis-fixed 800 × 960 profile contains a <code>24.79 ms</code> fused hotspot around cost-volume construction. Its layer metadata includes many repeated <code>Slice</code>, <code>Cast</code>, <code>ReduceL2</code>, <code>Reshape</code>, <code>Expand</code>, and concatenation operations generated from the per-disparity Python loops.</span>
+      </div>
+
+      <div class="engine-interface">
+        <h3>Current graph</h3>
+        <pre><code>max_disp = 192
+D = max_disp / 4 = 48 disparity bins
+
+for each disparity:
+  slice shifted left / right features
+  FP32 L2 normalization
+  group-wise multiply + reduction
+  write GWC and concatenation volumes
+
+combined output: [1, 28, 48, 200, 240]</code></pre>
+        <p>The ONNX exporter expands this loop into a large static subgraph. TensorRT fuses part of it, but still has to materialize or route many shifted tensors and mixed-precision intermediates.</p>
+      </div>
+
+      <h3>Planned fused-plugin scope</h3>
+      <ul class="checklist">
+        <li><span class="box" aria-hidden="true">✓</span><span>Define a fixed-shape plugin contract for the left/right feature maps and projected concatenation features.</span></li>
+        <li><span class="box" aria-hidden="true">✓</span><span>Fuse disparity shifting, invalid-region zero fill, group-wise L2 normalization, multiplication, and channel reduction.</span></li>
+        <li><span class="box" aria-hidden="true">✓</span><span>Write the final contiguous <code>[1, 28, 48, 200, 240]</code> cost volume directly instead of emitting 48 groups of Slice/Expand intermediates.</span></li>
+        <li><span class="box" aria-hidden="true">✓</span><span>Use FP16 input/output storage with FP32 accumulation where normalization and reduction require it.</span></li>
+        <li><span class="box" aria-hidden="true">✓</span><span>Replace the exported ONNX cost-volume subgraph with the custom TensorRT plugin and rebuild the fixed 800 × 960 engine.</span></li>
+      </ul>
+
+      <h3>Validation and acceptance</h3>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Metric</th><th scope="col">Current baseline</th><th scope="col">Plugin goal</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Cost-volume construction hotspot</th><td>24.79 ms</td><td>Reduce substantially</td></tr>
+            <tr><th scope="row">Full layer-profile total</th><td>579.49 ms</td><td>Re-profile after integration</td></tr>
+            <tr><th scope="row">TensorRT activation / max scratch</th><td>3,279,812,608 bytes</td><td>Measure intermediate-memory reduction</td></tr>
+            <tr><th scope="row">Numerical result</th><td>Existing fixed-engine output</td><td>Match cost volume and final disparity within an agreed tolerance</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">This plugin targets cost-volume construction only. The corrected AHCF disparity attention takes about <code>1.68 ms</code> and is not the primary optimization target in this engine.</p>
     </section>
 
     <section class="card deployment-solution" aria-labelledby="deployment-solution-heading">
