@@ -1477,13 +1477,13 @@
             <tr><th scope="col">Profile stage / runtime metric</th><th scope="col">576 × 960 · deployable ViT-S</th><th scope="col">800 × 960 · local ViT-L</th><th scope="col">Comparison</th></tr>
           </thead>
           <tbody>
-            <tr><th scope="row">1. Feature / DINO</th><td>85.5 ms</td><td>174.2 ms</td><td>Normal, large ViT requires more time</td></tr>
-            <tr><th scope="row">2. AHCF / cost volume</th><td><strong style="display: inline-block; padding: 0.18em 0.45em; border: 2px solid #dc2626; border-radius: 6px; color: #b91c1c; background: #fef2f2; line-height: 1.1;">530.7 ms</strong></td><td><strong>39.8 ms</strong></td><td>576 is 491 ms slower</td></tr>
+            <tr><th scope="row">1. Feature / DINO</th><td>85.5 ms</td><td>174.2 ms</td><td>ViT-S is 88.7 ms faster</td></tr>
+            <tr><th scope="row">2. AHCF / cost volume</th><td><strong>530.7 ms</strong></td><td><strong>39.8 ms</strong></td><td>576 is 491 ms slower</td></tr>
             <tr><th scope="row">3. Context + GRU</th><td>382.8 ms</td><td>343.7 ms</td><td>576 is 39 ms slower</td></tr>
             <tr><th scope="row">4. Upsampling</th><td>1.62 ms</td><td>0.82 ms</td><td>Minimal impact</td></tr>
             <tr><th scope="row">Profile layer total</th><td>1,033.2 ms</td><td>588.3 ms</td><td>Consistent with 1,020.61 / 578 ms end-to-end inference</td></tr>
-            <tr><th scope="row">Total GPU memory required</th><td>15,024 MiB</td><td>4,374 MiB</td><td>576 requires 10,650 MiB more</td></tr>
           </tbody>
+            <tr><th scope="row">Total GPU memory required</th><td>15,024 MiB</td><td>4,374 MiB</td><td>576 requires 10,650 MiB more</td></tr>
         </table>
       </div>
       <p class="note">Memory result: total GPU memory required is <code>15,024 MiB</code> at 576 × 960 versus <code>4,374 MiB</code> at 800 × 960; TensorRT activation / max scratch is <code>14,293.65 MiB</code> versus <code>3,110.77 MiB</code>.</p>
@@ -1521,8 +1521,8 @@
         </a>
         <a class="bottleneck-stage bottleneck-cost" href="#forward-cost">
           <span class="bottleneck-number">02</span>
-          <h3>AHCF <span style="display: inline-block; color: #dc2626; font-size: 1.65em; font-weight: 900; line-height: 0.7; vertical-align: -0.12em;" aria-label="confirmed bottleneck">✓</span></h3>
-          <p>Cost volume + aggregation · confirmed bottleneck</p>
+          <h3>AHCF</h3>
+          <p>Cost volume + aggregation</p>
         </a>
         <a class="bottleneck-stage bottleneck-gru" href="#forward-gru">
           <span class="bottleneck-number">03</span>
