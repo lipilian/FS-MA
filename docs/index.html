@@ -1568,6 +1568,32 @@ intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
       <p>The required correction is to transpose Q/K/V with <code>.transpose(1, 2)</code> before SDPA and transpose the output back afterwards. The dimension convention is specified in the <a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html" target="_blank" rel="noopener noreferrer">PyTorch SDPA documentation</a>.</p>
     </section>
 
+    <section class="card" aria-labelledby="bug-fixed-heading">
+      <p class="bottleneck-kicker" style="color: #16a34a; font-weight: 900; letter-spacing: 0.12em;">BUG FIXED</p>
+      <h2 id="bug-fixed-heading" style="color: #16a34a; font-size: clamp(2rem, 4vw, 3.4rem);">Fixes applied in <code>core/submodule.py</code></h2>
+      <p>All four corrections below are now present in the local source and are included when exporting the new attention-axis-fixed ONNX and TensorRT engine.</p>
+      <h3>1. Flash attention: heads / sequence dimensions swapped; mask ignored</h3>
+      <p><strong>Before</strong></p>
+      <pre><code>Q = Q.view(Q.size(0), Q.size(1), self.num_heads, self.head_dim)&#10;K = K.view(K.size(0), K.size(1), self.num_heads, self.head_dim)&#10;V = V.view(V.size(0), V.size(1), self.num_heads, self.head_dim)&#10;&#10;attn_output = F.scaled_dot_product_attention(Q, K, V)&#10;attn_output = attn_output.reshape(B, L, -1)</code></pre>
+      <p><strong>After</strong></p>
+      <pre><code>Q = Q.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)&#10;K = K.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)&#10;V = V.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)&#10;&#10;attn_output = F.scaled_dot_product_attention(Q, K, V, attn_mask=attn_mask)&#10;attn_output = attn_output.transpose(1, 2).reshape(B, L, -1)</code></pre>
+      <h3>2. Channel attention: <code>ratio</code> parameter was ignored</h3>
+      <p><strong>Before</strong></p>
+      <pre><code>self.fc = nn.Sequential(nn.Conv2d(in_planes, in_planes // 16, 1, bias=False),&#10;                        nn.ReLU(),&#10;                        nn.Conv2d(in_planes // 16, in_planes, 1, bias=False))</code></pre>
+      <p><strong>After</strong></p>
+      <pre><code>self.fc = nn.Sequential(nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),&#10;                        nn.ReLU(),&#10;                        nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False))</code></pre>
+      <h3>3. 2D ResNet basic block: second convolution applied stride twice</h3>
+      <p><strong>Before</strong></p>
+      <pre><code>self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv2d(planes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)</code></pre>
+      <p><strong>After</strong></p>
+      <pre><code>self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv2d(planes, planes, kernel_size=kernel_size, stride=1, bias=bias, padding=padding)</code></pre>
+      <h3>4. 3D ResNet basic block: second convolution applied stride twice</h3>
+      <p><strong>Before</strong></p>
+      <pre><code>self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)</code></pre>
+      <p><strong>After</strong></p>
+      <pre><code>self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, stride=1, bias=bias, padding=padding)</code></pre>
+    </section>
+
     <section class="card deployment-solution" aria-labelledby="deployment-solution-heading">
       <p class="bottleneck-kicker">Deployment solution</p>
       <h2 id="deployment-solution-heading" class="deployment-heading">Backup Plan</h2>
