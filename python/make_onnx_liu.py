@@ -3,7 +3,7 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION_STEREO_ROOT = REPO_ROOT / "FoundationStereo"
 WEIGHT_DIR = REPO_ROOT / "weight" / "23-51-11"
-OUTPUT_PATH = REPO_ROOT / "onnx" / "foundationstereo_800x960.onnx"
+OUTPUT_PATH = REPO_ROOT / "onnx" / "foundationstereo_576x960.onnx"
 sys.path.insert(0, str(FOUNDATION_STEREO_ROOT))
 
 from omegaconf import OmegaConf
@@ -21,7 +21,7 @@ class FoundationStereoOnnx(FoundationStereo):
         return disp
 cfg = OmegaConf.load(WEIGHT_DIR / "cfg.yaml")
 cfg['vit_size'] = 'vitl'
-cfg['height'] = 800
+cfg['height'] = 576
 cfg['width'] = 960
 cfg['valid_iters'] = 32
 model = FoundationStereoOnnx(cfg)

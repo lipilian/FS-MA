@@ -103,6 +103,76 @@
       text-decoration: none;
     }
 
+    .page-links {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      max-width: 690px;
+      margin: 24px 0 0;
+    }
+
+    .page-link {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 88px;
+      padding: 16px 18px;
+      border: 1px solid #b9ceff;
+      border-radius: 14px;
+      color: var(--ink);
+      background: linear-gradient(135deg, #ffffff, #edf4ff);
+      box-shadow: 0 5px 14px rgb(37 99 235 / 10%);
+      text-decoration: none;
+      transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+    }
+
+    .page-link:hover,
+    .page-link:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 12px 24px rgb(37 99 235 / 18%);
+      transform: translateY(-2px);
+    }
+
+    .page-link:focus-visible {
+      outline: 3px solid #1d4ed8;
+      outline-offset: 3px;
+    }
+
+    .page-link-title,
+    .page-link-description { display: block; }
+
+    .page-link-title {
+      color: #1849a9;
+      font-size: 1rem;
+      font-weight: 800;
+    }
+
+    .page-link-description {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+      line-height: 1.35;
+    }
+
+    .page-link-arrow {
+      display: grid;
+      flex: 0 0 34px;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--accent);
+      font-size: 1.25rem;
+      font-weight: 800;
+      transition: transform 160ms ease;
+    }
+
+    .page-link:hover .page-link-arrow,
+    .page-link:focus-visible .page-link-arrow { transform: translateX(3px); }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -880,6 +950,7 @@
       th, td { padding: 12px; }
       .progress-grid { grid-template-columns: 1fr; }
       .bottleneck-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .page-links { grid-template-columns: 1fr; }
       .preprocessing-layout {
         grid-template-columns: 1fr;
         gap: 20px;
@@ -900,9 +971,21 @@
   <main>
     <p class="eyebrow">Development Notes</p>
     <h1>FoundationStereo Performance Work</h1>
-    <nav class="meta" aria-label="Project pages">
-      <a class="tag" href="stereo_reconstruction_pipeline.html">Algorithm Overview</a>
-      <a class="tag" href="task.html">Task Tracking</a>
+    <nav class="page-links" aria-label="Project pages">
+      <a class="page-link" href="stereo_reconstruction_pipeline.html">
+        <span>
+          <span class="page-link-title">Algorithm Overview</span>
+          <span class="page-link-description">Explore the reconstruction pipeline</span>
+        </span>
+        <span class="page-link-arrow" aria-hidden="true">&#8594;</span>
+      </a>
+      <a class="page-link" href="task.html">
+        <span>
+          <span class="page-link-title">Task Tracking</span>
+          <span class="page-link-description">View progress and next steps</span>
+        </span>
+        <span class="page-link-arrow" aria-hidden="true">&#8594;</span>
+      </a>
     </nav>
     <p class="intro">
       A lightweight record of inference benchmarks, optimization decisions, and experiment outcomes.
@@ -1300,6 +1383,34 @@
             </article>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="vitl-resolution-test-heading">
+      <h2 id="vitl-resolution-test-heading">Vit-L 32 iters FS resolution test</h2>
+      <p class="note">Fixed-resolution TensorRT analysis builds for the ViT-L, 32-iteration FoundationStereo ONNX exports.</p>
+      <div class="ngc-comparison-grid">
+        <article class="pipeline-step validation-path">
+          <span class="step-state">576 × 960</span>
+          <h3>576 × 960 test</h3>
+          <details class="trtexec-command-details">
+            <summary><strong>Step 1 · Build analysis engine</strong></summary>
+            <pre><code>trtexec \
+  --onnx=onnx/foundationstereo_576x960.onnx \
+  --saveEngine=onnx/foundationstereo_576x960_analysis.engine \
+  --builderOptimizationLevel=3 \
+  --profilingVerbosity=detailed \
+  --exportLayerInfo=onnx/foundationstereo_576x960_analysis_layers.json \
+  --verbose \
+  --skipInference \
+  2&gt;&amp;1 | tee onnx/foundationstereo_576x960_build_verbose.log</code></pre>
+          </details>
+        </article>
+        <article class="pipeline-step tensorrt-comparison">
+          <span class="step-state">800 × 960</span>
+          <h3>800 × 960 test</h3>
+          <p>Build and profiling commands will be added here using the same settings as the 576 × 960 test.</p>
+        </article>
       </div>
     </section>
 
