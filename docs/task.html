@@ -585,7 +585,7 @@
                     <li>Analyze the cause and identify errors in AHCF/cost volume. (Completed)</li>
                     <li>Fix the error in Python and commit the fix to the official FS repo. (Completed)</li>
                     <li>Sunny validates the Python fix using the 800 × 960, 32-GRU-iteration version. (Completed)</li>
-                    <li>Rewrite a cost-volume fused plugin.</li>
+                    <li>Implement a GWC-only TensorRT plugin to replace <code>gwc_volume = build_gwc_volume(features_left[0], features_right[0], self.args.max_disp // 4, self.cv_group)</code>; keep the concat-volume path in TensorRT.</li>
                   </ol>
                 </span>
               </button>
@@ -801,7 +801,7 @@
           "Analyze the cause and identify errors in AHCF/cost volume. (Completed)",
           "Fix the error in Python and commit the fix to the official FS repo. (Completed)",
           "Sunny validates the Python fix using the 800 × 960, 32-GRU-iteration version. (Completed)",
-          "Rewrite a cost-volume fused plugin."
+          "Implement a GWC-only TensorRT plugin to replace gwc_volume = build_gwc_volume(features_left[0], features_right[0], self.args.max_disp // 4, self.cv_group); keep the concat-volume path in TensorRT."
         ]
       },
       "liu-cuda": {

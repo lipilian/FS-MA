@@ -597,6 +597,93 @@
       margin-top: 12px;
     }
 
+    .gwc-plugin-flow {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+      margin: 8px 0 14px;
+    }
+
+    .gwc-plugin-flow-node {
+      padding: 14px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: #f8fafc;
+    }
+
+    .gwc-plugin-flow-node h4 {
+      margin: 0 0 8px;
+      color: #334155;
+      font-size: 0.95rem;
+    }
+
+    .gwc-feature-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.28em;
+      padding: 0.1em 0.38em;
+      border: 1px solid #93c5fd;
+      border-radius: 5px;
+      color: #1d4ed8;
+      background: #eff6ff;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .gwc-feature-link:hover,
+    .gwc-feature-link:focus-visible {
+      border-color: #2563eb;
+      color: #1e40af;
+      background: #dbeafe;
+      text-decoration: underline;
+    }
+
+    .gwc-feature-link code { color: inherit; }
+
+    .gwc-feature-link-mark {
+      font-size: 0.82em;
+      line-height: 1;
+    }
+
+    .gwc-plugin-flow-node p {
+      margin: 0;
+      color: #475569;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    .gwc-plugin-flow-node pre {
+      margin: 10px 0;
+      font-size: 0.84rem;
+    }
+
+    .gwc-flow-code-link {
+      display: block;
+      padding: 0.18rem;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .gwc-flow-code-link:hover,
+    .gwc-flow-code-link:focus-visible {
+      border-color: #93c5fd;
+      background: #eff6ff;
+      text-decoration: underline;
+    }
+
+    .gwc-flow-code-link code { color: inherit; }
+
+    .gwc-plugin-flow-arrow {
+      display: grid;
+      place-items: center;
+      color: #b45309;
+      font-size: 1.6rem;
+      font-weight: 800;
+    }
+
     .trtexec-command-details {
       margin-top: 12px;
     }
@@ -1613,53 +1700,104 @@ intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
 
     <section class="card" aria-labelledby="cost-volume-plugin-heading" style="border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #ffffff, #fffbeb);">
       <p class="bottleneck-kicker" style="color: #b45309; font-weight: 900; letter-spacing: 0.12em;">NEXT OPTIMIZATION · TODO</p>
-      <h2 id="cost-volume-plugin-heading" style="color: #92400e; font-size: clamp(1.8rem, 3.5vw, 3rem);">Cost Volume Fused Plugin</h2>
-      <p class="deployment-summary">Replace the exporter-unrolled cost-volume graph with a dedicated TensorRT plugin that constructs the group-wise correlation and concatenation volumes directly.</p>
+      <h2 id="cost-volume-plugin-heading" style="color: #92400e; font-size: clamp(1.8rem, 3.5vw, 3rem);">GWC Volume TensorRT Plugin</h2>
+      <p class="deployment-summary">Replace exactly the Python <code>build_gwc_volume(...)</code> call with a dedicated TensorRT plugin. The projected concatenation volume and final channel concatenation remain native TensorRT operations.</p>
+      <p><a href="#forward-cost">View the earlier AHCF / cost-volume step</a></p>
+      <h3 id="gwc-python-operation">Python operation to replace</h3>
+      <pre><code>gwc_volume = build_gwc_volume(
+    features_left[0],
+    features_right[0],
+    self.args.max_disp // 4,
+    self.cv_group,
+)
 
-      <div class="warning">
-        <strong>Why this is the next target</strong>
-        <span>The attention-axis-fixed 800 × 960 profile contains a <code>24.79 ms</code> fused hotspot around cost-volume construction. Its layer metadata includes many repeated <code>Slice</code>, <code>Cast</code>, <code>ReduceL2</code>, <code>Reshape</code>, <code>Expand</code>, and concatenation operations generated from the per-disparity Python loops.</span>
-      </div>
+def build_gwc_volume(refimg_fea, targetimg_fea, maxdisp, num_groups, stride=1):
+    """
+    @refimg_fea: left image feature
+    @targetimg_fea: right image feature
+    """
+    B, C, H, W = refimg_fea.shape
+    volume = refimg_fea.new_zeros([B, num_groups, maxdisp, H, W])
+    for i in range(maxdisp):
+        if i &gt; 0:
+            volume[:, :, i, :, i:] = groupwise_correlation(refimg_fea[:, :, :, i:], targetimg_fea[:, :, :, :-i], num_groups)
+        else:
+            volume[:, :, i, :, :] = groupwise_correlation(refimg_fea, targetimg_fea, num_groups)
+    volume = volume.contiguous()
+    return volume
+
+def groupwise_correlation(fea1, fea2, num_groups):
+    B, C, H, W = fea1.shape
+    assert C % num_groups == 0, f"C:{C}, num_groups:{num_groups}"
+    channels_per_group = C // num_groups
+    fea1 = fea1.reshape(B, num_groups, channels_per_group, H, W)
+    fea2 = fea2.reshape(B, num_groups, channels_per_group, H, W)
+    with torch.cuda.amp.autocast(enabled=False):
+        cost = (F.normalize(fea1.float(), dim=2) * F.normalize(fea2.float(), dim=2)).sum(dim=2)  # Divide first for numerical stability
+    assert cost.shape == (B, num_groups, H, W)
+    return cost</code></pre>
 
       <div class="engine-interface">
-        <h3>Current graph</h3>
-        <pre><code>max_disp = 192
-D = max_disp / 4 = 48 disparity bins
-
-for each disparity:
-  slice shifted left / right features
-  FP32 L2 normalization
-  group-wise multiply + reduction
-  write GWC and concatenation volumes
-
-combined output: [1, 28, 48, 200, 240]</code></pre>
-        <p>The ONNX exporter expands this loop into a large static subgraph. TensorRT fuses part of it, but still has to materialize or route many shifted tensors and mixed-precision intermediates.</p>
+        <h3>GWC plugin input path</h3>
+        <div class="gwc-plugin-flow" aria-label="Feature encoder output to GWC TensorRT plugin flow">
+          <article class="gwc-plugin-flow-node">
+            <h4>1. Hybrid feature encoder</h4>
+            <p><a class="gwc-feature-link" href="#forward-feature" title="Click to view the feature-encoder stage"><code>self.feature</code><span class="gwc-feature-link-mark" aria-hidden="true">↗</span></a><code>(torch.cat([image1, image2], dim=0))</code> returns <code>([x4, x8, x16, x32], vit_feat)</code>.</p>
+          </article>
+          <span class="gwc-plugin-flow-arrow" aria-hidden="true">↓</span>
+          <article class="gwc-plugin-flow-node">
+            <h4>2. Select x4 and build the GWC volume</h4>
+            <p>Split its batch into <code>features_left[0]</code> and <code>features_right[0]</code>. With <code>B = 1</code> and an 800 × 960 input, <code>features_left[0]</code> has shape <code>[1, 224, 200, 240]</code>. The GWC calculation uses <code>max_disp = 192 // 4 = 48</code> disparity bins and <code>cv_group = 8</code>, and produces <code>gwc_volume</code>.</p>
+          </article>
+          <span class="gwc-plugin-flow-arrow" aria-hidden="true">↓</span>
+          <article class="gwc-plugin-flow-node">
+            <h4>3. Allocate the GWC volume</h4>
+            <pre><a class="gwc-flow-code-link" href="#gwc-python-operation" title="View the complete build_gwc_volume code above"><code>B, C, H, W = refimg_fea.shape
+volume = refimg_fea.new_zeros([B, num_groups, maxdisp, H, W])</code></a></pre>
+            <p>Here <code>B, C, H, W = 1, 224, 200, 240</code>. This creates the zero-filled output tensor <code>volume: [1, 8, 48, 200, 240]</code>; later disparity steps fill in its correlation values.</p>
+          </article>
+          <span class="gwc-plugin-flow-arrow" aria-hidden="true">↓</span>
+          <article class="gwc-plugin-flow-node">
+            <h4>4. Iterate over disparities</h4>
+            <pre><a class="gwc-flow-code-link" href="#gwc-python-operation" title="View the complete build_gwc_volume code above"><code>for i in range(maxdisp):</code></a></pre>
+            <p>Because <code>maxdisp = 48</code>, this loop runs 48 iterations: <code>i = 0</code> through <code>47</code>. Each iteration fills <code>volume[:, :, i, :, i:]</code>. As <code>i</code> increases, the written spatial columns move right: iteration <code>i</code> fills columns <code>i:W</code>, while columns <code>0:i</code> remain zero.</p>
+          </article>
+          <span class="gwc-plugin-flow-arrow" aria-hidden="true">↓</span>
+          <article class="gwc-plugin-flow-node">
+            <h4>5. Calculate group-wise correlation</h4>
+            <pre><a class="gwc-flow-code-link" href="#gwc-python-operation" title="View the complete build_gwc_volume code above"><code>groupwise_correlation(refimg_fea[:, :, :, i:],
+                      targetimg_fea[:, :, :, :-i], num_groups)</code></a></pre>
+            <p>For iteration <code>i &gt; 0</code>, both inputs have shape <code>[1, 224, 200, 240-i]</code>. Split 224 channels into <code>cv_group = 8</code> groups of 28 channels. For each group, normalize the left and right vectors, multiply them, and sum their 28 channels. At <code>i = 0</code>, each input normalizes <code>1 × 8 × 200 × 240 = 384,000</code> 28-dimensional vectors, or <code>10,752,000</code> elements; both inputs normalize <code>21,504,000</code> elements. The result has shape <code>[1, 8, 200, 240-i]</code> and is written into the current <code>volume[:, :, i, :, i:]</code> slice.</p>
+          </article>
+        </div>
       </div>
 
-      <h3>Planned fused-plugin scope</h3>
-      <ul class="checklist">
-        <li><span class="box" aria-hidden="true">✓</span><span>Define a fixed-shape plugin contract for the left/right feature maps and projected concatenation features.</span></li>
-        <li><span class="box" aria-hidden="true">✓</span><span>Fuse disparity shifting, invalid-region zero fill, group-wise L2 normalization, multiplication, and channel reduction.</span></li>
-        <li><span class="box" aria-hidden="true">✓</span><span>Write the final contiguous <code>[1, 28, 48, 200, 240]</code> cost volume directly instead of emitting 48 groups of Slice/Expand intermediates.</span></li>
-        <li><span class="box" aria-hidden="true">✓</span><span>Use FP16 input/output storage with FP32 accumulation where normalization and reduction require it.</span></li>
-        <li><span class="box" aria-hidden="true">✓</span><span>Replace the exported ONNX cost-volume subgraph with the custom TensorRT plugin and rebuild the fixed 800 × 960 engine.</span></li>
-      </ul>
+      <div class="engine-interface" aria-labelledby="gwc-plugin-writing-heading">
+        <h3 id="gwc-plugin-writing-heading">Plugin Implementation</h3>
+        <h4>1. Create the plugin files</h4>
+        <p>Create these four files first. They separate the TensorRT Plugin V3 interface from the CUDA implementation.</p>
+        <pre><code>cpp/include/GWCVolumePlugin.hpp
+cpp/include/GWCVolumeKernel.hpp
+cpp/src/GWCVolumePlugin.cpp
+cpp/src/GWCVolumeKernel.cu
 
-      <h3>Validation and acceptance</h3>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr><th scope="col">Metric</th><th scope="col">Current baseline</th><th scope="col">Plugin goal</th></tr>
-          </thead>
-          <tbody>
-            <tr><th scope="row">Cost-volume construction hotspot</th><td>24.79 ms</td><td>Reduce substantially</td></tr>
-            <tr><th scope="row">Full layer-profile total</th><td>579.49 ms</td><td>Re-profile after integration</td></tr>
-            <tr><th scope="row">TensorRT activation / max scratch</th><td>3,279,812,608 bytes</td><td>Measure intermediate-memory reduction</td></tr>
-            <tr><th scope="row">Numerical result</th><td>Existing fixed-engine output</td><td>Match cost volume and final disparity within an agreed tolerance</td></tr>
-          </tbody>
-        </table>
+GWCVolumeKernel.cu
+└── CUDA correlation computation
+
+GWCVolumeKernel.hpp
+└── CUDA kernel launcher declaration
+
+GWCVolumePlugin.cpp
+├── IPluginV3
+├── IPluginV3OneCore
+├── IPluginV3OneBuild
+├── IPluginV3OneRuntime
+└── IPluginCreatorV3One
+
+GWCVolumePlugin.hpp
+└── Plugin name, version, and registration entry point</code></pre>
       </div>
-      <p class="note">This plugin targets cost-volume construction only. The corrected AHCF disparity attention takes about <code>1.68 ms</code> and is not the primary optimization target in this engine.</p>
+
     </section>
 
     <section class="card deployment-solution" aria-labelledby="deployment-solution-heading">
