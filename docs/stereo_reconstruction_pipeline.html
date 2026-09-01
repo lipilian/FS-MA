@@ -181,7 +181,7 @@
   <main>
     <p class="eyebrow">System overview · From pixels to measurement</p>
     <h1>Stereo Reconstruction<br>Pipeline</h1>
-    <p class="intro">Synchronized stereo capture, calibration, disparity estimation, and high-resolution refinement—ending with a measurable 3D mesh generated from the target 2D mask.</p>
+    <p class="intro">Synchronized stereo capture, calibration, fixed-resolution disparity estimation, and geometry processing—ending with a measurable 3D mesh generated from the target 2D mask.</p>
 
     <div class="legend" aria-label="Legend">
       <span><i style="background:#2563eb"></i>Core reconstruction path</span>
@@ -222,22 +222,12 @@
 
         <article class="stage">
           <div class="card capture-card">
-            <p class="step-label">High-quality capture</p>
-            <h2>Store high-quality inputs and estimate initial disparity</h2>
-            <p>Preload the full-resolution images into GPU memory. In parallel, send the downsampled images to coarse FoundationStereo to generate the initial disparity.</p>
-            <div class="chips"><span class="chip orange">GPU MEMORY</span><span class="chip orange">1024 × 1232</span><span class="chip orange">COARSE · 32 ITERATIONS</span><span class="chip violet">OUTPUT · init_disp</span></div>
+            <p class="step-label">Single-model disparity inference</p>
+            <h2>Build and run one 800 × 960 FoundationStereo model</h2>
+            <p>Use one fixed-resolution FoundationStereo model with 32 iterations to produce an 800 × 960 disparity output.</p>
+            <div class="chips"><span class="chip orange">MODEL · 800 × 960</span><span class="chip orange">32 ITERATIONS</span><span class="chip violet">OUTPUT · 800 × 960 DISPARITY</span></div>
           </div>
           <div class="stage-number capture">3</div>
-        </article>
-
-        <article class="stage">
-          <div class="stage-number">4</div>
-          <div class="card">
-            <p class="step-label">High-resolution refinement</p>
-            <h2>Refine with FoundationStereo</h2>
-            <p>Send the full-resolution left/right images and <code>init_disp</code> to the refinement model to recover fine detail and improve depth boundaries.</p>
-            <div class="chips"><span class="chip">FULL RES · 2048 × 2464</span><span class="chip violet">init_disp</span><span class="chip">REFINE FS</span></div>
-          </div>
         </article>
 
         <article class="stage">
@@ -247,11 +237,11 @@
             <p>Filter invalid disparity, noise, and 3D outliers to obtain a smoother, more reliable object point cloud.</p>
             <div class="chips"><span class="chip">DISPARITY FILTER</span><span class="chip green">POINT CLOUD FILTER</span></div>
           </div>
-          <div class="stage-number">5</div>
+          <div class="stage-number">4</div>
         </article>
 
         <article class="stage">
-          <div class="stage-number final">6</div>
+          <div class="stage-number final">5</div>
           <div class="card final-card">
             <p class="step-label">Surface + Measurement</p>
             <h2>2D mask → Mesh → Area</h2>

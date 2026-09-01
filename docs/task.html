@@ -378,6 +378,9 @@
     .task-button:focus-visible .task-tooltip { display: block; }
 
     .liu { background: var(--liu); }
+    .coarse-build { background: #dc2626; }
+    .repo-debug { background: #f97316; }
+    .coarse-build .task-tooltip strong { color: #dc2626; }
     .liu.task-button {
       height: 42px;
       align-self: end;
@@ -559,7 +562,35 @@
             </div>
             <div class="track liu-track">
               <span class="task-duration" style="grid-column: 1 / 15">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 1 / 15" data-task="liu-cuda" aria-controls="task-details">
+              <button class="bar liu coarse-build task-button" type="button" style="grid-column: 1 / 15" data-task="liu-coarse-build" aria-controls="task-details">
+                <small>1024 × 1244 coarse engine build</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Myelin static operation fails for GRU iterations, so auto-tuning cannot start.</li>
+                    <li>Inference time is abnormally high—far higher than Python performance.</li>
+                    <li>GPU memory usage is abnormally high—far higher than Python performance.</li>
+                    <li>At resolutions above 1K, the static engine encounters a series of issues.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 15 / 43">4 weeks</span>
+              <button class="bar liu repo-debug task-button" type="button" style="grid-column: 15 / 43" data-task="liu-fs-repo-debug" aria-controls="task-details">
+                <small>FS official repo debugging</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Check whether the original FS repo hits the same error during ONNX build. (Completed)</li>
+                    <li>Validate the deployable model on NGC; similar errors persist. (Completed)</li>
+                    <li>Analyze the cause and identify errors in AHCF/cost volume. (Completed)</li>
+                    <li>Fix the error in Python and commit the fix to the official FS repo. (Completed)</li>
+                    <li>Sunny validates the Python fix using the 800 × 960, 32-GRU-iteration version. (Completed)</li>
+                    <li>Rewrite a cost-volume fused plugin.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 43 / 57">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 43 / 57" data-task="liu-cuda" aria-controls="task-details">
                 <small>CUDA pre-processing</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -567,51 +598,6 @@
                     <li>GPU memory holding for the second model.</li>
                     <li>Resolution padding for DINO dimension fitting.</li>
                     <li>CUDA-based preprocessing.</li>
-                  </ol>
-                </span>
-              </button>
-              <span class="task-duration" style="grid-column: 15 / 43">4 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 15 / 43" data-task="liu-coarse" aria-controls="task-details">
-                <small>Coarse TensorRT engine</small>
-                <span class="task-tooltip" role="tooltip">
-                  <strong>Task details</strong>
-                  <ol>
-                    <li>Build a static 1232 × 1024 coarse TensorRT FoundationStereo engine.</li>
-                    <li>Develop a group-wise correlation cost-volume Triton plugin for TensorRT.</li>
-                    <li>Compute runtime dynamic-memory size for reuse by the refine engine.</li>
-                    <li>Test TF32 operations for backbone operations.</li>
-                    <li>Profile and fine-tune inference efficiency.</li>
-                    <li>Fine-tune maximum-disparity search behavior.</li>
-                    <li>Dynamically allocate output-tensor space for memory reuse.</li>
-                    <li>Iteration-cycle design.</li>
-                  </ol>
-                </span>
-              </button>
-              <span class="task-duration" style="grid-column: 43 / 57">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 43 / 57" data-task="liu-transition" aria-controls="task-details">
-                <small>Coarse-to-refine model transition</small>
-                <span class="task-tooltip" role="tooltip">
-                  <strong>Task details</strong>
-                  <ol>
-                    <li>Coarse-output unpadding.</li>
-                    <li>Scale the 512 × 616 <code>init_disp</code> disparity tensor.</li>
-                    <li>Dynamic memory allocation for refine-model memory overwrite and reuse.</li>
-                    <li>Handle unwanted GWC intermediate data.</li>
-                    <li>Prepare the refine model’s three inputs: left, right, and <code>init_disp</code> tensors.</li>
-                  </ol>
-                </span>
-              </button>
-              <span class="task-duration" style="grid-column: 57 / 85">4 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 57 / 85" data-task="liu-refine" aria-controls="task-details">
-                <small>Refine TensorRT engine</small>
-                <span class="task-tooltip" role="tooltip">
-                  <strong>Task details</strong>
-                  <ol>
-                    <li>Static inference with padded 2464 × 2048 inputs.</li>
-                    <li>GWC Triton plugin for TensorRT operation.</li>
-                    <li>Reuse raw input tensors, <code>init_disp</code>, and coarse-engine runtime memory.</li>
-                    <li>Fine-tune maximum-disparity search behavior.</li>
-                    <li>Iteration-cycle design.</li>
                   </ol>
                 </span>
               </button>
@@ -796,6 +782,28 @@
     const taskList = document.querySelector("#task-list");
     const taskButtons = document.querySelectorAll(".task-button");
     const taskData = {
+      "liu-coarse-build": {
+        title: "Liu Hong — 1024 × 1244 coarse engine build",
+        duration: "Duration: 2 weeks",
+        items: [
+          "Myelin static operation fails for GRU iterations, so auto-tuning cannot start.",
+          "Inference time is abnormally high—far higher than Python performance.",
+          "GPU memory usage is abnormally high—far higher than Python performance.",
+          "At resolutions above 1K, the static engine encounters a series of issues."
+        ]
+      },
+      "liu-fs-repo-debug": {
+        title: "Liu Hong — FS official repo debugging",
+        duration: "Duration: 4 weeks",
+        items: [
+          "Check whether the original FS repo hits the same error during ONNX build. (Completed)",
+          "Validate the deployable model on NGC; similar errors persist. (Completed)",
+          "Analyze the cause and identify errors in AHCF/cost volume. (Completed)",
+          "Fix the error in Python and commit the fix to the official FS repo. (Completed)",
+          "Sunny validates the Python fix using the 800 × 960, 32-GRU-iteration version. (Completed)",
+          "Rewrite a cost-volume fused plugin."
+        ]
+      },
       "liu-cuda": {
         title: "Liu Hong — CUDA pre-processing",
         duration: "Duration: 2 weeks",
@@ -803,42 +811,6 @@
           "GPU memory holding for the second model.",
           "Resolution padding for DINO dimension fitting.",
           "CUDA-based preprocessing."
-        ]
-      },
-      "liu-coarse": {
-        title: "Liu Hong — Coarse TensorRT engine",
-        duration: "Duration: 6 weeks",
-        items: [
-          "Build a static 1232 × 1024 coarse TensorRT FoundationStereo engine.",
-          "Develop a group-wise correlation cost-volume Triton plugin for TensorRT.",
-          "Compute runtime dynamic-memory size for reuse by the refine engine.",
-          "Test TF32 operations for backbone operations.",
-          "Profile and fine-tune inference efficiency.",
-          "Fine-tune maximum-disparity search behavior.",
-          "Dynamically allocate output-tensor space for memory reuse.",
-          "Iteration-cycle design."
-        ]
-      },
-      "liu-transition": {
-        title: "Liu Hong — Coarse-to-refine model transition",
-        duration: "Duration: 2 weeks",
-        items: [
-          "Coarse-output unpadding.",
-          "Scale the 512 × 616 init_disp disparity tensor.",
-          "Dynamic memory allocation for refine-model memory overwrite and reuse.",
-          "Handle unwanted GWC intermediate data.",
-          "Prepare the refine model’s three inputs: left, right, and init_disp tensors."
-        ]
-      },
-      "liu-refine": {
-        title: "Liu Hong — Refine TensorRT engine",
-        duration: "Duration: 4 weeks",
-        items: [
-          "Static inference with padded 2464 × 2048 inputs.",
-          "GWC Triton plugin for TensorRT operation.",
-          "Reuse raw input tensors, init_disp, and coarse-engine runtime memory.",
-          "Fine-tune maximum-disparity search behavior.",
-          "Iteration-cycle design."
         ]
       },
       "liu-post": {
