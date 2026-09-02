@@ -6,9 +6,8 @@ namespace fs::trt {
 
 // Declares the CUDA launcher implemented in GWCVolumeKernel.cu.
 cudaError_t launchGwcVolumeKernel(
-    void const* left,
-    void const* right,
-    void* volume,
+    float const* left,
+    float const* right,
+    float* volume,
     cudaStream_t stream) noexcept;
-
 } // namespace fs::trt

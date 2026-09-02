@@ -99,9 +99,9 @@ __global__ void buildGWCVolumeKernel(
 } // namespace cuda
 
 cudaError_t launchGwcVolumeKernel(
-    void const* left,
-    void const* right,
-    void* volume,
+    float const* left,
+    float const* right,
+    float* volume,
     cudaStream_t stream) noexcept {
     // Fixed FoundationStereo ViT-L x4 feature interface for 800 x 960 input.
     constexpr int B = 1;
@@ -118,9 +118,9 @@ cudaError_t launchGwcVolumeKernel(
         B * groups * maxDisparity);
 
     cuda::buildGWCVolumeKernel<float, float><<<grid, block, 0, stream>>>(
-        static_cast<float const*>(left),
-        static_cast<float const*>(right),
-        static_cast<float*>(volume),
+        left,
+        right,
+        volume,
         B, C, H, W, maxDisparity, groups);
 
     return cudaGetLastError();
