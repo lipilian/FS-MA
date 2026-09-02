@@ -1860,6 +1860,17 @@ GWCVolumePlugin.hpp
           <p><strong>Speedup:</strong> <code>24.7 / 3.33 = 7.42×</code></p>
           <p><strong>Maximum absolute error vs. brute-force reference:</strong> <code>2.98023e-08</code></p>
         </div>
+        <h4>4. GWCVolumePlugin</h4>
+        <p>The plugin keeps the GWC volume inside TensorRT-managed GPU memory; it does not copy the result back to the CPU.</p>
+        <pre aria-label="GWCVolumePlugin TensorRT execution flow"><code>TensorRT engine
+  left  [1,224,200,240] FP32 ─┐
+                              ├─ GWCVolumePlugin::enqueue()
+  right [1,224,200,240] FP32 ─┘          │
+                                         └─ launchGwcVolumeKernel(...)
+                                                │
+                                                └─ CUDA kernel
+                                                   volume [1,8,48,200,240] FP32</code></pre>
+        <p>TensorRT provides all three GPU pointers. The kernel writes directly into the TensorRT-managed <code>volume</code> buffer, which subsequent layers consume without a copy.</p>
       </div>
 
     </section>

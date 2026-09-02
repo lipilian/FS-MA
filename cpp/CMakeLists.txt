@@ -15,6 +15,22 @@ endif()
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs imgproc calib3d)
 find_package(CUDAToolkit REQUIRED)
 
+# TensorRT is required only by the custom GWC Volume plugin.
+find_path(TENSORRT_INCLUDE_DIR
+    NAMES NvInfer.h
+    HINTS /usr /usr/local
+    PATH_SUFFIXES include include/x86_64-linux-gnu
+)
+find_library(TENSORRT_NVINFER_LIBRARY
+    NAMES nvinfer nvinfer.so.11
+    HINTS /usr /usr/local
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu
+)
+
+if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY)
+    message(FATAL_ERROR "TensorRT headers or nvinfer library not found")
+endif()
+
 add_executable(TSFS
     src/main.cpp
     src/FS.cpp
@@ -30,3 +46,29 @@ target_compile_options(TSFS PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
 
+# Standalone TensorRT Plugin V3 shared library. It is loaded by the engine
+# builder/runtime and is intentionally independent from the TSFS executable.
+add_library(GWCVolumePlugin SHARED
+    src/GWCVolumePlugin.cpp
+    src/GWCVolumeKernel.cu
+)
+
+set_target_properties(GWCVolumePlugin PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    OUTPUT_NAME "GWCVolumePlugin"
+)
+
+target_include_directories(GWCVolumePlugin PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${TENSORRT_INCLUDE_DIR}
+)
+
+target_link_libraries(GWCVolumePlugin PRIVATE
+    ${TENSORRT_NVINFER_LIBRARY}
+    CUDA::cudart
+)
+
+target_compile_options(GWCVolumePlugin PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+)
