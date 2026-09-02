@@ -1871,6 +1871,16 @@ GWCVolumePlugin.hpp
                                                 └─ CUDA kernel
                                                    volume [1,8,48,200,240] FP32</code></pre>
         <p>TensorRT provides all three GPU pointers. The kernel writes directly into the TensorRT-managed <code>volume</code> buffer, which subsequent layers consume without a copy.</p>
+        <h4>5. Test GWCVolumePlugin Integration</h4>
+        <p>A minimal plugin-only TensorRT engine validated the complete integration path:</p>
+        <pre><code>register plugin → create left/right inputs → add GWCVolume layer
+→ build engine → deserialize engine → enqueueV3 → validate volume</code></pre>
+        <div class="engine-interface">
+          <p><strong>Result:</strong> <code>PASS</code> — TensorRT built and deserialized the engine, then executed the Plugin V3 layer.</p>
+          <p><strong>Output:</strong> <code>volume [1, 8, 48, 200, 240]</code></p>
+          <p><strong>Mean <code>enqueueV3</code> latency:</strong> <code>3.1952 ms</code> (20 warm-up iterations, then 100 timed iterations)</p>
+          <p><strong>All-one input validation:</strong> valid correlation <code>(d=0, w=0) = 1</code>; invalid shifted position <code>(d=1, w=0) = 0</code>.</p>
+        </div>
       </div>
 
     </section>

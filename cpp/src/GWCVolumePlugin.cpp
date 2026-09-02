@@ -258,9 +258,10 @@ bool registerGwcVolumePlugin() noexcept {
             return registry->registerCreator(gCreator, kGwcVolumePluginNamespace);
         };
 
-        registered =
-            registerIn(getPluginRegistry()) ||
+        const bool runtimeRegistered = registerIn(getPluginRegistry());
+        const bool builderRegistered =
             registerIn(nvinfer1::getBuilderPluginRegistry(nvinfer1::EngineCapability::kSTANDARD));
+        registered = runtimeRegistered || builderRegistered;
     });
     return registered;
 }
