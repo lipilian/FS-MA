@@ -1881,6 +1881,16 @@ GWCVolumePlugin.hpp
           <p><strong>Mean <code>enqueueV3</code> latency:</strong> <code>3.1952 ms</code> (20 warm-up iterations, then 100 timed iterations)</p>
           <p><strong>All-one input validation:</strong> valid correlation <code>(d=0, w=0) = 1</code>; invalid shifted position <code>(d=1, w=0) = 0</code>.</p>
         </div>
+        <h4>6. Export Plugin-ready ONNX</h4>
+        <p>Ran <code>python/make_onnx_liu_gwc_plugin.py</code> in the <code>fs</code> Conda environment to export the fixed <code>800 × 960</code>, <code>32</code>-iteration FoundationStereo model.</p>
+        <p>The next graph transformation replaces the complete FoundationStereo GWC cost-volume subgraph with the custom plugin node:</p>
+        <pre><code>x4 left feature  ─┐
+                  ├─ GWCVolume  (domain/namespace: foundation_stereo)
+x4 right feature ─┘
+                  ↓
+volume [1,8,48,200,240]
+                  ↓
+original downstream TensorRT layers that consume volume</code></pre>
       </div>
 
     </section>
