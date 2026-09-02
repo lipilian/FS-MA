@@ -1848,6 +1848,10 @@ GWCVolumePlugin.hpp
           <figcaption style="margin-top: 8px; color: #667085; font-size: 0.86rem; line-height: 1.5;">Fixed FoundationStereo logical CUDA work volume: <code>W × H × (groups × maxDisparity) = 240 × 200 × 384</code>.</figcaption>
         </figure>
         <p class="note todo"><strong>Note:</strong> Dynamic shared memory is disabled during kernel execution: <code>0 bytes per block</code>. Each thread independently reads its feature vectors and accumulates one correlation value, so this first kernel has no cross-thread data to reuse; shared-memory staging and synchronization would add overhead.</p>
+        <div class="warning">
+          <strong aria-hidden="true">!</strong>
+          <span><code>max_disp = 192</code> limits this model’s disparity search range. In the current camera setup, objects closer than <strong>20 cm</strong> cannot be reconstructed reliably. Increasing the range requires changing <code>max_disp</code> before Python model construction, then re-exporting ONNX and rebuilding both the plugin engine and TensorRT engine.</span>
+        </div>
       </div>
 
     </section>
