@@ -1553,6 +1553,22 @@
     </section>
 
 
+    <section class="card deployment-solution" aria-labelledby="python-tensorrt-overview-heading">
+      <h2 id="python-tensorrt-overview-heading" class="deployment-heading">800 × 960 Python TensorRT Overview</h2>
+      <p class="deployment-summary">A fixed-resolution <strong>800 × 960</strong> TensorRT engine that builds and runs within the available GPU memory.</p>
+      <p class="deployment-summary">Status: the TensorRT engine inference results have been delivered to <strong class="sunny-status">Sunny</strong> and are awaiting validation and evaluation.</p>
+      <div class="deployment-stats">
+        <article class="deployment-stat">
+          <span>Mean inference</span>
+          <strong>578 <small>ms</small></strong>
+        </article>
+        <article class="deployment-stat">
+          <span>Peak GPU memory</span>
+          <strong>4,374 <small>MiB</small></strong>
+        </article>
+      </div>
+    </section>
+
     <section class="card" aria-labelledby="resolution-analysis-heading">
       <p class="bottleneck-kicker">Profile finding</p>
       <h2 id="resolution-analysis-heading">Why the smaller 576 × 960 engine is slower and uses more memory</h2>
@@ -1796,25 +1812,44 @@ GWCVolumePlugin.cpp
 
 GWCVolumePlugin.hpp
 └── Plugin name, version, and registration entry point</code></pre>
+
+        <h4>2. Design the GWC Volume CUDA Kernel</h4>
+        <figure style="margin: 14px 0 0; padding: 18px; border: 1px solid #cbd5e1; border-radius: 12px; background: #f8fafc;">
+          <svg viewBox="0 0 680 390" role="img" aria-labelledby="gwc-kernel-dimensions-title gwc-kernel-dimensions-description" style="display: block; width: 100%; height: auto;">
+            <title id="gwc-kernel-dimensions-title">GWC CUDA kernel logical work volume</title>
+            <desc id="gwc-kernel-dimensions-description">A three-dimensional cuboid with width 240, height 200, and depth 384, where depth equals 8 groups times 48 disparities.</desc>
+            <defs>
+              <marker id="gwc-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse">
+                <path d="M 0 0 L 8 4 L 0 8 z" fill="#2563eb"/>
+              </marker>
+            </defs>
+
+            <polygon points="122,94 444,94 444,292 122,292" fill="#dbeafe" stroke="#2563eb" stroke-width="3"/>
+            <polygon points="122,94 214,42 536,42 444,94" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+            <polygon points="444,94 536,42 536,240 444,292" fill="#bfdbfe" stroke="#2563eb" stroke-width="3"/>
+
+            <text x="283" y="184" text-anchor="middle" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="21" font-weight="800">CUDA kernel</text>
+            <text x="283" y="212" text-anchor="middle" fill="#475569" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="650">logical work volume</text>
+
+            <line x1="122" y1="337" x2="444" y2="337" stroke="#2563eb" stroke-width="2.5" marker-start="url(#gwc-arrow)" marker-end="url(#gwc-arrow)"/>
+            <line x1="122" y1="302" x2="122" y2="348" stroke="#2563eb" stroke-width="2"/>
+            <line x1="444" y1="302" x2="444" y2="348" stroke="#2563eb" stroke-width="2"/>
+            <text x="283" y="371" text-anchor="middle" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="800">W = 240</text>
+
+            <line x1="72" y1="94" x2="72" y2="292" stroke="#2563eb" stroke-width="2.5" marker-start="url(#gwc-arrow)" marker-end="url(#gwc-arrow)"/>
+            <line x1="84" y1="94" x2="110" y2="94" stroke="#2563eb" stroke-width="2"/>
+            <line x1="84" y1="292" x2="110" y2="292" stroke="#2563eb" stroke-width="2"/>
+            <text x="39" y="193" text-anchor="middle" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="800" transform="rotate(-90 39 193)">H = 200</text>
+
+            <line x1="461" y1="77" x2="553" y2="25" stroke="#2563eb" stroke-width="2.5" marker-start="url(#gwc-arrow)" marker-end="url(#gwc-arrow)"/>
+            <text x="430" y="126" fill="#1e3a8a" font-family="Inter, system-ui, sans-serif" font-size="18" font-weight="800">depth = 8 × 48 = 384</text>
+            <text x="430" y="149" fill="#475569" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="650">groups × disparities</text>
+          </svg>
+          <figcaption style="margin-top: 8px; color: #667085; font-size: 0.86rem; line-height: 1.5;">Fixed FoundationStereo logical CUDA work volume: <code>W × H × (groups × maxDisparity) = 240 × 200 × 384</code>.</figcaption>
+        </figure>
+        <p class="note todo"><strong>Note:</strong> Dynamic shared memory is disabled during kernel execution: <code>0 bytes per block</code>. Each thread independently reads its feature vectors and accumulates one correlation value, so this first kernel has no cross-thread data to reuse; shared-memory staging and synchronization would add overhead.</p>
       </div>
 
-    </section>
-
-    <section class="card deployment-solution" aria-labelledby="deployment-solution-heading">
-      <p class="bottleneck-kicker">Deployment solution</p>
-      <h2 id="deployment-solution-heading" class="deployment-heading">Backup Plan</h2>
-      <p class="deployment-summary">A fixed-resolution <strong>800 × 960</strong> TensorRT engine that builds and runs within the available GPU memory.</p>
-      <p class="deployment-summary">Status: the TensorRT engine inference results have been delivered to <strong class="sunny-status">Sunny</strong> and are awaiting validation and evaluation.</p>
-      <div class="deployment-stats">
-        <article class="deployment-stat">
-          <span>Mean inference</span>
-          <strong>578 <small>ms</small></strong>
-        </article>
-        <article class="deployment-stat">
-          <span>Peak GPU memory</span>
-          <strong>4,374 <small>MiB</small></strong>
-        </article>
-      </div>
     </section>
 
   </main>
