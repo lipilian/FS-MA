@@ -86,6 +86,123 @@
       line-height: 1.65;
     }
 
+    .table-of-contents {
+      margin: 0 0 32px;
+      padding: 18px 20px;
+      border: 1px solid #c8d8ff;
+      border-radius: 14px;
+      background: #f8fbff;
+    }
+
+    .table-of-contents h2 {
+      margin: 0 0 12px;
+      color: #1849a9;
+      font-size: 1rem;
+    }
+
+    .toc-links {
+      display: grid;
+      gap: 7px;
+    }
+
+    .toc-links a {
+      display: block;
+      padding: 9px 11px;
+      border: 1px solid #c8d8ff;
+      border-radius: 9px;
+      color: #1849a9;
+      background: #fff;
+      font-size: 0.84rem;
+      font-weight: 700;
+      line-height: 1.2;
+      text-decoration: none;
+      transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+    }
+
+    .toc-links a:hover,
+    .toc-links a:focus-visible {
+      border-color: var(--accent);
+      color: #fff;
+      background: var(--accent);
+    }
+
+    .toc-links a:focus-visible {
+      outline: 3px solid #93b4ff;
+      outline-offset: 2px;
+    }
+
+    .toc-group {
+      border: 1px solid #c8d8ff;
+      border-radius: 9px;
+      background: #fff;
+    }
+
+    .toc-group summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 11px;
+      cursor: pointer;
+      color: #1849a9;
+      font-size: 0.84rem;
+      font-weight: 800;
+      line-height: 1.35;
+      list-style: none;
+    }
+
+    .toc-group summary::-webkit-details-marker { display: none; }
+    .toc-group summary::after { content: '⌄'; font-size: 1.1rem; transition: transform 160ms ease; }
+    .toc-group[open] summary::after { transform: rotate(180deg); }
+
+    .toc-group summary:focus-visible {
+      outline: 3px solid #93b4ff;
+      outline-offset: 2px;
+    }
+
+    .toc-group .toc-links {
+      margin: 0 8px 8px;
+    }
+
+    .back-to-top,
+    .back-to-contents {
+      position: fixed;
+      right: 24px;
+      display: grid;
+      width: 46px;
+      height: 46px;
+      place-items: center;
+      z-index: 10;
+      border: 1px solid #1849a9;
+      border-radius: 50%;
+      color: #fff;
+      background: #1849a9;
+      box-shadow: 0 8px 20px rgb(24 73 169 / 28%);
+      font-size: 1.5rem;
+      font-weight: 800;
+      line-height: 1;
+      text-decoration: none;
+      transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+    }
+
+    .back-to-top { bottom: 24px; }
+    .back-to-contents { bottom: 80px; }
+
+    .back-to-top:hover,
+    .back-to-top:focus-visible,
+    .back-to-contents:hover,
+    .back-to-contents:focus-visible {
+      background: #123a83;
+      box-shadow: 0 12px 26px rgb(24 73 169 / 36%);
+      transform: translateY(-3px);
+    }
+
+    .back-to-top:focus-visible,
+    .back-to-contents:focus-visible {
+      outline: 3px solid #93b4ff;
+      outline-offset: 3px;
+    }
+
     .card {
       margin-top: 18px;
       padding: 28px;
@@ -201,6 +318,69 @@
 
     .page-link:hover .page-link-arrow,
     .page-link:focus-visible .page-link-arrow { transform: translateX(3px); }
+
+    .comparison-result-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+
+    .comparison-result-chart {
+      margin: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    .comparison-result-chart img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .comparison-result-chart figcaption {
+      padding: 11px 13px;
+      color: #475467;
+      font-size: 0.9rem;
+      font-weight: 750;
+    }
+
+    .performance-improvement-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .performance-improvement-card {
+      padding: 20px;
+      border: 1px solid #86efac;
+      border-radius: 14px;
+      background: #f0fdf4;
+    }
+
+    .performance-improvement-card h3 {
+      margin: 0;
+      color: #166534;
+      font-size: 0.86rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .performance-improvement-values {
+      margin: 13px 0 8px;
+      color: #14532d;
+      font-size: clamp(1.4rem, 3vw, 2rem);
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+
+    .performance-improvement-card p {
+      margin: 0;
+      color: #166534;
+      font-size: 0.92rem;
+      font-weight: 700;
+    }
 
     table {
       width: 100%;
@@ -1067,6 +1247,7 @@
       .progress-grid { grid-template-columns: 1fr; }
       .bottleneck-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .page-links { grid-template-columns: 1fr; }
+      .performance-improvement-grid { grid-template-columns: 1fr; }
       .preprocessing-layout {
         grid-template-columns: 1fr;
         gap: 20px;
@@ -1083,7 +1264,7 @@
     }
   </style>
 </head>
-<body>
+<body id="top">
   <main>
     <p class="eyebrow">Development Notes</p>
     <h1>FoundationStereo Performance Work</h1>
@@ -1107,6 +1288,41 @@
     <p class="intro">
       A lightweight record of inference benchmarks, optimization decisions, and experiment outcomes.
     </p>
+    <nav id="contents" class="table-of-contents" aria-label="Table of contents">
+      <h2>Contents</h2>
+      <div class="toc-links">
+        <a href="#goal-heading">Goal</a>
+        <a href="#baseline-heading">PyTorch Performance</a>
+        <a href="#progress-heading">Environment Setup</a>
+        <a href="#pipeline-update-heading">Stereo Preprocessing</a>
+        <details class="toc-group">
+          <summary>Investigating Abnormally High TensorRT Memory Usage and Long Inference Time</summary>
+          <div class="toc-links">
+            <a href="#coarse-engine-heading"><s>Coarse Engine</s> · Deprecated</a>
+            <a href="#container-validation-heading"><s>Official Repo Dependency Test</s> · Deprecated</a>
+            <a href="#ngc-validation-heading">NGC Validation</a>
+            <a href="#vitl-resolution-test-heading">Vit-L Resolution Test</a>
+            <a href="#resolution-analysis-heading">Resolution Analysis</a>
+          </div>
+        </details>
+        <details class="toc-group">
+          <summary>Issue Investigation</summary>
+          <div class="toc-links">
+            <a href="#bottleneck-heading">Bottleneck Analysis</a>
+            <a href="#attention-axis-heading">Attention-axis Issue</a>
+          </div>
+        </details>
+        <details class="toc-group">
+          <summary>Implemented Fix</summary>
+          <div class="toc-links">
+            <a href="#bug-fixed-heading">PyTorch / Python Fix</a>
+            <a href="#cost-volume-plugin-heading">TensorRT Fix</a>
+            <a href="#post-fix-results-heading">Post-Fix Inference Results</a>
+            <a href="#performance-improvement-heading">Performance Improvement</a>
+          </div>
+        </details>
+      </div>
+    </nav>
 
     <section class="card goal" aria-labelledby="goal-heading">
       <h2 id="goal-heading">Goal</h2>
@@ -1284,7 +1500,7 @@
 
     <section class="card preprocessing-layout" aria-labelledby="coarse-engine-heading">
       <div class="preprocessing-title">
-        <h2 id="coarse-engine-heading">Coarse Engine</h2>
+        <h2 id="coarse-engine-heading"><s>Coarse Engine</s> · Deprecated</h2>
       </div>
       <div class="preprocessing-content">
         <div class="pipeline-flow">
@@ -1342,7 +1558,7 @@
     </section>
     <section class="card preprocessing-layout" aria-labelledby="container-validation-heading">
       <div class="preprocessing-title">
-        <h2 id="container-validation-heading">Validation Hypothesis</h2>
+        <h2 id="container-validation-heading"><s>Official Repo Dependency Test</s> · Deprecated</h2>
       </div>
       <div class="preprocessing-content">
         <div class="pipeline-flow">
@@ -1935,6 +2151,50 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
 
     </section>
 
+    <section class="card" aria-labelledby="post-fix-results-heading">
+      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">POST-FIX VALIDATION</p>
+      <h2 id="post-fix-results-heading">Post-Fix Inference Result Comparison</h2>
+      <p class="deployment-summary">Mesh areas after the applied PyTorch and TensorRT fixes. Each chart compares PyTorch <code>2048 × 2448</code>, TensorRT <code>800 × 960</code> attention-axis-fixed, and TensorRT <code>800 × 960</code> GWC Plugin V3 results across Tests 1–10. Bar labels are rounded <code>cm²</code> values.</p>
+      <div class="comparison-result-grid">
+        <figure class="comparison-result-chart">
+          <img src="assets/mesh_area_comparison_volunteer2_lower.png" alt="Grouped bar chart comparing three post-fix inference results for Volunteer2 lower, Tests 1 through 10">
+          <figcaption>Volunteer2 · Lower</figcaption>
+        </figure>
+        <figure class="comparison-result-chart">
+          <img src="assets/mesh_area_comparison_volunteer2_upper.png" alt="Grouped bar chart comparing three post-fix inference results for Volunteer2 upper, Tests 1 through 10">
+          <figcaption>Volunteer2 · Upper</figcaption>
+        </figure>
+        <figure class="comparison-result-chart">
+          <img src="assets/mesh_area_comparison_volunteer3_lower.png" alt="Grouped bar chart comparing three post-fix inference results for Volunteer3 lower, Tests 1 through 10">
+          <figcaption>Volunteer3 · Lower</figcaption>
+        </figure>
+        <figure class="comparison-result-chart">
+          <img src="assets/mesh_area_comparison_volunteer3_upper.png" alt="Grouped bar chart comparing three post-fix inference results for Volunteer3 upper, Tests 1 through 10">
+          <figcaption>Volunteer3 · Upper</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="performance-improvement-heading" style="border-left: 5px solid #16a34a; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
+      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">COMPLETED PERFORMANCE IMPROVEMENT</p>
+      <h2 id="performance-improvement-heading" style="color: #166534;">Post-Fix Inference Performance</h2>
+      <p class="deployment-summary">The current fixed-shape inference path substantially reduces both end-to-end inference time and peak GPU memory use.</p>
+      <div class="performance-improvement-grid">
+        <article class="performance-improvement-card">
+          <h3>Inference Time</h3>
+          <div class="performance-improvement-values">8.297 s → 514 ms</div>
+          <p>16.14× faster end-to-end inference.</p>
+        </article>
+        <article class="performance-improvement-card">
+          <h3>Peak GPU Memory</h3>
+          <div class="performance-improvement-values">15,786 MiB → 4,372 MiB</div>
+          <p>72.3% lower peak GPU memory use.</p>
+        </article>
+      </div>
+    </section>
+
   </main>
+  <a class="back-to-contents" href="#contents" aria-label="Back to contents" title="Back to contents">☰</a>
+  <a class="back-to-top" href="#top" aria-label="Back to top" title="Back to top">↑</a>
 </body>
 </html>
