@@ -382,6 +382,58 @@
       font-weight: 700;
     }
 
+    .engine-build-steps {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .engine-build-step {
+      padding: 18px;
+      border: 1px solid #c8d8ff;
+      border-radius: 14px;
+      background: #f8fbff;
+    }
+
+    .engine-build-step h3 {
+      margin: 0 0 8px;
+      color: #1849a9;
+      font-size: 1rem;
+    }
+
+    .engine-build-step p {
+      margin: 0;
+      color: #475467;
+      font-size: 0.92rem;
+      line-height: 1.55;
+    }
+
+    .engine-build-step code { overflow-wrap: anywhere; }
+
+    .engine-build-link {
+      display: inline-flex;
+      align-items: center;
+      margin: 2px 0 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: #2563eb;
+      color: #ffffff !important;
+      font-size: 0.84rem;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .engine-build-link:hover { background: #1849a9; }
+
+    .engine-build-step .engine-build-compatibility {
+      margin-top: 10px;
+      color: #b42318;
+      font-size: 0.78rem;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -1248,6 +1300,7 @@
       .bottleneck-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .page-links { grid-template-columns: 1fr; }
       .performance-improvement-grid { grid-template-columns: 1fr; }
+      .engine-build-steps { grid-template-columns: 1fr; }
       .preprocessing-layout {
         grid-template-columns: 1fr;
         gap: 20px;
@@ -1321,6 +1374,7 @@
             <a href="#performance-improvement-heading">Performance Improvement</a>
           </div>
         </details>
+        <a href="#build-new-engine-heading">How to Build a New TensorRT Engine</a>
       </div>
     </nav>
 
@@ -2189,6 +2243,34 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
           <h3>Peak GPU Memory</h3>
           <div class="performance-improvement-values">15,786 MiB → 4,372 MiB</div>
           <p>72.3% lower peak GPU memory use.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="build-new-engine-heading" style="border-left: 5px solid #2563eb; background: linear-gradient(135deg, #ffffff, #edf4ff);">
+      <p class="bottleneck-kicker" style="color: #1849a9; font-weight: 900; letter-spacing: 0.12em;">DEPLOYMENT WORKFLOW</p>
+      <h2 id="build-new-engine-heading" style="color: #1849a9; font-size: clamp(1.8rem, 3.5vw, 3rem);">How to Build a New TensorRT Engine</h2>
+      <div class="engine-build-steps">
+        <article class="engine-build-step">
+          <h3>1. Download the Plugin-Ready ONNX Model</h3>
+          <p><a class="engine-build-link" href="https://spectralmd.sharepoint.com/:u:/r/sites/DataScience/Shared%20Documents/General/TBSA/TBSA_model/foundationstereo_800x960_gwc_plugin.onnx?d=wef6518b1b7fc43ea98d1e7491b92cf1e&amp;csf=1&amp;web=1&amp;e=pyt3FV" target="_blank" rel="noopener noreferrer">Click to Download the Plugin-Ready ONNX ↗</a><br>Download <code>foundationstereo_800x960_gwc_plugin.onnx</code> and place it in the <code>onnx/</code> directory. This model includes the <code>foundation_stereo::GWCVolume</code> Plugin V3 node.</p>
+        </article>
+        <article class="engine-build-step">
+          <h3>2. Complete the CMake and VS Code Environment Setup</h3>
+          <p>Complete <a href="#progress-heading">Environment Setup</a>.</p>
+          <p class="engine-build-compatibility">Currently tested only with CUDA 13.3 + TensorRT 11.2, due to the Plugin V3 implementation. CUDA 12.9 testing is planned next.</p>
+        </article>
+        <article class="engine-build-step">
+          <h3>3. Build <code>libGWCVolumePlugin.so</code> with CMake</h3>
+          <p>Use CMake to build the <code>GWCVolumePlugin</code> target. A successful build produces <code>cpp/build/libGWCVolumePlugin.so</code>, which must be available before building the TensorRT engine.</p>
+        </article>
+        <article class="engine-build-step">
+          <h3>4. Build the Plugin-Aware TensorRT Engine</h3>
+          <p>In a terminal, run <code>cpp/build/fs_build_single_engine onnx/foundationstereo_800x960_gwc_plugin.onnx onnx/foundationstereo_800x960_gwc_plugin.engine</code>; or in VS Code select <code>Build FoundationStereo Single Engine (800x960)</code>. The builder loads and registers <code>libGWCVolumePlugin.so</code>, then parses the ONNX <code>foundation_stereo::GWCVolume</code> node as a TensorRT Plugin V3 layer and serializes the completed engine. The engine stores the plugin layer configuration, not the <code>.so</code> binary, so keep the plugin library loaded and registered when deserializing or running the engine.</p>
+        </article>
+        <article class="engine-build-step">
+          <h3>5. Run TensorRT Inference with Python</h3>
+          <p><a class="engine-build-link" href="https://github.com/smd-ai/FS_Engine/blob/main/python/fs_tensorrt800x960_gwc_plugin.ipynb" target="_blank" rel="noopener noreferrer">Click to Open the Python Inference Notebook ↗</a><br>Use <code>fs_tensorrt800x960_gwc_plugin.ipynb</code> as the reference. Python loads and registers <code>libGWCVolumePlugin.so</code> with <code>ctypes</code> before it deserializes <code>foundationstereo_800x960_gwc_plugin.engine</code>; TensorRT can then resolve the Plugin V3 layer and run inference.</p>
         </article>
       </div>
     </section>
