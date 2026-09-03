@@ -49,6 +49,35 @@
       line-height: 1.02;
     }
 
+    .remote-repo-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 16px;
+      padding: 9px 14px;
+      border: 1px solid #1849a9;
+      border-radius: 999px;
+      color: #fff;
+      background: #1849a9;
+      box-shadow: 0 5px 14px rgb(24 73 169 / 18%);
+      font-size: 0.9rem;
+      font-weight: 800;
+      text-decoration: none;
+      transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+    }
+
+    .remote-repo-button:hover,
+    .remote-repo-button:focus-visible {
+      background: #123a83;
+      box-shadow: 0 9px 20px rgb(24 73 169 / 26%);
+      transform: translateY(-1px);
+    }
+
+    .remote-repo-button:focus-visible {
+      outline: 3px solid #93b4ff;
+      outline-offset: 3px;
+    }
+
     .intro {
       max-width: 690px;
       margin: 18px 0 32px;
@@ -1058,6 +1087,7 @@
   <main>
     <p class="eyebrow">Development Notes</p>
     <h1>FoundationStereo Performance Work</h1>
+    <a class="remote-repo-button" href="https://github.com/smd-ai/FS_Engine" target="_blank" rel="noopener noreferrer">GitHub Repo <span aria-hidden="true">↗</span></a>
     <nav class="page-links" aria-label="Project pages">
       <a class="page-link" href="stereo_reconstruction_pipeline.html">
         <span>
@@ -1553,22 +1583,6 @@
     </section>
 
 
-    <section class="card deployment-solution" aria-labelledby="python-tensorrt-overview-heading">
-      <h2 id="python-tensorrt-overview-heading" class="deployment-heading">800 × 960 Python TensorRT Overview</h2>
-      <p class="deployment-summary">A fixed-resolution <strong>800 × 960</strong> TensorRT engine that builds and runs within the available GPU memory.</p>
-      <p class="deployment-summary">Status: the TensorRT engine inference results have been delivered to <strong class="sunny-status">Sunny</strong> and are awaiting validation and evaluation.</p>
-      <div class="deployment-stats">
-        <article class="deployment-stat">
-          <span>Mean inference</span>
-          <strong>578 <small>ms</small></strong>
-        </article>
-        <article class="deployment-stat">
-          <span>Peak GPU memory</span>
-          <strong>4,374 <small>MiB</small></strong>
-        </article>
-      </div>
-    </section>
-
     <section class="card" aria-labelledby="resolution-analysis-heading">
       <p class="bottleneck-kicker">Profile finding</p>
       <h2 id="resolution-analysis-heading">Why the smaller 576 × 960 engine is slower and uses more memory</h2>
@@ -1714,12 +1728,12 @@ intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
       <pre><code>self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, stride=1, bias=bias, padding=padding)</code></pre>
     </section>
 
-    <section class="card" aria-labelledby="cost-volume-plugin-heading" style="border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #ffffff, #fffbeb);">
-      <p class="bottleneck-kicker" style="color: #b45309; font-weight: 900; letter-spacing: 0.12em;">NEXT OPTIMIZATION · TODO</p>
-      <h2 id="cost-volume-plugin-heading" style="color: #92400e; font-size: clamp(1.8rem, 3.5vw, 3rem);">GWC Volume TensorRT Plugin</h2>
-      <p class="deployment-summary">Replace exactly the Python <code>build_gwc_volume(...)</code> call with a dedicated TensorRT plugin. The projected concatenation volume and final channel concatenation remain native TensorRT operations.</p>
+    <section class="card" aria-labelledby="cost-volume-plugin-heading" style="border-left: 5px solid #16a34a; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
+      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">COMPLETED · GWC PLUGIN SINGLE ENGINE</p>
+      <h2 id="cost-volume-plugin-heading" style="color: #166534; font-size: clamp(1.8rem, 3.5vw, 3rem);">GWC Volume TensorRT Plugin</h2>
+      <p class="deployment-summary">The Python <code>build_gwc_volume(...)</code> call has been replaced with a dedicated TensorRT plugin. The projected concatenation volume and final channel concatenation remain native TensorRT operations.</p>
       <p><a href="#forward-cost">View the earlier AHCF / cost-volume step</a></p>
-      <h3 id="gwc-python-operation">Python operation to replace</h3>
+      <h3 id="gwc-python-operation">Python operation replaced</h3>
       <pre><code>gwc_volume = build_gwc_volume(
     features_left[0],
     features_right[0],
@@ -1847,7 +1861,7 @@ GWCVolumePlugin.hpp
           </svg>
           <figcaption style="margin-top: 8px; color: #667085; font-size: 0.86rem; line-height: 1.5;">Fixed FoundationStereo logical CUDA work volume: <code>W × H × (groups × maxDisparity) = 240 × 200 × 384</code>.</figcaption>
         </figure>
-        <p class="note todo"><strong>Note:</strong> Dynamic shared memory is disabled during kernel execution: <code>0 bytes per block</code>. Each thread independently reads its feature vectors and accumulates one correlation value, so this first kernel has no cross-thread data to reuse; shared-memory staging and synchronization would add overhead.</p>
+        <p class="note"><strong>Note:</strong> Dynamic shared memory is disabled during kernel execution: <code>0 bytes per block</code>. Each thread independently reads its feature vectors and accumulates one correlation value, so this first kernel has no cross-thread data to reuse; shared-memory staging and synchronization would add overhead.</p>
         <div class="warning">
           <strong aria-hidden="true">!</strong>
           <span><code>max_disp = 192</code> limits this model’s disparity search range. In the current camera setup, objects closer than <strong>20 cm</strong> cannot be reconstructed reliably. Increasing the range requires changing <code>max_disp</code> before Python model construction, then re-exporting ONNX and rebuilding both the plugin engine and TensorRT engine.</span>
@@ -1891,6 +1905,32 @@ x4 right feature ─┘
 volume [1,8,48,200,240]
                   ↓
 original downstream TensorRT layers that consume volume</code></pre>
+        <h4>7. Build the Single TensorRT Engine</h4>
+        <p>The plugin-ready ONNX does not contain the GWC CUDA implementation. It only declares the <code>foundation_stereo::GWCVolume</code> operation. The compiled <code>libGWCVolumePlugin.so</code> supplies the Plugin V3 creator, output-shape/type rules, and CUDA kernel that TensorRT uses for this node.</p>
+        <pre aria-label="Single engine build flow"><code>plugin-ready ONNX
+  standard ONNX layers + foundation_stereo::GWCVolume
+                  ↓
+fs_build_single_engine
+  register GWCVolume Plugin V3 creator
+                  ↓
+TensorRT ONNX Parser
+  standard nodes → native TensorRT layers
+  GWCVolume node → custom Plugin V3 layer
+                  ↓
+TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
+        <p>The builder registers the plugin <em>before</em> parsing ONNX. Without that registration, the parser has no implementation for the custom GWC node and engine construction fails.</p>
+        <div class="engine-interface">
+          <p><strong>Build on this CUDA 13.3 / TensorRT 11.2 system:</strong></p>
+          <p>In VS Code, run the default <code>Build TSFS</code> task with <code>Ctrl+Shift+B</code>. It configures the Release build and builds all CMake targets, including <code>fs_build_single_engine</code> and <code>libGWCVolumePlugin.so</code>.</p>
+
+          <p>Then open <strong>Run and Debug</strong>, select <code>Build FoundationStereo Single Engine (800x960)</code>, and press <code>Ctrl+F5</code>. The launch configuration runs <code>fs_build_single_engine</code> with the plugin ONNX and writes <code>onnx/foundationstereo_800x960_gwc_plugin.engine</code>.</p>
+          <p><strong>TensorRT 11 precision:</strong> networks are explicit-batch and strongly typed by default. The exported ONNX tensor types determine FP32/FP16 execution; this builder deliberately does not use obsolete <code>kEXPLICIT_BATCH</code>, <code>--fp16</code>, or <code>--fp32</code> builder switches.</p>
+        </div>
+        <div class="warning">
+          <strong>❗ Runtime requirement</strong>
+          <span>The engine serializes the plugin configuration, not the plugin's CUDA implementation. Before deserializing this engine at inference time, load <code>libGWCVolumePlugin.so</code> and register <code>GWCVolume</code> again; otherwise TensorRT cannot restore the custom layer.</span>
+        </div>
+        <p class="note">This is a fixed <code>800 × 960</code> engine. A different input shape generally requires re-exporting the plugin ONNX and rebuilding the engine, unless the plugin graph and builder are extended with dynamic-shape optimization profiles.</p>
       </div>
 
     </section>

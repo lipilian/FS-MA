@@ -15,7 +15,8 @@ endif()
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs imgproc calib3d)
 find_package(CUDAToolkit REQUIRED)
 
-# TensorRT is required only by the custom GWC Volume plugin.
+# TensorRT is required by the custom GWC Volume plugin and the ONNX engine
+# builder below.
 find_path(TENSORRT_INCLUDE_DIR
     NAMES NvInfer.h
     HINTS /usr /usr/local
@@ -27,8 +28,15 @@ find_library(TENSORRT_NVINFER_LIBRARY
     PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu
 )
 
-if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY)
-    message(FATAL_ERROR "TensorRT headers or nvinfer library not found")
+find_library(TENSORRT_NVONNXPARSER_LIBRARY
+    NAMES nvonnxparser nvonnxparser.so.11
+    HINTS /usr /usr/local
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu
+)
+
+if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY OR
+   NOT TENSORRT_NVONNXPARSER_LIBRARY)
+    message(FATAL_ERROR "TensorRT headers, nvinfer, or nvonnxparser library not found")
 endif()
 
 add_executable(TSFS
@@ -70,5 +78,28 @@ target_link_libraries(GWCVolumePlugin PRIVATE
 )
 
 target_compile_options(GWCVolumePlugin PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+)
+
+# Build one TensorRT engine from an ONNX graph containing the
+# foundation_stereo::GWCVolume Plugin V3 node. Linking the plugin library
+# makes its explicit registration entry point available before ONNX parsing.
+add_executable(fs_build_single_engine
+    app/build_single_engine.cpp
+)
+
+target_include_directories(fs_build_single_engine PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${TENSORRT_INCLUDE_DIR}
+)
+
+target_link_libraries(fs_build_single_engine PRIVATE
+    GWCVolumePlugin
+    ${TENSORRT_NVINFER_LIBRARY}
+    ${TENSORRT_NVONNXPARSER_LIBRARY}
+    CUDA::cudart
+)
+
+target_compile_options(fs_build_single_engine PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
