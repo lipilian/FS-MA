@@ -1376,6 +1376,12 @@
         </details>
         <a href="#build-new-engine-heading">How to Build a New TensorRT Engine</a>
         <a href="#stereo-preprocessing-800-heading">Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</a>
+        <details class="toc-group">
+          <summary>C++ Engine Usage</summary>
+          <div class="toc-links">
+            <a href="#load-plugin-engine-heading">Load a TensorRT Engine with the GWC Plugin</a>
+          </div>
+        </details>
       </div>
     </nav>
 
@@ -2281,6 +2287,21 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
       <h2 id="stereo-preprocessing-800-heading">Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</h2>
       <p>Resize each rectified RGB image from <code>2048 × 2448</code> to the fixed TensorRT grid <code>800 × 960</code> with bilinear interpolation, then use the same grid for disparity, masking, and 3D reconstruction.</p>
       <p>Rescale the rectified intrinsic matrix before projection: <code>f<sub>x</sub></code> and <code>c<sub>x</sub></code> × <code>960 / 2448</code>; <code>f<sub>y</sub></code> and <code>c<sub>y</sub></code> × <code>800 / 2048</code>. Keep the stereo baseline unchanged.</p>
+    </section>
+
+    <section class="card" aria-labelledby="cpp-engine-usage-heading" style="border-left: 5px solid #7c3aed; background: linear-gradient(135deg, #ffffff, #f5f3ff);">
+      <p class="bottleneck-kicker" style="color: #6d28d9; font-weight: 900; letter-spacing: 0.12em;">C++ RUNTIME</p>
+      <h2 id="cpp-engine-usage-heading" style="color: #5b21b6;">C++ Engine Usage</h2>
+
+      <article class="engine-build-step" aria-labelledby="load-plugin-engine-heading">
+        <h3 id="load-plugin-engine-heading">1. Load a TensorRT Engine with the GWC Plugin</h3>
+        <p>A serialized <code>foundationstereo_800x960_gwc_plugin.engine</code> stores the <code>foundation_stereo::GWCVolume</code> layer configuration, but not the plugin CUDA implementation. The C++ process must therefore load <code>libGWCVolumePlugin.so</code> and register its creator before TensorRT deserializes the engine.</p>
+        <pre><code>FS fs;
+fs.loadEngine("onnx/foundationstereo_800x960_gwc_plugin.engine");</code></pre>
+        <p><strong>What <code>loadEngine()</code> does:</strong> verifies the engine path, calls <code>fs::trt::registerGwcVolumePlugin()</code>, creates an <code>IRuntime</code>, deserializes the engine, prints every input and output tensor name, shape, and data type, then creates an <code>IExecutionContext</code>.</p>
+        <p><strong>Lifetime:</strong> the <code>FS</code> instance retains the runtime, engine, and execution context after the call. The context is ready for the later input-buffer binding and <code>enqueueV3()</code> inference step.</p>
+        <p><strong>Deployment requirement:</strong> the current <code>TSFS</code> executable links <code>libGWCVolumePlugin.so</code>, so CMake loads it automatically from <code>cpp/build/</code>. If the executable is moved elsewhere, deploy the plugin library with it and make it discoverable through RUNPATH or <code>LD_LIBRARY_PATH</code>.</p>
+      </article>
     </section>
 
   </main>

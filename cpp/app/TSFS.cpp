@@ -27,9 +27,11 @@ int main(int argc, char* argv[]) {
     const auto calibration_path = capture_directory / "calibration.json";
 
     try {
+        FS fs;
+        fs.loadEngine("onnx/foundationstereo_800x960_gwc_plugin.engine");
+
         Logger::log("Loading stereo capture.");
         StereoFrame frame(left_path, right_path, calibration_path);
-        FS fs;
 
         Logger::log("Rectifying RGB stereo pair.");
         frame.rectify();

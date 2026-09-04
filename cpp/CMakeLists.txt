@@ -46,8 +46,16 @@ add_executable(TSFS
     src/StereoFrame.cpp
 )
 
-target_include_directories(TSFS PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(TSFS PRIVATE ${OpenCV_LIBS})
+target_include_directories(TSFS PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${TENSORRT_INCLUDE_DIR}
+)
+target_link_libraries(TSFS PRIVATE
+    ${OpenCV_LIBS}
+    GWCVolumePlugin
+    ${TENSORRT_NVINFER_LIBRARY}
+    CUDA::cudart
+)
 
 target_compile_options(TSFS PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
