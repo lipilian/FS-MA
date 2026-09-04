@@ -40,9 +40,8 @@ if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY OR
 endif()
 
 add_executable(TSFS
-    src/main.cpp
+    app/TSFS.cpp
     src/FS.cpp
-    src/InputPadder.cpp
     src/Logger.cpp
     src/StereoFrame.cpp
 )

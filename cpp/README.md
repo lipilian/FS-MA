@@ -10,7 +10,7 @@ Source layout:
 
 - `include/StereoFrame.hpp`: stereo frame class interface.
 - `src/StereoFrame.cpp`: stereo frame implementation.
-- `src/main.cpp`: command-line application entry point.
+- `app/TSFS.cpp`: command-line application entry point.
 
 ## Build
 
@@ -68,4 +68,4 @@ builds the Release binary first, then runs it with
 ```
 
 After `frame.rectify()`, use `frame.rectified_left()` and
-`frame.rectified_right()` in `src/main.cpp` for the next processing stage.
+`frame.rectified_right()` in `app/TSFS.cpp` for the next processing stage.

@@ -1375,6 +1375,7 @@
           </div>
         </details>
         <a href="#build-new-engine-heading">How to Build a New TensorRT Engine</a>
+        <a href="#stereo-preprocessing-800-heading">Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</a>
       </div>
     </nav>
 
@@ -2273,6 +2274,13 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
           <p><a class="engine-build-link" href="https://github.com/smd-ai/FS_Engine/blob/main/python/fs_tensorrt800x960_gwc_plugin.ipynb" target="_blank" rel="noopener noreferrer">Click to Open the Python Inference Notebook ↗</a><br>Use <code>fs_tensorrt800x960_gwc_plugin.ipynb</code> as the reference. Python loads and registers <code>libGWCVolumePlugin.so</code> with <code>ctypes</code> before it deserializes <code>foundationstereo_800x960_gwc_plugin.engine</code>; TensorRT can then resolve the Plugin V3 layer and run inference.</p>
         </article>
       </div>
+    </section>
+
+    <section class="card" aria-labelledby="stereo-preprocessing-800-heading">
+      <p class="bottleneck-kicker" style="color: #1849a9; font-weight: 900; letter-spacing: 0.12em;">NEXT STEP</p>
+      <h2 id="stereo-preprocessing-800-heading">Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</h2>
+      <p>Resize each rectified RGB image from <code>2048 × 2448</code> to the fixed TensorRT grid <code>800 × 960</code> with bilinear interpolation, then use the same grid for disparity, masking, and 3D reconstruction.</p>
+      <p>Rescale the rectified intrinsic matrix before projection: <code>f<sub>x</sub></code> and <code>c<sub>x</sub></code> × <code>960 / 2448</code>; <code>f<sub>y</sub></code> and <code>c<sub>y</sub></code> × <code>800 / 2048</code>. Keep the stereo baseline unchanged.</p>
     </section>
 
   </main>
