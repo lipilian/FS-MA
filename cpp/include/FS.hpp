@@ -45,6 +45,15 @@ public:
      */
     void prepare_stereo_images(const cv::Mat& left, const cv::Mat& right);
 
+    /**
+     * Queue TensorRT inference on FS's CUDA stream. The disparity result stays
+     * in FS's preallocated device buffer for subsequent CUDA processing.
+     */
+    void inference();
+
+    /** Execute ten inferences, print each GPU execution time, and return their mean in milliseconds. */
+    float inference_time_measure();
+
 private:
     struct TensorRtRuntimeDeleter {
         void operator()(nvinfer1::IRuntime* object) const noexcept;

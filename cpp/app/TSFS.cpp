@@ -10,13 +10,14 @@ namespace {
 
 void print_usage(const char* executable) {
     Logger::error(std::string("Usage: ") + executable +
-                  " <capture-directory>\n\nThe directory must contain left.png, right.png, and calibration.json.");
+                  " <capture-directory> [--measure]\n\nThe directory must contain left.png, right.png, and calibration.json.");
 }
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
+    const bool measure = argc == 3 && std::string(argv[2]) == "--measure";
+    if ((argc != 2 && argc != 3) || (argc == 3 && !measure)) {
         print_usage(argv[0]);
         return 2;
     }
@@ -39,8 +40,13 @@ int main(int argc, char* argv[]) {
         fs.set_model_camera_parameters(
             frame.rectified_camera_parameters(), frame.rectified_left().size());
         fs.prepare_stereo_images(frame.rectified_left(), frame.rectified_right());
+        if (measure) {
+            fs.inference_time_measure();
+        } else {
+            fs.inference();
+        }
 
-        // Continue processing frame.rectified_left() and frame.rectified_right() here.
+        // Continue processing FS's GPU-resident disparity here.
         return 0;
     } catch (const std::exception& error) {
         Logger::error(std::string("stereo_rectify: ") + error.what());

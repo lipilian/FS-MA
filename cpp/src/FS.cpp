@@ -133,11 +133,28 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
         throw std::runtime_error("failed to create TensorRT runtime");
     }
 
+    std::size_t free_memory_before_engine{};
+    std::size_t total_device_memory{};
+    check_cuda(cudaMemGetInfo(&free_memory_before_engine, &total_device_memory),
+               "failed to query free device memory before TensorRT engine deserialization");
+
     std::unique_ptr<nvinfer1::ICudaEngine, TensorRtEngineDeleter> engine(
         runtime->deserializeCudaEngine(serialized_engine.data(), serialized_engine.size()));
     if (!engine) {
         throw std::runtime_error("failed to deserialize TensorRT engine: " + engine_path.string());
     }
+
+    std::size_t free_memory_after_engine{};
+    check_cuda(cudaMemGetInfo(&free_memory_after_engine, &total_device_memory),
+               "failed to query free device memory after TensorRT engine deserialization");
+    const std::size_t engine_deserialization_memory =
+        free_memory_before_engine >= free_memory_after_engine
+            ? free_memory_before_engine - free_memory_after_engine : 0;
+    std::cout << "TensorRT engine deserialization device-memory delta: "
+              << engine_deserialization_memory << " bytes ("
+              << static_cast<double>(engine_deserialization_memory) / (1024.0 * 1024.0) << " MiB)"
+              << std::endl;
+
 
     std::cout << "TensorRT engine loaded: " << engine_path << std::endl;
     std::cout << "Tensor I/O:" << std::endl;
@@ -160,6 +177,16 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
     if (!execution_context) {
         throw std::runtime_error("failed to create TensorRT execution context");
     }
+
+    const auto context_memory_bytes = engine->getDeviceMemorySizeV2();
+    if (context_memory_bytes < 0) {
+        throw std::runtime_error("failed to query TensorRT context device-memory requirement");
+    }
+    constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+    std::cout << "TensorRT context internal device memory: " << context_memory_bytes
+              << " bytes (" << static_cast<double>(context_memory_bytes) / kBytesPerMiB
+              << " MiB)"
+              << std::endl;
 
     execution_context_ = std::move(execution_context);
     engine_ = std::move(engine);
@@ -281,4 +308,56 @@ void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
     check_cuda(cudaMemcpyAsync(right_input_device_.get(), right_input_host_.get(), byte_count,
                                cudaMemcpyHostToDevice, stream_),
                "failed to upload right TensorRT input");
+}
+
+void FS::inference() {
+    if (!isEngineLoaded() || stream_ == nullptr || !disparity_output_device_) {
+        throw std::logic_error("loadEngine must complete before TensorRT inference");
+    }
+    if (!execution_context_->enqueueV3(stream_)) {
+        throw std::runtime_error("failed to enqueue TensorRT inference");
+    }
+}
+
+float FS::inference_time_measure() {
+    if (!isEngineLoaded() || stream_ == nullptr || !disparity_output_device_) {
+        throw std::logic_error("loadEngine must complete before TensorRT inference");
+    }
+
+    constexpr int kInferenceIterations = 10;
+    float total_milliseconds{0.0F};
+    cudaEvent_t start{nullptr};
+    cudaEvent_t stop{nullptr};
+    try {
+        check_cuda(cudaEventCreate(&start), "failed to create TensorRT inference start event");
+        check_cuda(cudaEventCreate(&stop), "failed to create TensorRT inference stop event");
+
+        for (int iteration = 0; iteration < kInferenceIterations; ++iteration) {
+            check_cuda(cudaEventRecord(start, stream_), "failed to record TensorRT inference start event");
+
+            if (!execution_context_->enqueueV3(stream_)) {
+                throw std::runtime_error("failed to enqueue TensorRT inference");
+            }
+
+            check_cuda(cudaEventRecord(stop, stream_), "failed to record TensorRT inference stop event");
+            check_cuda(cudaEventSynchronize(stop), "failed to synchronize TensorRT inference stop event");
+
+            float elapsed_milliseconds{0.0F};
+            check_cuda(cudaEventElapsedTime(&elapsed_milliseconds, start, stop),
+                       "failed to measure TensorRT inference time");
+            std::cout << elapsed_milliseconds
+                      << (iteration + 1 == kInferenceIterations ? '\n' : ' ');
+            total_milliseconds += elapsed_milliseconds;
+        }
+
+        check_cuda(cudaEventDestroy(stop), "failed to destroy TensorRT inference stop event");
+        stop = nullptr;
+        check_cuda(cudaEventDestroy(start), "failed to destroy TensorRT inference start event");
+        start = nullptr;
+        return total_milliseconds / kInferenceIterations;
+    } catch (...) {
+        if (stop != nullptr) cudaEventDestroy(stop);
+        if (start != nullptr) cudaEventDestroy(start);
+        throw;
+    }
 }

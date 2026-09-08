@@ -16,6 +16,21 @@
       "preLaunchTask": "Build TSFS"
     },
     {
+      "name": "Run TSFS Measure (Volunteer2 lower/0, Release)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/cpp/build/TSFS",
+      "args": [
+        "${workspaceFolder}/data/Volunteer2_lower/0",
+        "--measure"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "preLaunchTask": "Build TSFS"
+    },
+    {
       "name": "Build FoundationStereo Single Engine (800x960)",
       "type": "cppdbg",
       "request": "launch",
