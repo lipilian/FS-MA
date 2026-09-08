@@ -27,7 +27,9 @@ TensorRtLogger kTensorRtLogger;
 
 constexpr char kLeftInputName[] = "left";
 constexpr char kRightInputName[] = "right";
+constexpr char kDisparityOutputName[] = "disp";
 constexpr int kTensorRtInputChannels = 3;
+constexpr int kTensorRtOutputChannels = 1;
 
 char const* tensorIoModeName(nvinfer1::TensorIOMode mode) noexcept {
     switch (mode) {
@@ -178,29 +180,47 @@ void FS::allocate_input_buffers() {
         }
     }
 
-    const std::size_t element_count = static_cast<std::size_t>(kTensorRtInputChannels) *
-                                      kTensorRtInputHeight * kTensorRtInputWidth;
-    const std::size_t byte_count = element_count * sizeof(float);
+    const nvinfer1::Dims output_shape = execution_context_->getTensorShape(kDisparityOutputName);
+    if (engine_->getTensorIOMode(kDisparityOutputName) != nvinfer1::TensorIOMode::kOUTPUT ||
+        engine_->getTensorDataType(kDisparityOutputName) != nvinfer1::DataType::kFLOAT ||
+        output_shape.nbDims != 4 || output_shape.d[0] != 1 ||
+        output_shape.d[1] != kTensorRtOutputChannels ||
+        output_shape.d[2] != kTensorRtInputHeight || output_shape.d[3] != kTensorRtInputWidth) {
+        throw std::runtime_error("expected FP32 output tensor 'disp' with shape [1, 1, 800, 960]");
+    }
+
+    const std::size_t input_element_count = static_cast<std::size_t>(kTensorRtInputChannels) *
+                                            kTensorRtInputHeight * kTensorRtInputWidth;
+    const std::size_t input_byte_count = input_element_count * sizeof(float);
+    const std::size_t output_element_count = static_cast<std::size_t>(kTensorRtOutputChannels) *
+                                             kTensorRtInputHeight * kTensorRtInputWidth;
+    const std::size_t output_byte_count = output_element_count * sizeof(float);
 
     void* left_device = nullptr;
-    check_cuda(cudaMalloc(&left_device, byte_count), "failed to allocate left TensorRT input buffer");
+    check_cuda(cudaMalloc(&left_device, input_byte_count), "failed to allocate left TensorRT input buffer");
     left_input_device_.reset(static_cast<float*>(left_device));
 
     void* right_device = nullptr;
-    check_cuda(cudaMalloc(&right_device, byte_count), "failed to allocate right TensorRT input buffer");
+    check_cuda(cudaMalloc(&right_device, input_byte_count), "failed to allocate right TensorRT input buffer");
     right_input_device_.reset(static_cast<float*>(right_device));
 
+    void* disparity_device = nullptr;
+    check_cuda(cudaMalloc(&disparity_device, output_byte_count),
+               "failed to allocate TensorRT disparity output buffer");
+    disparity_output_device_.reset(static_cast<float*>(disparity_device));
+
     void* left_host = nullptr;
-    check_cuda(cudaMallocHost(&left_host, byte_count), "failed to allocate pinned left input buffer");
+    check_cuda(cudaMallocHost(&left_host, input_byte_count), "failed to allocate pinned left input buffer");
     left_input_host_.reset(static_cast<float*>(left_host));
 
     void* right_host = nullptr;
-    check_cuda(cudaMallocHost(&right_host, byte_count), "failed to allocate pinned right input buffer");
+    check_cuda(cudaMallocHost(&right_host, input_byte_count), "failed to allocate pinned right input buffer");
     right_input_host_.reset(static_cast<float*>(right_host));
 
     if (!execution_context_->setTensorAddress(kLeftInputName, left_input_device_.get()) ||
-        !execution_context_->setTensorAddress(kRightInputName, right_input_device_.get())) {
-        throw std::runtime_error("failed to bind preallocated TensorRT input buffers");
+        !execution_context_->setTensorAddress(kRightInputName, right_input_device_.get()) ||
+        !execution_context_->setTensorAddress(kDisparityOutputName, disparity_output_device_.get())) {
+        throw std::runtime_error("failed to bind preallocated TensorRT I/O buffers");
     }
 }
 

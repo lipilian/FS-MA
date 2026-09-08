@@ -73,6 +73,7 @@ private:
     cv::Mat model_right_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> left_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> right_input_device_;
+    std::unique_ptr<float, CudaDeviceBufferDeleter> disparity_output_device_;
     std::unique_ptr<float, CudaHostBufferDeleter> left_input_host_;
     std::unique_ptr<float, CudaHostBufferDeleter> right_input_host_;
     cudaStream_t stream_{nullptr};
