@@ -379,7 +379,10 @@
 
     .liu { background: var(--liu); }
     .coarse-build { background: #dc2626; }
-    .repo-debug { background: #f97316; }
+    .repo-debug { background: #166534; }
+    .repo-debug .task-tooltip strong { color: #166534; }
+    .cuda-preprocessing { background: #facc15; color: var(--ink); }
+    .cuda-preprocessing .task-tooltip strong { color: #a16207; }
     .coarse-build .task-tooltip strong { color: #dc2626; }
     .liu.task-button {
       height: 42px;
@@ -590,7 +593,7 @@
                 </span>
               </button>
               <span class="task-duration" style="grid-column: 43 / 57">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 43 / 57" data-task="liu-cuda" aria-controls="task-details">
+              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 43 / 57" data-task="liu-cuda" aria-controls="task-details">
                 <small>CUDA pre-processing</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -598,6 +601,26 @@
                     <li>GPU memory holding for the second model.</li>
                     <li>Resolution padding for DINO dimension fitting.</li>
                     <li>CUDA-based preprocessing.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 57 / 71">2 weeks</span>
+              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 57 / 71" data-task="liu-cpp-inferencing" aria-controls="task-details">
+                <small>C++ inferencing script example</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Create a C++ inferencing script example.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 71 / 85">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 71 / 85" data-task="liu-cuda-tensorrt-environment" aria-controls="task-details">
+                <small>CUDA 12.9 TensorRT 10.16 environment test</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Test the CUDA 12.9 and TensorRT 10.16 environment.</li>
                   </ol>
                 </span>
               </button>
@@ -811,6 +834,20 @@
           "GPU memory holding for the second model.",
           "Resolution padding for DINO dimension fitting.",
           "CUDA-based preprocessing."
+        ]
+      },
+      "liu-cpp-inferencing": {
+        title: "Liu Hong — C++ inferencing script example",
+        duration: "Duration: 2 weeks",
+        items: [
+          "Create a C++ inferencing script example."
+        ]
+      },
+      "liu-cuda-tensorrt-environment": {
+        title: "Liu Hong — CUDA 12.9 TensorRT 10.16 environment test",
+        duration: "Duration: 2 weeks",
+        items: [
+          "Test the CUDA 12.9 and TensorRT 10.16 environment."
         ]
       },
       "liu-post": {
