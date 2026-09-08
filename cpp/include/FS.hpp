@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <memory>
 
+#include <cuda_runtime_api.h>
 #include <opencv2/core.hpp>
 
 namespace nvinfer1 {
@@ -16,7 +17,7 @@ class IExecutionContext;
 /**
  * Future TensorRT FoundationStereo inference engine.
  *
- * This class will own engine inference and OpenCV image-to-GPU transfer.
+ * This class owns the TensorRT engine and reusable OpenCV-to-GPU input buffers.
  */
 class FS {
 public:
@@ -37,7 +38,11 @@ public:
     void set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
                                      const cv::Size& rectified_image_size);
 
-    /** Resize matching RGB stereo images to the fixed TensorRT input grid. */
+    /**
+     * Resize matching RGB images, convert them to FP32 NCHW, and queue their
+     * transfer into the already-bound TensorRT input buffers on FS's CUDA
+     * stream.
+     */
     void prepare_stereo_images(const cv::Mat& left, const cv::Mat& right);
 
 private:
@@ -50,6 +55,15 @@ private:
     struct TensorRtContextDeleter {
         void operator()(nvinfer1::IExecutionContext* object) const noexcept;
     };
+    struct CudaDeviceBufferDeleter {
+        void operator()(float* pointer) const noexcept;
+    };
+    struct CudaHostBufferDeleter {
+        void operator()(float* pointer) const noexcept;
+    };
+
+    void allocate_input_buffers();
+    static void check_cuda(cudaError_t status, const char* operation);
 
     std::unique_ptr<nvinfer1::IRuntime, TensorRtRuntimeDeleter> runtime_;
     std::unique_ptr<nvinfer1::ICudaEngine, TensorRtEngineDeleter> engine_;
@@ -57,5 +71,10 @@ private:
     StereoCameraParameters model_camera_parameters_;
     cv::Mat model_left_;
     cv::Mat model_right_;
+    std::unique_ptr<float, CudaDeviceBufferDeleter> left_input_device_;
+    std::unique_ptr<float, CudaDeviceBufferDeleter> right_input_device_;
+    std::unique_ptr<float, CudaHostBufferDeleter> left_input_host_;
+    std::unique_ptr<float, CudaHostBufferDeleter> right_input_host_;
+    cudaStream_t stream_{nullptr};
 
 };

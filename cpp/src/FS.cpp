@@ -2,6 +2,7 @@
 
 #include "GWCVolumePlugin.hpp"
 
+#include <cuda_runtime_api.h>
 #include <opencv2/imgproc.hpp>
 
 #include <fstream>
@@ -23,6 +24,10 @@ public:
 };
 
 TensorRtLogger kTensorRtLogger;
+
+constexpr char kLeftInputName[] = "left";
+constexpr char kRightInputName[] = "right";
+constexpr int kTensorRtInputChannels = 3;
 
 char const* tensorIoModeName(nvinfer1::TensorIOMode mode) noexcept {
     switch (mode) {
@@ -56,8 +61,16 @@ std::string tensorShapeString(nvinfer1::Dims const& dimensions) {
 
 }  // namespace
 
-FS::FS() = default;
-FS::~FS() = default;
+FS::FS() {
+    check_cuda(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking),
+               "failed to create CUDA stream");
+}
+FS::~FS() {
+    // The stream waits for outstanding work before its buffers are released.
+    if (stream_ != nullptr) {
+        cudaStreamDestroy(stream_);
+    }
+}
 
 void FS::TensorRtRuntimeDeleter::operator()(nvinfer1::IRuntime* object) const noexcept {
     delete object;
@@ -69,6 +82,24 @@ void FS::TensorRtEngineDeleter::operator()(nvinfer1::ICudaEngine* object) const 
 
 void FS::TensorRtContextDeleter::operator()(nvinfer1::IExecutionContext* object) const noexcept {
     delete object;
+}
+
+void FS::CudaDeviceBufferDeleter::operator()(float* pointer) const noexcept {
+    if (pointer != nullptr) {
+        cudaFree(pointer);
+    }
+}
+
+void FS::CudaHostBufferDeleter::operator()(float* pointer) const noexcept {
+    if (pointer != nullptr) {
+        cudaFreeHost(pointer);
+    }
+}
+
+void FS::check_cuda(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
+    }
 }
 
 void FS::loadEngine(const std::filesystem::path& engine_path) {
@@ -131,6 +162,46 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
     execution_context_ = std::move(execution_context);
     engine_ = std::move(engine);
     runtime_ = std::move(runtime);
+    allocate_input_buffers();
+}
+
+void FS::allocate_input_buffers() {
+    const nvinfer1::Dims input_shape{4, {1, kTensorRtInputChannels,
+                                         kTensorRtInputHeight, kTensorRtInputWidth}};
+    for (const char* input_name : {kLeftInputName, kRightInputName}) {
+        if (engine_->getTensorIOMode(input_name) != nvinfer1::TensorIOMode::kINPUT ||
+            engine_->getTensorDataType(input_name) != nvinfer1::DataType::kFLOAT) {
+            throw std::runtime_error(std::string("expected FP32 input tensor named '") + input_name + "'");
+        }
+        if (!execution_context_->setInputShape(input_name, input_shape)) {
+            throw std::runtime_error(std::string("failed to set TensorRT input shape for '") + input_name + "'");
+        }
+    }
+
+    const std::size_t element_count = static_cast<std::size_t>(kTensorRtInputChannels) *
+                                      kTensorRtInputHeight * kTensorRtInputWidth;
+    const std::size_t byte_count = element_count * sizeof(float);
+
+    void* left_device = nullptr;
+    check_cuda(cudaMalloc(&left_device, byte_count), "failed to allocate left TensorRT input buffer");
+    left_input_device_.reset(static_cast<float*>(left_device));
+
+    void* right_device = nullptr;
+    check_cuda(cudaMalloc(&right_device, byte_count), "failed to allocate right TensorRT input buffer");
+    right_input_device_.reset(static_cast<float*>(right_device));
+
+    void* left_host = nullptr;
+    check_cuda(cudaMallocHost(&left_host, byte_count), "failed to allocate pinned left input buffer");
+    left_input_host_.reset(static_cast<float*>(left_host));
+
+    void* right_host = nullptr;
+    check_cuda(cudaMallocHost(&right_host, byte_count), "failed to allocate pinned right input buffer");
+    right_input_host_.reset(static_cast<float*>(right_host));
+
+    if (!execution_context_->setTensorAddress(kLeftInputName, left_input_device_.get()) ||
+        !execution_context_->setTensorAddress(kRightInputName, right_input_device_.get())) {
+        throw std::runtime_error("failed to bind preallocated TensorRT input buffers");
+    }
 }
 
 void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
@@ -145,6 +216,9 @@ void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_cam
 }
 
 void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
+    if (!isEngineLoaded() || stream_ == nullptr || !left_input_device_ || !right_input_device_) {
+        throw std::logic_error("loadEngine must complete before preparing TensorRT inputs");
+    }
     if (left.empty() || right.empty()) {
         throw std::invalid_argument("FS input preparation requires non-empty left and right images");
     }
@@ -154,4 +228,37 @@ void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
     const cv::Size model_size(kTensorRtInputWidth, kTensorRtInputHeight);
     cv::resize(left, model_left_, model_size, 0.0, 0.0, cv::INTER_LINEAR);
     cv::resize(right, model_right_, model_size, 0.0, 0.0, cv::INTER_LINEAR);
+
+    if (model_left_.type() != CV_8UC3 || model_right_.type() != CV_8UC3) {
+        throw std::invalid_argument("FS input preparation requires 8-bit, three-channel RGB images");
+    }
+
+    // The staging buffers are reused, so wait before overwriting data needed by
+    // a previous upload or inference enqueued on this same stream.
+    check_cuda(cudaStreamSynchronize(stream_), "failed to synchronize previous TensorRT input work");
+
+    const std::size_t plane_size = static_cast<std::size_t>(kTensorRtInputHeight) * kTensorRtInputWidth;
+    const auto pack_nchw = [plane_size](const cv::Mat& rgb, float* destination) {
+        for (int row = 0; row < rgb.rows; ++row) {
+            const cv::Vec3b* source = rgb.ptr<cv::Vec3b>(row);
+            const std::size_t offset = static_cast<std::size_t>(row) * rgb.cols;
+            for (int column = 0; column < rgb.cols; ++column) {
+                const cv::Vec3b& pixel = source[column];
+                destination[offset + column] = static_cast<float>(pixel[0]);
+                destination[plane_size + offset + column] = static_cast<float>(pixel[1]);
+                destination[2 * plane_size + offset + column] = static_cast<float>(pixel[2]);
+            }
+        }
+    };
+
+    pack_nchw(model_left_, left_input_host_.get());
+    pack_nchw(model_right_, right_input_host_.get());
+
+    const std::size_t byte_count = kTensorRtInputChannels * plane_size * sizeof(float);
+    check_cuda(cudaMemcpyAsync(left_input_device_.get(), left_input_host_.get(), byte_count,
+                               cudaMemcpyHostToDevice, stream_),
+               "failed to upload left TensorRT input");
+    check_cuda(cudaMemcpyAsync(right_input_device_.get(), right_input_host_.get(), byte_count,
+                               cudaMemcpyHostToDevice, stream_),
+               "failed to upload right TensorRT input");
 }
