@@ -1,5 +1,7 @@
 #pragma once
 
+#include "StereoFrame.hpp"
+
 #include <filesystem>
 #include <memory>
 
@@ -31,6 +33,10 @@ public:
     void loadEngine(const std::filesystem::path& engine_path);
     bool isEngineLoaded() const noexcept { return engine_ != nullptr && execution_context_ != nullptr; }
 
+    /** Scale rectified intrinsics to the fixed TensorRT input grid and retain the baseline in metres. */
+    void set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
+                                     const cv::Size& rectified_image_size);
+
     /** Resize matching RGB stereo images to the fixed TensorRT input grid. */
     void prepare_stereo_images(const cv::Mat& left, const cv::Mat& right);
 
@@ -48,6 +54,7 @@ private:
     std::unique_ptr<nvinfer1::IRuntime, TensorRtRuntimeDeleter> runtime_;
     std::unique_ptr<nvinfer1::ICudaEngine, TensorRtEngineDeleter> engine_;
     std::unique_ptr<nvinfer1::IExecutionContext, TensorRtContextDeleter> execution_context_;
+    StereoCameraParameters model_camera_parameters_;
     cv::Mat model_left_;
     cv::Mat model_right_;
 

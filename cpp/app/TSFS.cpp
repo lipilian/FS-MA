@@ -36,6 +36,8 @@ int main(int argc, char* argv[]) {
         Logger::log("Rectifying RGB stereo pair.");
         frame.rectify();
 
+        fs.set_model_camera_parameters(
+            frame.rectified_camera_parameters(), frame.rectified_left().size());
         fs.prepare_stereo_images(frame.rectified_left(), frame.rectified_right());
 
         // Continue processing frame.rectified_left() and frame.rectified_right() here.

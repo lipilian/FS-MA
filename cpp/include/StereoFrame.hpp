@@ -4,6 +4,14 @@
 
 #include <opencv2/core.hpp>
 
+struct StereoCameraParameters {
+    double fx{0.0};
+    double fy{0.0};
+    double cx{0.0};
+    double cy{0.0};
+    float baseline_meters{0.0F};
+};
+
 class StereoFrame {
 public:
     /** Load a raw stereo pair as RGB and the project's OpenCV-style JSON calibration. */
@@ -18,8 +26,8 @@ public:
     const cv::Mat& right() const { return right_; }
     const cv::Mat& rectified_left() const { return rectified_left_; }
     const cv::Mat& rectified_right() const { return rectified_right_; }
-    cv::Mat rectified_left_camera_matrix() const { return p1_(cv::Rect(0, 0, 3, 3)); }
-    double baseline_meters() const;
+    /** Return the rectified left-camera intrinsics and rectified stereo baseline. */
+    StereoCameraParameters rectified_camera_parameters() const;
 
 private:
     static cv::Mat read_matrix(const cv::FileStorage& storage, const char* key);

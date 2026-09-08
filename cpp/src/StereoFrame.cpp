@@ -96,13 +96,20 @@ void StereoFrame::rectify() {
     summary << "Rectification completed in memory.\n"
             << "  left:  " << rectified_left_.cols << "x" << rectified_left_.rows << '\n'
             << "  right: " << rectified_right_.cols << "x" << rectified_right_.rows << '\n'
-            << "Baseline: " << baseline_meters() << " m";
+            << "Baseline: " << rectified_camera_parameters().baseline_meters << " m";
     Logger::log(summary.str());
 }
 
-double StereoFrame::baseline_meters() const {
-    if (p2_.empty() || p2_.at<double>(0, 0) == 0.0) {
+StereoCameraParameters StereoFrame::rectified_camera_parameters() const {
+    if (p1_.empty() || p2_.empty() || p2_.at<double>(0, 0) == 0.0) {
         throw std::runtime_error("Rectification has not completed or has invalid projection matrices");
     }
-    return std::abs(p2_.at<double>(0, 3) / p2_.at<double>(0, 0));
+
+    return {
+        p1_.at<double>(0, 0),
+        p1_.at<double>(1, 1),
+        p1_.at<double>(0, 2),
+        p1_.at<double>(1, 2),
+        static_cast<float>(std::abs(p2_.at<double>(0, 3) / p2_.at<double>(0, 0))),
+    };
 }

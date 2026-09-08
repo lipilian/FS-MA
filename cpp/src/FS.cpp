@@ -133,6 +133,17 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
     runtime_ = std::move(runtime);
 }
 
+void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
+                                     const cv::Size& rectified_image_size) {
+    const double scale_x = static_cast<double>(rectified_image_size.width) / kTensorRtInputWidth;
+    const double scale_y = static_cast<double>(rectified_image_size.height) / kTensorRtInputHeight;
+    model_camera_parameters_ = rectified_camera_parameters;
+    model_camera_parameters_.fx /= scale_x;
+    model_camera_parameters_.cx /= scale_x;
+    model_camera_parameters_.fy /= scale_y;
+    model_camera_parameters_.cy /= scale_y;
+}
+
 void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
     if (left.empty() || right.empty()) {
         throw std::invalid_argument("FS input preparation requires non-empty left and right images");
