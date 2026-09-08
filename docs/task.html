@@ -612,6 +612,7 @@
                   <ol>
                     <li>Load a TensorRT Engine with the GWC Plugin.</li>
                     <li>Stereo Preprocessing · 800 × 960 with Intrinsic Rescale.</li>
+                    <li>GPU tensor I/O preparation (Completed): convert resized RGB HWC <code>uint8</code> images to FP32 NCHW <code>[1, 3, 800, 960]</code>; preallocate and bind <code>left</code>, <code>right</code>, and <code>disp</code> buffers during engine loading; use pinned host buffers and <code>cudaMemcpyAsync</code> for transfer.</li>
                   </ol>
                 </span>
               </button>
@@ -842,7 +843,8 @@
         duration: "Duration: 2 weeks",
         items: [
           "Load a TensorRT Engine with the GWC Plugin.",
-          "Stereo Preprocessing · 800 × 960 with Intrinsic Rescale."
+          "Stereo Preprocessing · 800 × 960 with Intrinsic Rescale.",
+          "GPU tensor I/O preparation (Completed): convert resized RGB HWC uint8 images to FP32 NCHW [1, 3, 800, 960]; preallocate and bind left, right, and disp buffers during engine loading; use pinned host buffers and cudaMemcpyAsync for transfer."
         ]
       },
       "liu-cuda-tensorrt-environment": {

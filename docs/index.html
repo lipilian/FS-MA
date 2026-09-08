@@ -1380,6 +1380,7 @@
           <div class="toc-links">
             <a href="#load-plugin-engine-heading">Load a TensorRT Engine with the GWC Plugin</a>
             <a href="#stereo-preprocessing-800-heading">Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</a>
+            <a href="#gpu-io-preparation-heading">GPU Tensor I/O Preparation</a>
           </div>
         </details>
       </div>
@@ -2292,7 +2293,7 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
         <pre><code>FS fs;
 fs.loadEngine("onnx/foundationstereo_800x960_gwc_plugin.engine");</code></pre>
         <p><strong>What <code>loadEngine()</code> does:</strong> verifies the engine path, calls <code>fs::trt::registerGwcVolumePlugin()</code>, creates an <code>IRuntime</code>, deserializes the engine, prints every input and output tensor name, shape, and data type, then creates an <code>IExecutionContext</code>.</p>
-        <p><strong>Lifetime:</strong> the <code>FS</code> instance retains the runtime, engine, and execution context after the call. The context is ready for the later input-buffer binding and <code>enqueueV3()</code> inference step.</p>
+        <p><strong>Lifetime:</strong> the <code>FS</code> instance retains the runtime, engine, execution context, one non-blocking CUDA stream, and the preallocated TensorRT I/O buffers. The <code>left</code>, <code>right</code>, and <code>disp</code> tensor addresses are bound during <code>loadEngine()</code>, so a later inference call only needs to enqueue work on that same stream.</p>
         <p><strong>Deployment requirement:</strong> the current <code>TSFS</code> executable links <code>libGWCVolumePlugin.so</code>, so CMake loads it automatically from <code>cpp/build/</code>. If the executable is moved elsewhere, deploy the plugin library with it and make it discoverable through RUNPATH or <code>LD_LIBRARY_PATH</code>.</p>
       </article>
 
@@ -2300,6 +2301,20 @@ fs.loadEngine("onnx/foundationstereo_800x960_gwc_plugin.engine");</code></pre>
         <h3 id="stereo-preprocessing-800-heading">2. Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</h3>
         <p>Resize each rectified RGB image from <code>2048 × 2448</code> to the fixed TensorRT grid <code>800 × 960</code> with bilinear interpolation, then use the same grid for disparity, masking, and 3D reconstruction.</p>
         <p>Rescale the rectified intrinsic matrix before projection: <code>f<sub>x</sub></code> and <code>c<sub>x</sub></code> × <code>960 / 2448</code>; <code>f<sub>y</sub></code> and <code>c<sub>y</sub></code> × <code>800 / 2048</code>. Keep the stereo baseline unchanged.</p>
+      </article>
+
+      <article class="engine-build-step" aria-labelledby="gpu-io-preparation-heading">
+        <h3 id="gpu-io-preparation-heading">3. GPU Tensor I/O Preparation · Preallocated and Bound</h3>
+        <p><code>prepare_stereo_images()</code> converts each resized RGB <code>cv::Mat</code> from interleaved HWC <code>uint8</code> into planar FP32 NCHW <code>[1, 3, 800, 960]</code>. This layout and type match the engine’s <code>left</code> and <code>right</code> inputs. The conversion currently runs on the CPU directly into reusable host staging buffers; it is not a GPU color/layout conversion.</p>
+        <p>The staging buffers use <strong>pinned (page-locked) host memory</strong>, not normal pageable memory. This lets <code>cudaMemcpyAsync</code> queue each host-to-device copy on the <code>FS</code> CUDA stream without an extra CUDA staging copy. The left and right FP32 device tensors are allocated once, then reused for every stereo pair.</p>
+        <p>During <code>loadEngine()</code>, <code>FS</code> fixes the input shapes, validates the engine contract, allocates the GPU tensors, and binds all TensorRT addresses with <code>setTensorAddress()</code>: <code>left</code> and <code>right</code> use FP32 <code>[1, 3, 800, 960]</code> buffers, while <code>disp</code> uses a preallocated FP32 <code>[1, 1, 800, 960]</code> GPU output buffer. Therefore the later <code>executeAsyncV3()</code> call does not allocate memory or remount tensor pointers.</p>
+        <pre><code>rectified RGB cv::Mat (HWC, uint8)
+        ↓ resize + HWC → NCHW FP32 on CPU
+pinned host staging buffer
+        ↓ cudaMemcpyAsync on FS::stream_
+preallocated GPU input tensors (left / right)
+        ↓ executeAsyncV3 on the same stream
+preallocated GPU output tensor (disp)</code></pre>
       </article>
     </section>
 
