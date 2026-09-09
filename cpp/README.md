@@ -12,6 +12,17 @@ Source layout:
 - `src/StereoFrame.cpp`: stereo frame implementation.
 - `app/TSFS.cpp`: command-line application entry point.
 
+Build targets:
+
+- `fs_core`: static library containing `FS.cpp`, `StereoFrame.cpp`, and
+  `Logger.cpp`, shared by the CLI and future desktop application. It exposes
+  the project headers and OpenCV/CUDA dependencies needed by its public API;
+  TensorRT and the GWC plugin are implementation dependencies.
+- `TSFS`: command-line executable containing only `app/TSFS.cpp`, linked to
+  `fs_core`.
+- `GWCVolumePlugin` and `fs_build_single_engine`: independent plugin library
+  and engine builder.
+
 ## Build
 
 ```bash

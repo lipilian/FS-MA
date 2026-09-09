@@ -39,23 +39,35 @@ if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY OR
     message(FATAL_ERROR "TensorRT headers, nvinfer, or nvonnxparser library not found")
 endif()
 
-add_executable(TSFS
-    app/TSFS.cpp
+# Shared processing code for the CLI and future desktop application.
+add_library(fs_core STATIC
     src/FS.cpp
     src/Logger.cpp
     src/StereoFrame.cpp
 )
 
-target_include_directories(TSFS PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${TENSORRT_INCLUDE_DIR}
+target_include_directories(fs_core
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${TENSORRT_INCLUDE_DIR}
 )
-target_link_libraries(TSFS PRIVATE
-    ${OpenCV_LIBS}
-    GWCVolumePlugin
-    ${TENSORRT_NVINFER_LIBRARY}
-    CUDA::cudart
+target_link_libraries(fs_core
+    PUBLIC
+        ${OpenCV_LIBS}
+        CUDA::cudart
+    PRIVATE
+        GWCVolumePlugin
+        ${TENSORRT_NVINFER_LIBRARY}
 )
+
+target_compile_options(fs_core PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+)
+
+add_executable(TSFS
+    app/TSFS.cpp
+)
+
+target_link_libraries(TSFS PRIVATE fs_core)
 
 target_compile_options(TSFS PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
