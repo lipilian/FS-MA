@@ -29,55 +29,90 @@ cv::Mat read_rgb_image(const std::filesystem::path& path, const char* side) {
     return rgb;
 }
 
+// Always return independent storage, even when the input is already CV_64F.
+cv::Mat copy_matrix(const cv::Mat& matrix, const char* name) {
+    if (matrix.empty() || matrix.dims != 2 || matrix.channels() != 1 ||
+        (matrix.depth() != CV_32F && matrix.depth() != CV_64F)) {
+        throw std::invalid_argument(std::string(name) + " must be a non-empty single-channel float matrix");
+    }
+    cv::Mat copy;
+    matrix.convertTo(copy, CV_64F);
+    if (!cv::checkRange(copy)) {
+        throw std::invalid_argument(std::string(name) + " must contain only finite values");
+    }
+    return copy;
+}
+
+cv::Mat copy_intrinsics(const cv::Mat& matrix, const char* name) {
+    cv::Mat copy = copy_matrix(matrix, name);
+    if (copy.size() != cv::Size(3, 3) || copy.at<double>(0, 0) <= 0.0 ||
+        copy.at<double>(1, 1) <= 0.0 || std::abs(copy.at<double>(2, 0)) > 1e-6 ||
+        std::abs(copy.at<double>(2, 1)) > 1e-6 || std::abs(copy.at<double>(2, 2) - 1.0) > 1e-6) {
+        throw std::invalid_argument(std::string(name) + " must be 3x3 with positive fx/fy and last row [0, 0, 1]");
+    }
+    return copy;
+}
+
+cv::Mat copy_distortion(const cv::Mat& matrix, const char* name) {
+    cv::Mat copy = copy_matrix(matrix, name);
+    const auto count = copy.total();
+    if ((copy.rows != 1 && copy.cols != 1) ||
+        (count != 4 && count != 5 && count != 8 && count != 12 && count != 14)) {
+        throw std::invalid_argument(std::string(name) + " must be a vector of 4, 5, 8, 12 or 14 coefficients");
+    }
+    return copy.reshape(1, static_cast<int>(count));
+}
+
+cv::Mat copy_rotation(const cv::Mat& matrix) {
+    cv::Mat copy = copy_matrix(matrix, "right_to_left_rotation");
+    if (copy.size() != cv::Size(3, 3) ||
+        cv::norm(copy.t() * copy - cv::Mat::eye(3, 3, CV_64F), cv::NORM_INF) > 1e-5 ||
+        std::abs(cv::determinant(copy) - 1.0) > 1e-5) {
+        throw std::invalid_argument("right_to_left_rotation must be a 3x3 proper rotation matrix");
+    }
+    return copy;
+}
+
+cv::Mat copy_translation(const cv::Mat& matrix) {
+    cv::Mat copy = copy_matrix(matrix, "right_to_left_translation");
+    if ((copy.rows != 1 && copy.cols != 1) || copy.total() != 3 || cv::norm(copy) <= 0.0) {
+        throw std::invalid_argument("right_to_left_translation must be a nonzero 3-element vector in metres");
+    }
+    return copy.reshape(1, 3);
+}
+
+void validate_images(const cv::Mat& left, const cv::Mat& right) {
+    if (left.empty() || right.empty() || left.dims != 2 || right.dims != 2 ||
+        left.type() != CV_8UC3 || right.type() != CV_8UC3) {
+        throw std::invalid_argument("Stereo images must be non-empty 2D RGB CV_8UC3 matrices");
+    }
+    if (left.size() != right.size()) {
+        throw std::invalid_argument("Left and right images must have the same dimensions; got " +
+                                    std::to_string(left.cols) + "x" + std::to_string(left.rows) + " and " +
+                                    std::to_string(right.cols) + "x" + std::to_string(right.rows));
+    }
+}
+
 }  // namespace
 
 StereoFrame::StereoFrame(const std::filesystem::path& left_image_path,
                          const std::filesystem::path& right_image_path,
-                         const std::filesystem::path& calibration_path) {
-    left_ = read_rgb_image(left_image_path, "left");
-    right_ = read_rgb_image(right_image_path, "right");
-    require_same_size(left_, right_);
+                         const std::filesystem::path& calibration_path)
+    : StereoFrame(read_rgb_image(left_image_path, "left"),
+                  read_rgb_image(right_image_path, "right"),
+                  StereoCalibration::from_file(calibration_path)) {}
 
-    cv::FileStorage calibration(as_string(calibration_path), cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON);
-    if (!calibration.isOpened()) {
-        throw std::runtime_error("Unable to open calibration JSON: " + as_string(calibration_path));
-    }
-
-    k1_ = read_matrix(calibration, "left_camera_matrix");
-    d1_ = read_matrix(calibration, "left_distortion");
-    k2_ = read_matrix(calibration, "right_camera_matrix");
-    d2_ = read_matrix(calibration, "right_distortion");
-    right_to_left_rotation_ = read_matrix(calibration, "right_to_left_rotation");
-    right_to_left_translation_ = read_matrix(calibration, "right_to_left_translation");
-
-    if (k1_.size() != cv::Size(3, 3) || k2_.size() != cv::Size(3, 3) ||
-        right_to_left_rotation_.size() != cv::Size(3, 3) ||
-        right_to_left_translation_.total() != 3) {
-        throw std::runtime_error("Calibration matrices have invalid dimensions");
-    }
-}
-
-cv::Mat StereoFrame::read_matrix(const cv::FileStorage& storage, const char* key) {
-    const cv::FileNode node = storage[key];
-    if (node.empty()) {
-        throw std::runtime_error(std::string("Calibration is missing '") + key + "'");
-    }
-
-    cv::Mat matrix;
-    node >> matrix;
-    if (matrix.empty()) {
-        throw std::runtime_error(std::string("Calibration matrix '") + key + "' is empty or invalid");
-    }
-    matrix.convertTo(matrix, CV_64F);
-    return matrix;
-}
-
-void StereoFrame::require_same_size(const cv::Mat& left, const cv::Mat& right) {
-    if (left.size() != right.size()) {
-        throw std::runtime_error("Left and right images must have the same dimensions; got " +
-                                 std::to_string(left.cols) + "x" + std::to_string(left.rows) + " and " +
-                                 std::to_string(right.cols) + "x" + std::to_string(right.rows));
-    }
+StereoFrame::StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
+                         const StereoCalibration& calibration) {
+    validate_images(left_rgb, right_rgb);
+    k1_ = copy_intrinsics(calibration.left_camera_matrix, "left_camera_matrix");
+    k2_ = copy_intrinsics(calibration.right_camera_matrix, "right_camera_matrix");
+    d1_ = copy_distortion(calibration.left_distortion, "left_distortion");
+    d2_ = copy_distortion(calibration.right_distortion, "right_distortion");
+    right_to_left_rotation_ = copy_rotation(calibration.right_to_left_rotation);
+    right_to_left_translation_ = copy_translation(calibration.right_to_left_translation);
+    left_ = left_rgb.clone();
+    right_ = right_rgb.clone();
 }
 
 void StereoFrame::rectify() {

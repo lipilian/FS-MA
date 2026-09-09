@@ -1,5 +1,7 @@
 #pragma once
 
+#include "fs/stereo/StereoCalibration.hpp"
+
 #include <filesystem>
 
 #include <opencv2/core.hpp>
@@ -19,6 +21,16 @@ public:
                 const std::filesystem::path& right_image_path,
                 const std::filesystem::path& calibration_path);
 
+    /**
+     * Snapshot raw RGB CV_8UC3 images and full calibration from memory.
+     * Inputs are validated and deep-copied, including non-contiguous image ROIs.
+     * Calibration is retained as CV_64F; callers may reuse their buffers after
+     * construction. No RGB/BGR conversion is performed by this overload.
+     * Invalid images or calibration values throw std::invalid_argument.
+     */
+    StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
+                const StereoCalibration& calibration);
+
     /** Undistort and rectify both RGB images using cv::CALIB_ZERO_DISPARITY. */
     void rectify();
 
@@ -30,9 +42,6 @@ public:
     StereoCameraParameters rectified_camera_parameters() const;
 
 private:
-    static cv::Mat read_matrix(const cv::FileStorage& storage, const char* key);
-    static void require_same_size(const cv::Mat& left, const cv::Mat& right);
-
     cv::Mat left_;
     cv::Mat right_;
     cv::Mat k1_;

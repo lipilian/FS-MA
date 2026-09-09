@@ -72,7 +72,7 @@
       <h1>Code Structure</h1>
       <p class="intro">A map of the FoundationStereo repository after the C++ core-library extraction and directory reorganization. Start here to locate a module, follow the inference call sequence, or understand the build targets.</p>
       <div class="badges" aria-label="Implementation status">
-        <span class="badge">C++: file input → GPU disparity</span>
+        <span class="badge">C++: file / memory input → GPU disparity</span>
         <span class="badge reference">Python: geometry reference</span>
         <span class="badge planned">Desktop UI &amp; camera: planned</span>
       </div>
@@ -96,7 +96,9 @@
 │   │   └── build_single_engine.cpp
 │   ├── include/fs/
 │   │   ├── <a href="#core">core/</a>Logger.hpp
-│   │   ├── <a href="#stereo">stereo/</a>StereoFrame.hpp
+│   │   ├── <a href="#stereo">stereo/</a>
+│   │   │   ├── StereoFrame.hpp
+│   │   │   └── StereoCalibration.hpp
 │   │   └── <a href="#inference">inference/</a>
 │   │       ├── FS.hpp
 │   │       └── <a href="#plugins">plugins/</a>
@@ -104,12 +106,15 @@
 │   │           └── GWCVolumeKernel.hpp
 │   ├── src/
 │   │   ├── core/Logger.cpp
-│   │   ├── stereo/StereoFrame.cpp
+│   │   ├── stereo/
+│   │   │   ├── StereoFrame.cpp
+│   │   │   └── StereoCalibration.cpp
 │   │   └── inference/
 │   │       ├── FS.cpp
 │   │       └── plugins/
 │   │           ├── GWCVolumePlugin.cpp
 │   │           └── GWCVolumeKernel.cu
+│   ├── tests/StereoFrameTests.cpp
 │   └── README.md
 ├── <a href="#python">python/</a>                     # Experiments, exports, geometry reference
 ├── FoundationStereo/            # Upstream model implementation
@@ -139,8 +144,9 @@
           <p class="label">Images and camera geometry</p>
           <h3>stereo/ · StereoFrame</h3>
           <code class="file">fs/stereo/StereoFrame.hpp</code>
-          <p>Loads left/right images as RGB and reads the OpenCV-style calibration JSON. <code>rectify()</code> runs stereo rectification, builds remap tables, and produces the rectified pair.</p>
-          <p><code>StereoCameraParameters</code> is currently declared here: <code>fx</code>, <code>fy</code>, <code>cx</code>, <code>cy</code>, and baseline in metres. The class exposes the images and rectified camera parameters.</p>
+          <p>Accepts file paths or in-memory RGB images plus a <code>StereoCalibration</code>. Both constructors share validation and take independent copies of the images and calibration. <code>rectify()</code> runs stereo rectification, builds remap tables, and produces the rectified pair.</p>
+          <p><code>StereoCalibration.hpp</code> declares the full raw intrinsics, distortion, rotation, and translation; <code>from_file()</code> reads the existing JSON schema. Callers can also populate these matrices directly. Memory input requires matching RGB <code>CV_8UC3</code> images and float calibration matrices, with translation in metres.</p>
+          <p><code>StereoCameraParameters</code> holds the rectified parameters: <code>fx</code>, <code>fy</code>, <code>cx</code>, <code>cy</code>, and baseline in metres. The class exposes the images and rectified camera parameters.</p>
         </article>
         <article class="card" id="inference">
           <p class="label">TensorRT inference</p>
@@ -167,10 +173,10 @@
 
     <section id="build" aria-labelledby="build-heading">
       <h2 id="build-heading">03 · Build dependencies</h2>
-      <p class="description">All four targets are defined in <code>cpp/CMakeLists.txt</code>. The core library lets another application reuse the processing code.</p>
+      <p class="description">The four production targets and optional test target are defined in <code>cpp/CMakeLists.txt</code>. The core library lets another application reuse the processing code.</p>
       <pre tabindex="0" aria-label="CMake target dependency diagram"><code>TSFS  [executable: app/TSFS.cpp]
 └── fs_core  [static library: libfs_core.a]
-    ├── FS + StereoFrame + Logger
+    ├── FS + StereoFrame + StereoCalibration + Logger
     ├── OpenCV + CUDA runtime             PUBLIC dependencies
     └── TensorRT + GWCVolumePlugin        PRIVATE dependencies
 
@@ -184,10 +190,11 @@ fs_build_single_engine  [executable]
           <caption>Source ownership by CMake target</caption>
           <thead><tr><th scope="col">Target</th><th scope="col">Compiled sources, relative to cpp/</th></tr></thead>
           <tbody>
-            <tr><td><code>fs_core</code></td><td><code>src/inference/FS.cpp</code><br><code>src/stereo/StereoFrame.cpp</code><br><code>src/core/Logger.cpp</code></td></tr>
+            <tr><td><code>fs_core</code></td><td><code>src/inference/FS.cpp</code><br><code>src/stereo/StereoFrame.cpp</code><br><code>src/stereo/StereoCalibration.cpp</code><br><code>src/core/Logger.cpp</code></td></tr>
             <tr><td><code>TSFS</code></td><td><code>app/TSFS.cpp</code></td></tr>
             <tr><td><code>GWCVolumePlugin</code></td><td><code>src/inference/plugins/GWCVolumePlugin.cpp</code><br><code>src/inference/plugins/GWCVolumeKernel.cu</code></td></tr>
             <tr><td><code>fs_build_single_engine</code></td><td><code>app/build_single_engine.cpp</code></td></tr>
+            <tr><td><code>stereo_frame_tests</code> (BUILD_TESTING)</td><td><code>tests/StereoFrameTests.cpp</code>, linked to <code>fs_core</code></td></tr>
           </tbody>
         </table>
       </div>
@@ -221,12 +228,13 @@ cmake --build cpp/build --parallel
       <div class="grid">
         <article class="card">
           <h3>Implemented and verified</h3>
-          <p>Core-library extraction and module-directory migration are complete. Release builds of all targets, normal CLI inference, and ten-run timing on <code>data/Volunteer2_lower/0</code> have passed.</p>
+          <p>Core-library extraction, module-directory migration, and in-memory stereo input are complete. Release builds of all targets, normal CLI inference, and ten-run timing on <code>data/Volunteer2_lower/0</code> have passed.</p>
+          <p>Input regression tests cover file/memory equivalence, buffer ownership, and invalid calibration. One initial real-capture comparison failed; five consecutive diagnostic reruns passed. The observation remains recorded in <code>TODO/TODO.md</code>.</p>
           <p>Geometry and area computation already exist in the Python reference workflow. The C++ implementation currently ends at disparity inference.</p>
         </article>
         <article class="card">
           <h3>Planned extensions</h3>
-          <p>The next checklist item is an in-memory image/calibration input interface, followed by synchronized disparity-result access.</p>
+          <p>In-memory image/calibration input is implemented. The next checklist item is synchronized disparity-result access.</p>
           <p>Camera sources, C++ geometry and pipeline modules, and a Qt/VTK desktop application remain planned. Their proposed folders are not part of the current source tree.</p>
           <p>The implementation checklist lives in <code>TODO/TODO.md</code>. See the <a href="stereo_reconstruction_pipeline.html">algorithm overview</a> for the intended end-to-end reconstruction workflow.</p>
         </article>

@@ -44,6 +44,7 @@ add_library(fs_core STATIC
     src/inference/FS.cpp
     src/core/Logger.cpp
     src/stereo/StereoFrame.cpp
+    src/stereo/StereoCalibration.cpp
 )
 
 target_include_directories(fs_core
@@ -122,3 +123,13 @@ target_link_libraries(fs_build_single_engine PRIVATE
 target_compile_options(fs_build_single_engine PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(stereo_frame_tests tests/StereoFrameTests.cpp)
+    target_link_libraries(stereo_frame_tests PRIVATE fs_core)
+    target_compile_options(stereo_frame_tests PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    )
+    add_test(NAME stereo_frame_inputs COMMAND stereo_frame_tests)
+endif()
