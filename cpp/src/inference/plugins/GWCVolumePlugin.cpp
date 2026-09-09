@@ -1,6 +1,6 @@
-#include "GWCVolumePlugin.hpp"
+#include "fs/inference/plugins/GWCVolumePlugin.hpp"
 
-#include "GWCVolumeKernel.hpp"
+#include "fs/inference/plugins/GWCVolumeKernel.hpp"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>

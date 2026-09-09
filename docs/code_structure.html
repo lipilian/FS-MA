@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Structure · FoundationStereo</title>
+  <style>
+    :root { --ink: #172033; --muted: #586579; --line: #d8dee9; --blue: #2563eb; --canvas: #f5f7fb; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; min-width: 320px; color: var(--ink); background: radial-gradient(circle at 10% 0, #e4edff, transparent 32rem), var(--canvas); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.65; }
+    main { width: min(1100px, calc(100% - 40px)); margin: 0 auto; padding: 32px 0 64px; }
+    a { color: #1849a9; text-underline-offset: 3px; }
+    a:hover { color: #123a83; }
+    a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 3px solid #93b4ff; outline-offset: 4px; }
+    .back { display: inline-block; margin-bottom: 30px; font-size: .9rem; font-weight: 700; }
+    .eyebrow { margin: 0 0 10px; color: var(--blue); font-size: .76rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(2.3rem, 6vw, 4rem); line-height: 1.06; letter-spacing: -.05em; }
+    .intro { max-width: 760px; margin: 18px 0 24px; color: var(--muted); font-size: 1.06rem; }
+    .badges, .section-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge { padding: 5px 10px; border: 1px solid #bdd7ce; border-radius: 999px; color: #08634d; background: #edf9f3; font-size: .76rem; font-weight: 750; }
+    .badge.reference { color: #6941a5; background: #f5efff; border-color: #d9c9f1; }
+    .badge.planned { color: #865000; background: #fff6e7; border-color: #ead3ab; }
+    .section-nav { margin: 28px 0 0; padding: 15px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); gap: 10px 24px; }
+    .section-nav a { font-size: .86rem; font-weight: 750; }
+    section { margin-top: 36px; scroll-margin-top: 20px; }
+    h2 { margin: 0 0 8px; font-size: 1.55rem; letter-spacing: -.025em; }
+    h3 { margin: 0 0 10px; font-size: 1.03rem; }
+    p { margin: 0 0 14px; }
+    .description { color: var(--muted); max-width: 850px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .card { min-width: 0; padding: 23px; border: 1px solid var(--line); border-radius: 15px; background: #fff; box-shadow: 0 5px 18px rgb(31 41 55 / 4%); }
+    .card p:last-child { margin-bottom: 0; }
+    .label { margin-bottom: 8px; color: var(--blue); font-size: .73rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    code { padding: .12em .3em; border-radius: 4px; color: #1849a9; background: #eef4ff; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
+    pre { margin: 0; overflow-x: auto; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: #f8faff; line-height: 1.8; font-size: .84rem; }
+    pre code { padding: 0; color: #253858; background: transparent; font-size: inherit; overflow-wrap: normal; }
+    .tree { background: #182439; border-color: #243754; }
+    .tree code { color: #dfebff; }
+    .tree a { color: #aaccff; }
+    .note { margin-top: 15px; padding: 14px 18px; border-left: 3px solid var(--blue); border-radius: 0 8px 8px 0; background: #eaf1ff; color: #2c466e; font-size: .9rem; }
+    .file { display: block; margin-bottom: 12px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: white; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    caption { padding: 14px 18px; text-align: left; color: var(--muted); }
+    th, td { padding: 14px 18px; text-align: left; vertical-align: top; border-top: 1px solid var(--line); }
+    th { color: #34435a; background: #eef3fb; }
+    .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 12px; }
+    .steps li { counter-increment: step; position: relative; padding: 18px 20px 18px 66px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+    .steps li::before { content: counter(step); position: absolute; top: 19px; left: 19px; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: #eaf1ff; color: #1849a9; font-weight: 800; }
+    .steps p { margin: 5px 0 0; color: var(--muted); font-size: .9rem; }
+    details { margin-top: 16px; padding: 16px 20px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+    summary { cursor: pointer; color: #1849a9; font-weight: 750; }
+    details pre { margin-top: 14px; }
+    footer { margin-top: 38px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: .85rem; }
+    @media (max-width: 700px) {
+      main { width: calc(100% - 28px); padding-top: 22px; }
+      .grid { grid-template-columns: 1fr; }
+      .card { padding: 18px; }
+      th, td { padding: 12px; }
+      pre { padding: 14px; font-size: .75rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print { body { background: white; } main { width: 100%; } .back, .section-nav { display: none; } .card { box-shadow: none; } pre { white-space: pre-wrap; } }
+  </style>
+</head>
+<body>
+  <main id="top">
+    <a class="back" href="index.html">← Development notes</a>
+    <header>
+      <p class="eyebrow">Developer guide · Current implementation</p>
+      <h1>Code Structure</h1>
+      <p class="intro">A map of the FoundationStereo repository after the C++ core-library extraction and directory reorganization. Start here to locate a module, follow the inference call sequence, or understand the build targets.</p>
+      <div class="badges" aria-label="Implementation status">
+        <span class="badge">C++: file input → GPU disparity</span>
+        <span class="badge reference">Python: geometry reference</span>
+        <span class="badge planned">Desktop UI &amp; camera: planned</span>
+      </div>
+    </header>
+    <nav class="section-nav" aria-label="On this page">
+      <a href="#layout">Directory map</a>
+      <a href="#modules">Module responsibilities</a>
+      <a href="#build">Build dependencies</a>
+      <a href="#runtime">Runtime flow</a>
+      <a href="#boundaries">Current boundaries</a>
+    </nav>
+
+    <section id="layout" aria-labelledby="layout-heading">
+      <h2 id="layout-heading">01 · Directory map</h2>
+      <p class="description">Headers live under <code>cpp/include/fs/</code>; matching implementations live under <code>cpp/src/</code>. Module names in the tree link to their explanations below.</p>
+      <pre class="tree" tabindex="0" aria-label="Current repository directory tree"><code>FS_Engine/
+├── cpp/
+│   ├── CMakeLists.txt
+│   ├── <a href="#entrypoints">app/</a>
+│   │   ├── TSFS.cpp
+│   │   └── build_single_engine.cpp
+│   ├── include/fs/
+│   │   ├── <a href="#core">core/</a>Logger.hpp
+│   │   ├── <a href="#stereo">stereo/</a>StereoFrame.hpp
+│   │   └── <a href="#inference">inference/</a>
+│   │       ├── FS.hpp
+│   │       └── <a href="#plugins">plugins/</a>
+│   │           ├── GWCVolumePlugin.hpp
+│   │           └── GWCVolumeKernel.hpp
+│   ├── src/
+│   │   ├── core/Logger.cpp
+│   │   ├── stereo/StereoFrame.cpp
+│   │   └── inference/
+│   │       ├── FS.cpp
+│   │       └── plugins/
+│   │           ├── GWCVolumePlugin.cpp
+│   │           └── GWCVolumeKernel.cu
+│   └── README.md
+├── <a href="#python">python/</a>                     # Experiments, exports, geometry reference
+├── FoundationStereo/            # Upstream model implementation
+├── docs/                        # Development documentation
+└── TODO/TODO.md                 # Desktop implementation checklist</code></pre>
+      <p class="note">Local runtime assets include <code>data/</code> captures and <code>onnx/</code> models/engines. <code>cpp/build/</code> contains generated build products. These are separate from the source layout above.</p>
+    </section>
+
+    <section id="modules" aria-labelledby="modules-heading">
+      <h2 id="modules-heading">02 · Module responsibilities</h2>
+      <p class="description">The executable selects inputs and orders the work. The reusable library owns stereo processing and inference; the plugin provides the custom TensorRT operation.</p>
+      <div class="grid">
+        <article class="card" id="entrypoints">
+          <p class="label">Application entry points</p>
+          <h3>app/</h3>
+          <p><code>TSFS.cpp</code> parses a capture directory and optional <code>--measure</code>, loads the engine, and calls rectification and inference in sequence. It also reports failures and returns the process exit status.</p>
+          <p><code>build_single_engine.cpp</code> is a separate tool: it registers the GWC plugin, parses ONNX, and builds a serialized TensorRT engine.</p>
+        </article>
+        <article class="card" id="core">
+          <p class="label">Shared utilities</p>
+          <h3>core/ · Logger</h3>
+          <code class="file">fs/core/Logger.hpp</code>
+          <p>Provides <code>Logger::log()</code> and <code>Logger::error()</code> for diagnostic output. The CLI and stereo module use it to report progress and errors.</p>
+          <p>This folder currently contains logging only. Shared capture/result types have not yet been introduced.</p>
+        </article>
+        <article class="card" id="stereo">
+          <p class="label">Images and camera geometry</p>
+          <h3>stereo/ · StereoFrame</h3>
+          <code class="file">fs/stereo/StereoFrame.hpp</code>
+          <p>Loads left/right images as RGB and reads the OpenCV-style calibration JSON. <code>rectify()</code> runs stereo rectification, builds remap tables, and produces the rectified pair.</p>
+          <p><code>StereoCameraParameters</code> is currently declared here: <code>fx</code>, <code>fy</code>, <code>cx</code>, <code>cy</code>, and baseline in metres. The class exposes the images and rectified camera parameters.</p>
+        </article>
+        <article class="card" id="inference">
+          <p class="label">TensorRT inference</p>
+          <h3>inference/ · FS</h3>
+          <code class="file">fs/inference/FS.hpp</code>
+          <p>Owns the TensorRT runtime, engine, execution context, CUDA stream, and reusable host/device buffers. Engine loading registers the GWC plugin before deserialization.</p>
+          <p>Resizes RGB images to <strong>800 high × 960 wide</strong>, packs FP32 NCHW inputs, and submits inference. It scales the rectified camera intrinsics to that grid and retains the baseline.</p>
+        </article>
+        <article class="card" id="plugins">
+          <p class="label">Independent shared library</p>
+          <h3>inference/plugins/ · GWC</h3>
+          <p><code>GWCVolumePlugin.hpp/.cpp</code> provide the TensorRT Plugin V3 implementation and registration entry points.</p>
+          <p><code>GWCVolumeKernel.hpp/.cu</code> declare and implement the CUDA launcher for groupwise correlation. Both inference and engine building link the resulting <code>libGWCVolumePlugin.so</code>.</p>
+          <p>Registration includes a C entry point, <code>fs_register_gwc_volume_plugin()</code>, for dynamic loaders.</p>
+        </article>
+        <article class="card" id="python">
+          <p class="label">Experiment and reference code</p>
+          <h3>python/</h3>
+          <p><code>fs_high_resolution_utils.py</code> contains shared rectification, inference, disparity postprocessing, point-cloud export, constrained mesh construction, and area calculation helpers.</p>
+          <p>The PyTorch and TensorRT notebooks run experiments and write geometry results; export scripts prepare ONNX models. The C++ CLI does not call this Python pipeline.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="build" aria-labelledby="build-heading">
+      <h2 id="build-heading">03 · Build dependencies</h2>
+      <p class="description">All four targets are defined in <code>cpp/CMakeLists.txt</code>. The core library lets another application reuse the processing code.</p>
+      <pre tabindex="0" aria-label="CMake target dependency diagram"><code>TSFS  [executable: app/TSFS.cpp]
+└── fs_core  [static library: libfs_core.a]
+    ├── FS + StereoFrame + Logger
+    ├── OpenCV + CUDA runtime             PUBLIC dependencies
+    └── TensorRT + GWCVolumePlugin        PRIVATE dependencies
+
+fs_build_single_engine  [executable]
+├── TensorRT + ONNX parser + CUDA runtime
+└── GWCVolumePlugin  [shared library: libGWCVolumePlugin.so]
+    └── TensorRT + CUDA runtime</code></pre>
+      <p class="note"><code>fs_core</code> publishes the <code>cpp/include</code> include root and OpenCV/CUDA requirements used by its headers. TensorRT headers stay private; its classes are forward-declared in <code>FS.hpp</code>. Private link dependencies of this static library still participate in the final executable link.</p>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Build target source mapping">
+        <table>
+          <caption>Source ownership by CMake target</caption>
+          <thead><tr><th scope="col">Target</th><th scope="col">Compiled sources, relative to cpp/</th></tr></thead>
+          <tbody>
+            <tr><td><code>fs_core</code></td><td><code>src/inference/FS.cpp</code><br><code>src/stereo/StereoFrame.cpp</code><br><code>src/core/Logger.cpp</code></td></tr>
+            <tr><td><code>TSFS</code></td><td><code>app/TSFS.cpp</code></td></tr>
+            <tr><td><code>GWCVolumePlugin</code></td><td><code>src/inference/plugins/GWCVolumePlugin.cpp</code><br><code>src/inference/plugins/GWCVolumeKernel.cu</code></td></tr>
+            <tr><td><code>fs_build_single_engine</code></td><td><code>app/build_single_engine.cpp</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <details>
+        <summary>Build and run from the repository root</summary>
+        <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build --parallel
+
+./cpp/build/TSFS data/Volunteer2_lower/0
+./cpp/build/TSFS data/Volunteer2_lower/0 --measure</code></pre>
+        <p class="note">Requires the local OpenCV, CUDA and TensorRT development environment, the sample capture, and the serialized engine. The CLI currently uses the relative engine path <code>onnx/foundationstereo_800x960_gwc_plugin.engine</code>.</p>
+      </details>
+    </section>
+
+    <section id="runtime" aria-labelledby="runtime-heading">
+      <h2 id="runtime-heading">04 · Runtime flow</h2>
+      <p class="description">This is the actual call order in <code>app/TSFS.cpp</code>. CPU images are prepared first; inference produces a GPU-resident disparity buffer.</p>
+      <ol class="steps">
+        <li><strong>Load the engine</strong><p><code>FS::loadEngine()</code> registers the custom plugin, deserializes the engine, creates the execution context, and prepares reusable buffers.</p></li>
+        <li><strong>Load the stereo capture</strong><p><code>StereoFrame(left_path, right_path, calibration_path)</code> reads <code>left.png</code>, <code>right.png</code>, and <code>calibration.json</code>.</p></li>
+        <li><strong>Rectify the images</strong><p><code>StereoFrame::rectify()</code> performs <code>stereoRectify → initUndistortRectifyMap → remap</code>. Output: rectified RGB images, intrinsics, and baseline.</p></li>
+        <li><strong>Prepare the model grid and GPU inputs</strong><p><code>set_model_camera_parameters()</code> scales intrinsics; <code>prepare_stereo_images()</code> resizes, packs, and uploads the pair. Input tensors: <code>[1, 3, 800, 960]</code>.</p></li>
+        <li><strong>Submit inference or measure ten runs</strong><p><code>inference()</code> calls TensorRT <code>enqueueV3()</code> on the FS CUDA stream. With <code>--measure</code>, <code>inference_time_measure()</code> runs ten inferences, prints GPU timings in milliseconds, and returns their mean.</p></li>
+        <li><strong>Retain disparity inside FS</strong><p>Output tensor: <code>[1, 1, 800, 960]</code>. The device buffer belongs to the FS instance. The current CLI then exits; it does not yet export disparity or construct geometry.</p></li>
+      </ol>
+      <p class="note"><code>inference()</code> submits asynchronous GPU work. There is currently no public disparity-result accessor. A synchronized result-copy interface is a planned follow-up.</p>
+    </section>
+
+    <section id="boundaries" aria-labelledby="boundaries-heading">
+      <h2 id="boundaries-heading">05 · Current boundaries and next steps</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Implemented and verified</h3>
+          <p>Core-library extraction and module-directory migration are complete. Release builds of all targets, normal CLI inference, and ten-run timing on <code>data/Volunteer2_lower/0</code> have passed.</p>
+          <p>Geometry and area computation already exist in the Python reference workflow. The C++ implementation currently ends at disparity inference.</p>
+        </article>
+        <article class="card">
+          <h3>Planned extensions</h3>
+          <p>The next checklist item is an in-memory image/calibration input interface, followed by synchronized disparity-result access.</p>
+          <p>Camera sources, C++ geometry and pipeline modules, and a Qt/VTK desktop application remain planned. Their proposed folders are not part of the current source tree.</p>
+          <p>The implementation checklist lives in <code>TODO/TODO.md</code>. See the <a href="stereo_reconstruction_pipeline.html">algorithm overview</a> for the intended end-to-end reconstruction workflow.</p>
+        </article>
+      </div>
+    </section>
+    <footer><a href="index.html">Back to development notes</a> · <a href="#top">Back to top</a></footer>
+  </main>
+</body>
+</html>

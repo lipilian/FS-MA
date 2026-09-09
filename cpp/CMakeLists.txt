@@ -41,9 +41,9 @@ endif()
 
 # Shared processing code for the CLI and future desktop application.
 add_library(fs_core STATIC
-    src/FS.cpp
-    src/Logger.cpp
-    src/StereoFrame.cpp
+    src/inference/FS.cpp
+    src/core/Logger.cpp
+    src/stereo/StereoFrame.cpp
 )
 
 target_include_directories(fs_core
@@ -76,8 +76,8 @@ target_compile_options(TSFS PRIVATE
 # Standalone TensorRT Plugin V3 shared library. It is loaded by the engine
 # builder/runtime and is intentionally independent from the TSFS executable.
 add_library(GWCVolumePlugin SHARED
-    src/GWCVolumePlugin.cpp
-    src/GWCVolumeKernel.cu
+    src/inference/plugins/GWCVolumePlugin.cpp
+    src/inference/plugins/GWCVolumeKernel.cu
 )
 
 set_target_properties(GWCVolumePlugin PROPERTIES

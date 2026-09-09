@@ -2,9 +2,9 @@
 #include <filesystem>
 #include <string>
 
-#include "FS.hpp"
-#include "Logger.hpp"
-#include "StereoFrame.hpp"
+#include "fs/inference/FS.hpp"
+#include "fs/core/Logger.hpp"
+#include "fs/stereo/StereoFrame.hpp"
 
 namespace {
 

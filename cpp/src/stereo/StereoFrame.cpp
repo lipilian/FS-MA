@@ -1,5 +1,5 @@
-#include "StereoFrame.hpp"
-#include "Logger.hpp"
+#include "fs/stereo/StereoFrame.hpp"
+#include "fs/core/Logger.hpp"
 
 #include <cmath>
 #include <sstream>

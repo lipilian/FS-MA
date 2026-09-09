@@ -1,4 +1,4 @@
-#include "GWCVolumePlugin.hpp"
+#include "fs/inference/plugins/GWCVolumePlugin.hpp"
 
 #include <NvInfer.h>
 #include <NvOnnxParser.h>

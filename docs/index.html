@@ -251,9 +251,9 @@
 
     .page-links {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
-      max-width: 690px;
+      max-width: 960px;
       margin: 24px 0 0;
     }
 
@@ -1330,6 +1330,13 @@
         </span>
         <span class="page-link-arrow" aria-hidden="true">&#8594;</span>
       </a>
+      <a class="page-link" href="code_structure.html">
+        <span>
+          <span class="page-link-title">Code Structure</span>
+          <span class="page-link-description">Browse modules, build targets, and inference flow</span>
+        </span>
+        <span class="page-link-arrow" aria-hidden="true">&#8594;</span>
+      </a>
       <a class="page-link" href="task.html">
         <span>
           <span class="page-link-title">Task Tracking</span>
@@ -1481,7 +1488,7 @@
         </article>
         <article class="progress-item">
           <div class="progress-icon" aria-hidden="true">▣</div>
-          <h3><a href="https://github.com/smd-ai/FS_Engine/blob/main/cpp/src/StereoFrame.cpp" target="_blank" rel="noopener noreferrer">Data Load</a></h3>
+          <h3><a href="https://github.com/smd-ai/FS_Engine/blob/main/cpp/src/stereo/StereoFrame.cpp" target="_blank" rel="noopener noreferrer">Data Load</a></h3>
           <p>Stereo image and calibration-data loading is prepared.</p>
         </article>
         <article class="progress-item">
@@ -2085,10 +2092,10 @@ volume = refimg_fea.new_zeros([B, num_groups, maxdisp, H, W])</code></a></pre>
         <h3 id="gwc-plugin-writing-heading">Plugin Implementation</h3>
         <h4>1. Create the plugin files</h4>
         <p>Create these four files first. They separate the TensorRT Plugin V3 interface from the CUDA implementation.</p>
-        <pre><code>cpp/include/GWCVolumePlugin.hpp
-cpp/include/GWCVolumeKernel.hpp
-cpp/src/GWCVolumePlugin.cpp
-cpp/src/GWCVolumeKernel.cu
+        <pre><code>cpp/include/fs/inference/plugins/GWCVolumePlugin.hpp
+cpp/include/fs/inference/plugins/GWCVolumeKernel.hpp
+cpp/src/inference/plugins/GWCVolumePlugin.cpp
+cpp/src/inference/plugins/GWCVolumeKernel.cu
 
 GWCVolumeKernel.cu
 └── CUDA correlation computation

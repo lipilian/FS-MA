@@ -1,4 +1,4 @@
-#include "GWCVolumeKernel.hpp"
+#include "fs/inference/plugins/GWCVolumeKernel.hpp"
 
 #include <cuda_fp16.h>
 

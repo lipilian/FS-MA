@@ -8,9 +8,18 @@ operations match `python/fs_high_resolution_utils.py`:
 
 Source layout:
 
-- `include/StereoFrame.hpp`: stereo frame class interface.
-- `src/StereoFrame.cpp`: stereo frame implementation.
-- `app/TSFS.cpp`: command-line application entry point.
+Public headers live under `include/fs/`, with matching implementation
+folders under `src/`:
+
+- `core/`: logging (`Logger`).
+- `stereo/`: stereo images, calibration, and rectification (`StereoFrame`).
+- `inference/`: TensorRT inference (`FS`).
+- `inference/plugins/`: the independent GWC plugin and CUDA kernel.
+- `app/`: CLI and engine-builder entry points.
+
+Include headers using their full path, for example
+`#include "fs/inference/FS.hpp"` or `#include "fs/stereo/StereoFrame.hpp"`.
+The CMake include root remains `cpp/include`.
 
 Build targets:
 

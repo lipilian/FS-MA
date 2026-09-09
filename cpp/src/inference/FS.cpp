@@ -1,6 +1,6 @@
-#include "FS.hpp"
+#include "fs/inference/FS.hpp"
 
-#include "GWCVolumePlugin.hpp"
+#include "fs/inference/plugins/GWCVolumePlugin.hpp"
 
 #include <cuda_runtime_api.h>
 #include <opencv2/imgproc.hpp>

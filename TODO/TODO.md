@@ -1,6 +1,6 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分，尚未开始 UI 功能实现。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分和代码目录整理，尚未开始 UI 功能实现。
 
 ## 已确定的方向
 
@@ -15,7 +15,7 @@
 ## 当前代码基础
 
 - `cpp/app/TSFS.cpp` 已完成文件输入、双目校正和 FS engine 推理的串联。
-- `cpp/include/FS.hpp` 中的 `FS::inference()` 提交 GPU 工作，视差保留在内部 GPU 缓冲区，尚需补充结果读取接口。
+- `cpp/include/fs/inference/FS.hpp` 中的 `FS::inference()` 提交 GPU 工作，视差保留在内部 GPU 缓冲区，尚需补充结果读取接口。
 - `StereoFrame` 当前通过文件路径加载图像和标定，后续需要支持内存输入。
 - `python/fs_high_resolution_utils.py` 已有点云过滤、受约束 mesh 生成和面积计算，可作为 C++ 实现的参考。
 - `docs/index.html` 继续作为开发文档；桌面应用单独建立入口。
@@ -95,7 +95,7 @@ FS_Engine/
 
 目录随功能逐步建立，不要求一次性创建全部空目录。
 
-- 将现有 FS 移入 inference，StereoFrame 移入 stereo；GWC 插件保持独立编译。
+- FS 放入 inference，StereoFrame 放入 stereo，Logger 放入 core；GWC 插件及 CUDA kernel 放入 inference/plugins，保持独立编译。
 - 新增 `fs_core` 库，供 CLI 和桌面应用共同链接。
 - 桌面目标命名为 `fs_desktop`，通过 `FS_BUILD_DESKTOP` 开关构建；Qt/VTK 依赖仅加入桌面目标。
 - `MainWindow` 组织控件，按钮调用 `PipelineController`，由 controller 提交后台任务。
@@ -147,14 +147,15 @@ FileStereoSource / ReplayStereoSource / 未来 CameraStereoSource
 ### 阶段 1：拆出核心库，保持 CLI 可用
 
 - [x] 将现有共用代码整理成 `fs_core`，保留 GWC 插件和 engine builder 的独立目标。
-- [ ] 按职责迁移 FS、StereoFrame 等代码并更新 include 和 CMake。
+- [x] 按职责迁移 FS、StereoFrame 等代码并更新 include 和 CMake。
 - [ ] 增加图像及标定的内存输入接口。
 - [ ] 增加同步后的视差结果读取接口，明确数据所有权。
 - [ ] 验证现有 CLI 输入、校正和推理行为保持正常。
 
-本次构建拆分验证已通过：Release 配置及全部目标构建成功，
+核心库构建拆分和目录迁移均已验证：Release 配置及全部目标构建成功，
 `data/Volunteer2_lower/0` 的普通运行与 `--measure` 十次推理均正常退出。
-文件位置和算法逻辑保持不变；后续目录迁移与接口变更完成后仍需重新验证 CLI。
+目录迁移后的 12 个 C++ 文件经比对仅改变位置和 include 路径，算法逻辑保持不变；
+后续内存输入与视差结果接口完成后仍需重新验证 CLI。
 
 ### 阶段 2：打通桌面重建
 

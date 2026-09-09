@@ -1,6 +1,6 @@
 #pragma once
 
-#include "StereoFrame.hpp"
+#include "fs/stereo/StereoFrame.hpp"
 
 #include <filesystem>
 #include <memory>
