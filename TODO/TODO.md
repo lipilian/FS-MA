@@ -1,13 +1,13 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理和内存输入接口，尚未开始 UI 功能实现。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理和内存输入接口，已提前接入 Sentech 双目采集和独立预览工具，完整 Qt/VTK 工作台尚未实现。
 
 ## 已确定的方向
 
 - 平台：仅 Linux 本地桌面应用。
 - 技术路线：Qt 6 Widgets + VTK + 现有 C++ FoundationStereo TensorRT engine。
-- 当前输入：导入 stereo pair 和已有标定文件。
-- 未来输入：双目相机预览后拍摄一组，冻结图像，再重建和测量；目前没有相机硬件。
+- 当前输入：文件导入，或 Sentech 双目相机采集；标定仍由已有 JSON 提供。
+- 相机输入：左 STC-MCS500U3V(21LJ530)、右 STC-MCS500U3V(21LJ548)；已连接并验证单次拍摄和关闭后重新连接。采用独立连续流，尚未实现硬件同步。
 - 测量交互：在校正后的左图编辑 2D mask，联动 3D 点云、mesh 和曲面面积。
 - 第一版默认支持一个无孔多边形区域；不包含自动分割、相机标定向导、连续实时重建和多视角融合。
 - Python 保留作为算法实验和结果对照；实际应用以 C++ 为主。
@@ -77,17 +77,16 @@ FS_Engine/
 │   │   ├── geometry/
 │   │   ├── pipeline/
 │   │   └── io/
-│   ├── ui/
-│   │   ├── MainWindow.hpp/.cpp
-│   │   ├── PipelineController.hpp/.cpp
-│   │   ├── PipelineWorker.hpp/.cpp
-│   │   ├── widgets/
-│   │   │   ├── StereoImageView.hpp/.cpp
-│   │   │   ├── MaskEditor.hpp/.cpp
-│   │   │   ├── SceneView3D.hpp/.cpp
-│   │   │   └── MeasurementPanel.hpp/.cpp
-│   │   └── resources/
-│   └── tests/
+│   └── ui/
+│       ├── MainWindow.hpp/.cpp
+│       ├── PipelineController.hpp/.cpp
+│       ├── PipelineWorker.hpp/.cpp
+│       ├── widgets/
+│       │   ├── StereoImageView.hpp/.cpp
+│       │   ├── MaskEditor.hpp/.cpp
+│       │   ├── SceneView3D.hpp/.cpp
+│       │   └── MeasurementPanel.hpp/.cpp
+│       └── resources/
 ├── python/                         # 实验和算法对照
 ├── docs/                           # 开发文档
 └── result/                         # 本地输出，忽略生成文件
@@ -104,7 +103,7 @@ FS_Engine/
 ## 核心接口与数据流
 
 ```text
-FileStereoSource / ReplayStereoSource / 未来 CameraStereoSource
+FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
                             ↓
                    StereoCapture
               左右 RGB + 标定 + 帧标识
@@ -156,10 +155,12 @@ FileStereoSource / ReplayStereoSource / 未来 CameraStereoSource
 `data/Volunteer2_lower/0` 的普通运行与 `--measure` 十次推理均正常退出。
 目录迁移后的 12 个 C++ 文件经比对仅改变位置和 include 路径，算法逻辑保持不变；
 内存接口完成后，Release 构建、CTest 和真实样本的普通/计时推理已通过。
-新增测试覆盖文件/内存校正一致性、图像和标定独立持有、非连续缓冲区、
+当时的测试覆盖文件/内存校正一致性、图像和标定独立持有、非连续缓冲区、
 浮点标定及行/列向量、无效输入和缺失 JSON 字段。真实样本首次对比出现过一次
 校正后右图不一致；补充原始左右图检查与最大差异诊断后，连续五次复测通过，
 首次差异原因尚未定位，后续回归时继续关注。视差结果接口完成后仍需重新验证 CLI。
+
+按用户要求已删除两个自动化测试源文件及 CMake 测试目标；上面的测试结果保留为历史验证记录。
 
 ### 阶段 2：打通桌面重建
 
@@ -180,12 +181,21 @@ FileStereoSource / ReplayStereoSource / 未来 CameraStereoSource
 - [ ] 显示曲面面积、有效点数、三角形数量和结果更新状态。
 - [ ] 导出输入图像、标定、mask、点云 PLY、mesh PLY 和测量参数及面积。
 
-### 阶段 4：验证未来相机输入接口
+### 阶段 4：相机输入（按当前优先级提前推进）
 
-- [ ] 实现统一的 `IStereoSource` 和文件输入适配器。
+- [x] 实现 `IStereoSource` 和 Sentech 采集适配器，配置左右身份，输出自有 RGB 图像及帧元数据。
+- [ ] 实现文件输入适配器。
 - [ ] 实现文件回放，模拟双目预览和拍摄一组图像。
 - [ ] 验证拍摄冻结后可进入现有重建与测量流程。
-- [ ] 在真实硬件到位后，根据相机 SDK 实现采集适配器，并验证左右帧配对、时间戳和标定匹配。
+- [x] 新增 `fs_sentech` 设备列表、OpenCV 双目预览、单次拍摄和可选内存推理入口。
+- [x] 使用实际双机验证身份绑定、采集、RGB 保存与帧元数据：左右均为 2448×2048，曝光按 SDK 调整为 49994.8 µs。
+- [x] 自动化验证枚举顺序不影响左右角色、重复/缺失身份、双侧新帧、主机到达时间差、停止与错误传播。
+- [ ] 使用该物理相机组合的正确标定验证校正和推理，检查极线对齐；不直接假定历史数据标定适用于当前安装。
+- [ ] 验证预览窗口交互、长时间采集和真实拔插恢复；根据测量要求接入并验证曝光同步。
+
+相机 SDK 默认 `/opt/sentech`，构建开关 `FS_BUILD_SENTECH=ON`。
+参考项目为 `/home/liu4000/Desktop/FS`，沿用用户确认的左右相机绑定。
+主机到达时间差门限仅用于软件配对，不代表两台相机同时曝光；原有校正偶发差异记录仍保留。
 
 ## 验收清单
 

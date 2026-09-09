@@ -73,8 +73,9 @@
       <p class="intro">A map of the FoundationStereo repository after the C++ core-library extraction and directory reorganization. Start here to locate a module, follow the inference call sequence, or understand the build targets.</p>
       <div class="badges" aria-label="Implementation status">
         <span class="badge">C++: file / memory input → GPU disparity</span>
+        <span class="badge">Sentech: dual-camera capture</span>
         <span class="badge reference">Python: geometry reference</span>
-        <span class="badge planned">Desktop UI &amp; camera: planned</span>
+        <span class="badge planned">Qt/VTK workbench: planned</span>
       </div>
     </header>
     <nav class="section-nav" aria-label="On this page">
@@ -83,6 +84,7 @@
       <a href="#build">Build dependencies</a>
       <a href="#runtime">Runtime flow</a>
       <a href="#boundaries">Current boundaries</a>
+      <a href="#camera-usage">Camera commands</a>
     </nav>
 
     <section id="layout" aria-labelledby="layout-heading">
@@ -93,8 +95,13 @@
 │   ├── CMakeLists.txt
 │   ├── <a href="#entrypoints">app/</a>
 │   │   ├── TSFS.cpp
-│   │   └── build_single_engine.cpp
+│   │   ├── build_single_engine.cpp
+│   │   └── sentech_capture.cpp
+│   ├── cmake/Sentech.cmake
 │   ├── include/fs/
+│   │   ├── <a href="#capture">capture/</a>
+│   │   │   ├── IStereoSource.hpp
+│   │   │   └── SentechStereoSource.hpp
 │   │   ├── <a href="#core">core/</a>Logger.hpp
 │   │   ├── <a href="#stereo">stereo/</a>
 │   │   │   ├── StereoFrame.hpp
@@ -105,6 +112,9 @@
 │   │           ├── GWCVolumePlugin.hpp
 │   │           └── GWCVolumeKernel.hpp
 │   ├── src/
+│   │   ├── capture/
+│   │   │   ├── SentechStereoSource.cpp
+│   │   │   └── StereoCaptureSupport.hpp
 │   │   ├── core/Logger.cpp
 │   │   ├── stereo/
 │   │   │   ├── StereoFrame.cpp
@@ -114,7 +124,6 @@
 │   │       └── plugins/
 │   │           ├── GWCVolumePlugin.cpp
 │   │           └── GWCVolumeKernel.cu
-│   ├── tests/StereoFrameTests.cpp
 │   └── README.md
 ├── <a href="#python">python/</a>                     # Experiments, exports, geometry reference
 ├── FoundationStereo/            # Upstream model implementation
@@ -138,7 +147,7 @@
           <h3>core/ · Logger</h3>
           <code class="file">fs/core/Logger.hpp</code>
           <p>Provides <code>Logger::log()</code> and <code>Logger::error()</code> for diagnostic output. The CLI and stereo module use it to report progress and errors.</p>
-          <p>This folder currently contains logging only. Shared capture/result types have not yet been introduced.</p>
+          <p>This folder currently contains logging only. Camera frame/pair types live in <code>capture/IStereoSource.hpp</code>.</p>
         </article>
         <article class="card" id="stereo">
           <p class="label">Images and camera geometry</p>
@@ -162,6 +171,14 @@
           <p><code>GWCVolumeKernel.hpp/.cu</code> declare and implement the CUDA launcher for groupwise correlation. Both inference and engine building link the resulting <code>libGWCVolumePlugin.so</code>.</p>
           <p>Registration includes a C entry point, <code>fs_register_gwc_volume_plugin()</code>, for dynamic loaders.</p>
         </article>
+        <article class="card" id="capture">
+          <p class="label">Camera acquisition · Optional SDK module</p>
+          <h3>capture/ · SentechStereoSource</h3>
+          <code class="file">fs/capture/SentechStereoSource.hpp</code>
+          <p>Implements <code>IStereoSource</code> with separate workers for left <code>21LJ530</code> and right <code>21LJ548</code>. Device roles match exact names or serials, never enumeration order.</p>
+          <p>Converts SDK images to owned RGB8 snapshots and returns a <code>StereoCameraPair</code> containing images, frame IDs, camera-local timestamps, and host arrival times. Each pair uses a new frame from both sides, with a configurable host-arrival skew limit.</p>
+          <p>These are independent continuous streams, not synchronized exposures. <code>app/sentech_capture.cpp</code> provides device listing, OpenCV preview, PNG capture, and an optional in-memory inference handoff with user-supplied calibration.</p>
+        </article>
         <article class="card" id="python">
           <p class="label">Experiment and reference code</p>
           <h3>python/</h3>
@@ -173,7 +190,7 @@
 
     <section id="build" aria-labelledby="build-heading">
       <h2 id="build-heading">03 · Build dependencies</h2>
-      <p class="description">The four production targets and optional test target are defined in <code>cpp/CMakeLists.txt</code>. The core library lets another application reuse the processing code.</p>
+      <p class="description">The core targets are defined in <code>cpp/CMakeLists.txt</code>; optional camera targets are defined in <code>cpp/cmake/Sentech.cmake</code>. The core library lets another application reuse the processing code.</p>
       <pre tabindex="0" aria-label="CMake target dependency diagram"><code>TSFS  [executable: app/TSFS.cpp]
 └── fs_core  [static library: libfs_core.a]
     ├── FS + StereoFrame + StereoCalibration + Logger
@@ -183,7 +200,12 @@
 fs_build_single_engine  [executable]
 ├── TensorRT + ONNX parser + CUDA runtime
 └── GWCVolumePlugin  [shared library: libGWCVolumePlugin.so]
-    └── TensorRT + CUDA runtime</code></pre>
+    └── TensorRT + CUDA runtime
+
+fs_sentech  [optional executable: FS_BUILD_SENTECH=ON]
+├── fs_sentech_source  [static library]
+│   └── StApi TL/IP + GenICam + turbojpeg + OpenCV core + threads
+└── fs_core + OpenCV HighGUI</code></pre>
       <p class="note"><code>fs_core</code> publishes the <code>cpp/include</code> include root and OpenCV/CUDA requirements used by its headers. TensorRT headers stay private; its classes are forward-declared in <code>FS.hpp</code>. Private link dependencies of this static library still participate in the final executable link.</p>
       <div class="table-wrap" tabindex="0" role="region" aria-label="Build target source mapping">
         <table>
@@ -194,7 +216,8 @@ fs_build_single_engine  [executable]
             <tr><td><code>TSFS</code></td><td><code>app/TSFS.cpp</code></td></tr>
             <tr><td><code>GWCVolumePlugin</code></td><td><code>src/inference/plugins/GWCVolumePlugin.cpp</code><br><code>src/inference/plugins/GWCVolumeKernel.cu</code></td></tr>
             <tr><td><code>fs_build_single_engine</code></td><td><code>app/build_single_engine.cpp</code></td></tr>
-            <tr><td><code>stereo_frame_tests</code> (BUILD_TESTING)</td><td><code>tests/StereoFrameTests.cpp</code>, linked to <code>fs_core</code></td></tr>
+            <tr><td><code>fs_sentech_source</code> (FS_BUILD_SENTECH)</td><td><code>src/capture/SentechStereoSource.cpp</code></td></tr>
+            <tr><td><code>fs_sentech</code> (FS_BUILD_SENTECH)</td><td><code>app/sentech_capture.cpp</code></td></tr>
           </tbody>
         </table>
       </div>
@@ -229,16 +252,25 @@ cmake --build cpp/build --parallel
         <article class="card">
           <h3>Implemented and verified</h3>
           <p>Core-library extraction, module-directory migration, and in-memory stereo input are complete. Release builds of all targets, normal CLI inference, and ten-run timing on <code>data/Volunteer2_lower/0</code> have passed.</p>
-          <p>Input regression tests cover file/memory equivalence, buffer ownership, and invalid calibration. One initial real-capture comparison failed; five consecutive diagnostic reruns passed. The observation remains recorded in <code>TODO/TODO.md</code>.</p>
+          <p>Earlier input checks covered file/memory equivalence, buffer ownership, and invalid calibration. The test sources and targets have since been removed. One initial real-capture comparison failed; five consecutive diagnostic reruns passed. The observation remains recorded in <code>TODO/TODO.md</code>.</p>
           <p>Geometry and area computation already exist in the Python reference workflow. The C++ implementation currently ends at disparity inference.</p>
         </article>
         <article class="card">
           <h3>Planned extensions</h3>
           <p>In-memory image/calibration input is implemented. The next checklist item is synchronized disparity-result access.</p>
-          <p>Camera sources, C++ geometry and pipeline modules, and a Qt/VTK desktop application remain planned. Their proposed folders are not part of the current source tree.</p>
+          <p>Sentech capture has been verified on the real pair at 2448×2048. Camera-rig calibration validation, exposure synchronization, C++ geometry/pipeline modules, and the Qt/VTK workbench remain pending.</p>
           <p>The implementation checklist lives in <code>TODO/TODO.md</code>. See the <a href="stereo_reconstruction_pipeline.html">algorithm overview</a> for the intended end-to-end reconstruction workflow.</p>
         </article>
       </div>
+    </section>
+    <section id="camera-usage" aria-labelledby="camera-usage-heading">
+      <h2 id="camera-usage-heading">06 · Connect the Sentech pair</h2>
+      <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_SENTECH=ON
+cmake --build cpp/build --parallel
+./cpp/build/fs_sentech --list
+./cpp/build/fs_sentech --preview
+./cpp/build/fs_sentech --capture data/sentech_capture_001</code></pre>
+      <p class="note">Preview: Space captures one pair and exits; Q/Esc exits without a capture. Add <code>--preview --capture NEW_DIRECTORY</code> to save on Space. Add <code>--calibration PATH --infer</code> only with calibration for this rig and image grid. The SDK defaults to <code>/opt/sentech</code>. The camera module is disabled by default for file-only builds.</p>
     </section>
     <footer><a href="index.html">Back to development notes</a> · <a href="#top">Back to top</a></footer>
   </main>

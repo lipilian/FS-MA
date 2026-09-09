@@ -30,6 +30,35 @@
         "isDefault": true
       },
       "problemMatcher": "$gcc"
+    },
+    {
+      "label": "Configure Sentech (Release)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S",
+        "${workspaceFolder}/cpp",
+        "-B",
+        "${workspaceFolder}/cpp/build",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DFS_BUILD_SENTECH=ON"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Sentech",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/cpp/build",
+        "--target",
+        "fs_sentech",
+        "--parallel"
+      ],
+      "dependsOn": "Configure Sentech (Release)",
+      "dependsOrder": "sequence",
+      "problemMatcher": "$gcc"
     }
   ]
 }

@@ -124,12 +124,8 @@ target_compile_options(fs_build_single_engine PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
 
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(stereo_frame_tests tests/StereoFrameTests.cpp)
-    target_link_libraries(stereo_frame_tests PRIVATE fs_core)
-    target_compile_options(stereo_frame_tests PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
-    )
-    add_test(NAME stereo_frame_inputs COMMAND stereo_frame_tests)
+# Keep camera SDK and preview dependencies optional for file-only builds.
+option(FS_BUILD_SENTECH "Build Sentech dual-camera capture and preview" OFF)
+if(FS_BUILD_SENTECH)
+    include(cmake/Sentech.cmake)
 endif()

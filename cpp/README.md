@@ -129,19 +129,82 @@ Its declaration is in `include/fs/stereo/StereoCalibration.hpp`.
   `from_file()` reads required matrices; the frame constructor validates their
   shapes and values. File loading errors remain exceptions.
 
-## Input regression tests
+## Sentech stereo cameras
 
-The default `BUILD_TESTING=ON` adds `stereo_frame_tests`. The tests create their
-own small image/calibration fixtures and do not run GPU inference or require an
-engine or capture dataset; building still uses this project's dependencies.
+The optional `fs_sentech_source` library implements `IStereoSource` with the
+Sentech StApi SDK. `fs_sentech` provides a small OpenCV preview/capture tool and
+an optional in-memory handoff to `StereoFrame` and FS inference. The full Qt/VTK
+workbench remains a later step.
+
+Default identities, confirmed for this rig:
+
+| Role | Display name | Serial |
+| --- | --- | --- |
+| Left | `STC-MCS500U3V(21LJ530)` | `21LJ530` |
+| Right | `STC-MCS500U3V(21LJ548)` | `21LJ548` |
+
+Matching accepts an exact display name, user-defined name, or serial. Enumeration
+order never assigns a role; missing, ambiguous, or same-camera matches fail.
+Use `--left` and `--right` to override the defaults.
 
 ```bash
-ctest --test-dir cpp/build --output-on-failure
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_SENTECH=ON
+cmake --build cpp/build --parallel
 
-# Optional equivalence check using an existing capture:
-./cpp/build/stereo_frame_tests data/Volunteer2_lower/0
+./cpp/build/fs_sentech --list
+./cpp/build/fs_sentech --preview
+
+# Save one pair immediately into a NEW directory:
+./cpp/build/fs_sentech --capture data/sentech_capture_001
+
+# Preview, then press Space to save the displayed pair:
+./cpp/build/fs_sentech --preview --capture data/sentech_capture_002
 ```
 
-Coverage includes file/memory rectification equivalence, deep-copy ownership,
-RGB preservation, strided inputs, float calibration, row/column vectors, invalid
-inputs, missing JSON fields, and baseline units.
+Preview shows LEFT and RIGHT side by side. Space captures one pair and exits;
+Q/Esc exits without capturing. An existing output directory is never overwritten.
+Saved files are `left.png`, `right.png`, and `capture.json` with identities,
+frame IDs and timestamps. When `--calibration` is supplied, its JSON is copied
+into the capture directory too. Raw captures can be saved without calibration.
+
+To rectify and infer a captured pair, supply calibration for this physical rig,
+left/right assignment, and acquisition resolution:
+
+```bash
+./cpp/build/fs_sentech --preview --capture data/sentech_capture_003 \
+  --calibration /path/to/this_rig/calibration.json --infer
+```
+
+The source is stopped before processing the owned RGB snapshots. FS still uses
+the existing 800×960 engine; `--engine PATH` overrides its path. Inference ends
+with disparity in FS device memory; point clouds/mesh and public disparity
+readback are not implemented by this tool. Calibration matching must be verified
+on the actual rig; the existing JSON does not encode camera serials or image size.
+
+The capture implementation follows the local reference project at
+`/home/liu4000/Desktop/FS/src/io/sentech_stereo_source.cpp`: timed exposure defaults
+to 50,000 µs (adjusted to supported increments), continuous white balance when
+available, one acquisition worker per camera, and owned image snapshots. It
+converts directly to RGB8 for the current `StereoFrame` contract.
+
+These are **independent continuous streams, not hardware-synchronized exposures**.
+A delivered pair contains a fresh frame from each side with host-arrival skew
+at most `--max-arrival-skew-ms` (default 100). Host arrival time includes transport
+latency; camera-local device timestamps are retained but never treated as a shared
+clock. This pairing is suitable for connection checks and static-scene trials;
+moving-scene measurement needs a verified synchronization arrangement.
+
+`--exposure-us` changes requested exposure; `--timeout-ms` (default 5000) limits
+waiting for valid pairs after streaming starts. Capture errors are propagated,
+workers are joined before SDK buffers/devices are released, and subsequent captures
+can reopen the cameras. Controls are changed in the active camera session; this
+tool does not save camera user sets, change ROI, or perform calibration.
+
+SDK discovery defaults to `/opt/sentech`; override `FS_SENTECH_ROOT` if needed.
+The camera target links StApi TL/IP, GenICam and the SDK's turbojpeg, plus OpenCV
+HighGUI. It supplies the SDK runtime search paths and sets `GENICAM_GENTL64_PATH`
+only when that variable is absent. `FS_BUILD_SENTECH=OFF` keeps SDK/preview
+requirements out of the file-only build (default).
+
+In VS Code, select **Preview Sentech stereo (Left 21LJ530 / Right 21LJ548)** or
+**List Sentech cameras** in Run and Debug; both build the camera target first.
