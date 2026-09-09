@@ -1,15 +1,16 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理和内存输入接口，已提前接入 Sentech 双目采集和独立预览工具，完整 Qt/VTK 工作台尚未实现。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理和内存输入接口，已提前接入 Sentech 双目采集和独立预览工具，完整 Qt/VTK 工作台尚未实现。下一步先搭建专用标定窗口，再搭建重建与测量窗口；本次仅更新计划。
 
 ## 已确定的方向
 
 - 平台：仅 Linux 本地桌面应用。
 - 技术路线：Qt 6 Widgets + VTK + 现有 C++ FoundationStereo TensorRT engine。
-- 当前输入：文件导入，或 Sentech 双目相机采集；标定仍由已有 JSON 提供。
+- Qt 应用由两个独立的主窗口顺序组成：窗口 1 专门完成 calibration，正常完成后才能创建并进入窗口 2；窗口 2 为下文的重建、3D 浏览和面积测量工作台。
+- 当前实现支持文件导入或 Sentech 双目相机采集，标定由已有 JSON 提供；计划在 Qt 窗口 1 中新增标定求解、检查和保存。
 - 相机输入：左 STC-MCS500U3V(21LJ530)、右 STC-MCS500U3V(21LJ548)；已连接并验证单次拍摄和关闭后重新连接。采用独立连续流，尚未实现硬件同步。
 - 测量交互：在校正后的左图编辑 2D mask，联动 3D 点云、mesh 和曲面面积。
-- 第一版默认支持一个无孔多边形区域；不包含自动分割、相机标定向导、连续实时重建和多视角融合。
+- 第一版默认支持一个无孔多边形区域；包含专用标定窗口；不包含自动分割、连续实时重建和多视角融合。
 - Python 保留作为算法实验和结果对照；实际应用以 C++ 为主。
 
 ## 当前代码基础
@@ -20,9 +21,66 @@
 - `python/fs_high_resolution_utils.py` 已有点云过滤、受约束 mesh 生成和面积计算，可作为 C++ 实现的参考。
 - `docs/index.html` 继续作为开发文档；桌面应用单独建立入口。
 
-## UI 工作台
+## Qt 双窗口流程
 
-保持在同一个窗口中操作，方便对照原图与三维结果，按阶段开放相关操作。
+两个主窗口属于同一个桌面应用，按顺序进入；不做同时运行的两个工作台。
+
+```text
+启动 fs_desktop
+       ↓
+窗口 1：CalibrationWindow（专用标定）
+连接双目 → 设置标定板 → 采集样本 → 计算标定 → 检查与保存
+       ↓ 用户点击“完成标定并进入工作台”且完成条件满足
+结束标定窗口及其检测/求解任务，交接已确认的标定和相机会话
+       ↓
+窗口 2：ReconstructionWindow（原计划工作台）
+导入／拍摄 → 校正 → FS inference → 点云／mesh → 选区与面积
+```
+
+- 第二个窗口只在第一个窗口正常完成后创建并启动，不能通过启动参数或普通关闭操作跳过标定流程。
+- 标定窗口点击关闭或取消代表取消流程，不自动打开第二个窗口；释放后台任务和相机资源后退出。
+- “计算标定”用于求解参数，“完成标定并进入工作台”用于窗口切换，避免把求解成功和完成整个标定流程混为一谈。
+- 暂定完成条件：有效标定已保存、当前相机身份与图像尺寸已确认、质量检查通过且没有正在进行的采样/求解任务。误差阈值先参考旧工程，正式门限在实现前确认。
+- 支持在第一个窗口加载已有标定，但加载不直接跳过第一窗口，仍需确认匹配并完成检查；纯离线输入时如何完成该检查，留待实现前细化。
+- 窗口 1 只负责标定，不启动 FS engine 或 3D 重建；窗口 2 接收第一窗口确认的结果。
+
+### 窗口 1：CalibrationWindow
+
+参考 `/home/liu4000/Desktop/FS` 的 ImGui calibration 逻辑，以 Qt 重做交互和任务组织。参考代码：
+
+- `apps/sentech_stereo/main.cpp`：标定面板、候选样本选择、样本历史、计算与检查按钮。
+- `include/ffs_viewer/calibration/` 与 `src/calibration/`：`LiveCharucoDetector`、`StereoCharucoCalibrator`、`StereoRectifier` 的职责和算法。
+
+```text
+┌────────────────────────────────────────────────────────────────┐
+│ Calibration · 连接/停止相机  加载标定  保存标定                  │
+├────────────────┬────────────────────────────┬──────────────────┤
+│ ChArUco 参数   │ 左相机预览  │ 右相机预览   │ 样本历史         │
+│ Squares X / Y  │ marker / corner 检测叠加    │ 样本列表与计数   │
+│ Square length  │ 原图 / 校正图与水平辅助线  │ 上一组 / 下一组  │
+│ Marker length  │                            │ 删除选中样本     │
+│ Dictionary     │                            │                  │
+│ 应用参数       │                            │ 左右角点/匹配数  │
+├────────────────┴────────────────────────────┴──────────────────┤
+│ 采集一组标定样本  计算标定  检查标定                             │
+│ 左 RMS / 右 RMS / Stereo RMS / 检查误差 / 当前状态              │
+│                                  完成标定并进入工作台          │
+└────────────────────────────────────────────────────────────────┘
+```
+
+- 连接已有 `SentechStereoSource`，显示固定左右身份、图像尺寸和连续预览；角点检测可开关。
+- 设置并保存 ChArUco 的格子数量、方格边长、marker 边长、字典，长度统一使用米。旧工程默认 8×5、0.054 m、0.040 m、`DICT_4X4_250`，仅作为参考，必须与实际标定板一致。
+- 参考“采集一组”先收集 5 组候选再选一组的交互，保留候选进度、左右 marker/角点数和共同角点数。选取时使用当前采集模块的主机到达时间差，保留设备时间戳作记录；不能照搬旧代码对独立设备时钟直接相减的同步假设。
+- 参考历史容量 20 组，支持列表选择、前后浏览和删除；达到容量时提示先删除或重采，不静默覆盖。标定板参数、左右身份或图像网格变化后，旧样本不能继续混用，已有结果需重新检查。
+- 参考左右单目标定后固定内参求解双目外参的流程，显示左 RMS、右 RMS、stereo RMS 和有效样本数。旧算法最低要求每侧 3 组有效检测、至少 3 组各有 4 个共同角点；这是求解下限，不代表覆盖充分或测量精度合格。
+- “检查标定”使用新采集的独立样本，显示共同角点数、左右及 stereo 重投影 RMS；同时提供校正图和极线辅助检查。参考工程的求解/检查误差颜色门限均为 1.0 px，最终进入工作台的门限待确认。
+- 保存与现有 `StereoCalibration::from_file()` 兼容的六个矩阵字段，并保存标定板参数、质量指标、左右相机身份和图像尺寸等元数据。旧 JSON 缺少身份/尺寸时，不自动认定匹配。
+- 标定结果中的矩阵要通过当前 `StereoFrame` 校验；迁移旧算法时核对旋转/平移的实际方向与单位，避免仅凭字段名称再做一次反转。
+- 采样有超时与取消，检测/求解在后台执行；保存失败、角点不足、求解失败或质量不合格时留在第一个窗口并展示原因，不启动第二个窗口。
+
+### 窗口 2：ReconstructionWindow
+
+沿用原 TODO 的工作台功能和下方布局，接收第一个窗口交接的标定结果。窗口内对照原图与三维结果，按阶段开放操作。
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
@@ -64,7 +122,8 @@ FS_Engine/
 │   │   └── fs/
 │   │       ├── core/               # 公共数据类型、配置
 │   │       ├── capture/            # 输入源接口
-│   │       ├── stereo/             # 标定、校正
+│   │       ├── stereo/             # 标定数据类型、图像校正
+│   │       ├── calibration/        # ChArUco 检测、样本、求解和检查
 │   │       ├── inference/          # FS engine
 │   │       ├── geometry/           # 点云、mesh、面积
 │   │       ├── pipeline/           # 全流程编排与缓存
@@ -73,16 +132,23 @@ FS_Engine/
 │   │   ├── core/
 │   │   ├── capture/
 │   │   ├── stereo/
+│   │   ├── calibration/
 │   │   ├── inference/
 │   │   ├── geometry/
 │   │   ├── pipeline/
 │   │   └── io/
 │   └── ui/
-│       ├── MainWindow.hpp/.cpp
+│       ├── DesktopController.hpp/.cpp      # 控制两窗口顺序与共享会话
+│       ├── CalibrationWindow.hpp/.cpp      # 窗口 1：标定
+│       ├── CalibrationController.hpp/.cpp
+│       ├── CalibrationWorker.hpp/.cpp
+│       ├── ReconstructionWindow.hpp/.cpp   # 窗口 2：重建与测量
 │       ├── PipelineController.hpp/.cpp
 │       ├── PipelineWorker.hpp/.cpp
 │       ├── widgets/
 │       │   ├── StereoImageView.hpp/.cpp
+│       │   ├── CalibrationSampleList.hpp/.cpp
+│       │   ├── CalibrationQualityPanel.hpp/.cpp
 │       │   ├── MaskEditor.hpp/.cpp
 │       │   ├── SceneView3D.hpp/.cpp
 │       │   └── MeasurementPanel.hpp/.cpp
@@ -96,14 +162,18 @@ FS_Engine/
 
 - FS 放入 inference，StereoFrame 放入 stereo，Logger 放入 core；GWC 插件及 CUDA kernel 放入 inference/plugins，保持独立编译。
 - 新增 `fs_core` 库，供 CLI 和桌面应用共同链接。
-- 桌面目标命名为 `fs_desktop`，通过 `FS_BUILD_DESKTOP` 开关构建；Qt/VTK 依赖仅加入桌面目标。
-- `MainWindow` 组织控件，按钮调用 `PipelineController`，由 controller 提交后台任务。
+- 桌面目标命名为 `fs_desktop`，通过 `FS_BUILD_DESKTOP` 开关构建；先搭建 Qt 标定阶段，VTK 随窗口 2 的三维视图接入。Qt/VTK 依赖不进入 `fs_core`，标定模块按需增加 OpenCV aruco 依赖。
+- `DesktopController` 管理唯一的相机会话和当前已确认标定，启动时只显示 `CalibrationWindow`，收到成功完成信号后才启动 `ReconstructionWindow`。
+- 第一窗口由 `CalibrationController` / `CalibrationWorker` 组织检测、采样、求解和检查；第二窗口继续使用 `PipelineController` / `PipelineWorker`。两窗口只组织控件和显示状态。
+- 切换时停止并等待标定专用后台任务，交接独立持有的标定结果；两个窗口不得同时打开同一组相机或重复创建采集线程。
 - 推理、几何处理和流程编排放入核心库，避免窗口类承担计算逻辑。
 
 ## 核心接口与数据流
 
 ```text
-FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
+窗口 1 输出：已确认标定 + 相机身份/图像尺寸 + 共享相机会话
+                            ↓
+窗口 2 输入：FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
                             ↓
                    StereoCapture
               左右 RGB + 标定 + 帧标识
@@ -117,6 +187,8 @@ FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
 
 | 接口或类型 | 职责 |
 | --- | --- |
+| `DesktopController` | 控制标定窗口到重建窗口的唯一转换入口，管理共享相机会话 |
+| `CalibrationSessionResult`（拟新增） | 独立持有 `StereoCalibration`、标定板配置、质量检查结果、相机身份、图像尺寸和保存路径 |
 | `IStereoSource` | 打开、关闭、提供预览及捕获一组双目图像 |
 | `StereoCapture` | 持有左右图、标定、帧标识和可选时间戳 |
 | `StereoFrame` 内存构造接口 | 接收图像和标定，使相机输入无需先写文件 |
@@ -126,14 +198,14 @@ FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
 | `ResultWriter` | 导出图像、标定、mask、PLY 和测量参数 |
 
 - 第一版为 FS 增加同步后读取自有 CPU 视差副本的接口，明确结果生命周期；后台线程完成读取，UI 不接触 CUDA 指针。后续可在核心库内部继续优化 GPU 数据流。
-- 计算放入独立 worker，通过 Qt queued signals 将结果交回主线程；Qt 控件和 VTK 场景更新统一在主线程执行。
+- 标定检测/求解及重建计算分别放入后台 worker，通过 Qt queued signals 将结果交回主线程；Qt 控件和 VTK 场景更新统一在主线程执行。两个阶段之间不得继续使用已关闭窗口的回调。
 - 使用 `QVTKOpenGLNativeWidget` 嵌入三维视图，并配合 `vtkGenericOpenGLRenderWindow`。
 
 ## 测量与更新规则
 
 - mask 编辑以校正左图为基准，映射到当前 `800×960` 推理网格时使用最近邻采样；相机内参同步缩放，baseline 保持米。
 - 修改选区不重新运行 FS 推理。缓存视差；由于现有 Python 去噪依赖 mask，重新执行与选区相关的过滤、mesh 和面积计算。
-- 修改输入、标定或 engine 时，使对应下游结果失效并重算，避免旧面积与新图像混用。
+- 修改输入、标定或 engine 时，使对应下游结果失效并重算，避免旧面积与新图像混用。窗口 2 导入文件时也需核对其标定与图像来源，不能静默覆盖第一窗口确认的标定。
 - 结束一次选区编辑后自动提交计算，合并待处理修改，仅展示最新版本结果；旧面积标记为“待更新”。
 - 面积为有效三角形的三维曲面面积，内部保存 m²，界面显示 cm²；仅代表当前可见重建区域，不推算遮挡面。
 - 点云显示可以抽稀，面积始终来自测量 mesh。
@@ -162,9 +234,21 @@ FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
 
 按用户要求已删除两个自动化测试源文件及 CMake 测试目标；上面的测试结果保留为历史验证记录。
 
-### 阶段 2：打通桌面重建
+### 阶段 2A：Qt 基础与窗口 1 标定（下一步优先）
 
-- [ ] 增加可选的 `fs_desktop` 目标和 Qt 主窗口。
+- [ ] 增加可选 `fs_desktop` 目标和 `DesktopController`，启动时只创建标定窗口。
+- [ ] 先搭建 `CalibrationWindow` 的双目预览、标定板参数、样本列表、质量结果及操作区。
+- [ ] 复用现有 Sentech 采集接口接入预览，确保左右绑定与 RGB 显示正确。
+- [ ] 参考旧工程迁移 ChArUco 检测、样本管理、单目/双目标定和独立样本检查逻辑，核对 RGB/BGR 边界及外参方向。
+- [ ] 实现板参数应用、候选样本采集、样本查看/删除、求解、原图/校正图切换和质量显示。
+- [ ] 实现标定及元数据保存/加载，保持现有 `StereoCalibration` JSON 兼容。
+- [ ] 明确实际标定板参数、误差门限、是否每次新做标定或允许检查后复用旧结果，以及离线文件路径的第一窗口验收方式。
+- [ ] 实现“完成标定并进入工作台”的状态条件；关闭/取消不进入第二窗口。
+- [ ] 验证异常和窗口生命周期：采样取消、保存失败、相机掉线、求解失败时不会误跳转或遗留采集线程。
+
+### 阶段 2B：窗口 2 重建与三维浏览
+
+- [ ] 新建 `ReconstructionWindow`，仅由窗口 1 正常完成后启动，接收确认标定和共享相机会话。
 - [ ] 完成 capture 目录导入、左右图预览、标定状态及双目校正检查。
 - [ ] 建立 controller、worker 和 pipeline，显示阶段进度、耗时及错误。
 - [ ] 接入真实 FS engine 推理，保证界面保持响应。
@@ -199,6 +283,14 @@ FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
 
 ## 验收清单
 
+以下验证通过实际运行和人工验收记录；当前不重新引入已按要求删除的测试文件。
+
+- [ ] 程序启动只出现标定窗口，未完成时无法进入重建与测量窗口。
+- [ ] 完成条件满足后只启动一个第二窗口；关闭/取消第一窗口不会启动第二窗口。
+- [ ] 第一窗口的板参数、样本管理、计算、保存和独立样本检查行为与参考工程的预期流程一致。
+- [ ] 采样、求解或检查失败时提示原因，先前的成功结果不会被误用于当前未通过状态。
+- [ ] 两窗口交接后，左右相机绑定、RGB 图像网格、baseline 单位和标定内容保持一致，采集源不被重复打开。
+- [ ] 更换板参数、相机或采集尺寸后，过期样本、结果及完成状态正确失效。
 - [ ] 同一输入的桌面与 CLI 推理结果一致。
 - [ ] 固定视差、mask 和参数，对照 Python 的点云、mesh 和面积；差异定位到过滤或三角化阶段。
 - [ ] 使用已知尺寸平面验证面积及 m²/cm² 单位换算。
@@ -210,5 +302,7 @@ FileStereoSource / ReplayStereoSource（待实现） / SentechStereoSource
 
 ## 参考
 
+- `/home/liu4000/Desktop/FS/apps/sentech_stereo/main.cpp`：ImGui calibration 交互参考。
+- `/home/liu4000/Desktop/FS/include/ffs_viewer/calibration/` 与 `src/calibration/`：ChArUco 检测、求解和检查参考。
 - [VTK：QVTKOpenGLNativeWidget](https://vtk.org/doc/nightly/html/classQVTKOpenGLNativeWidget.html)
 - [Qt：Threads and QObjects](https://doc.qt.io/qt-6/threads-qobject.html)
