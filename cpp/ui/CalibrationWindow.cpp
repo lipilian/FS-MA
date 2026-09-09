@@ -62,12 +62,18 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     load_ = button("Load calibration…", "load"); save_ = button("Save calibration…", "save");
     heading->addWidget(load_); heading->addWidget(save_); outer->addLayout(heading);
     outer->addWidget(label("Connect → capture varied board poses → compute → check with a new pose → save."));
+    auto* resume = new QHBoxLayout;
+    reuse_hint_ = label(""); reuse_hint_->setTextFormat(Qt::PlainText);
+    reuse_hint_->setStyleSheet("color: #12634b; font-weight: 600;");
+    reuse_ = button("Skip calibration · Continue", "reuseCalibration");
+    reuse_->setToolTip("Use the loaded calibration without a new capture or check.");
+    resume->addWidget(reuse_hint_, 1); resume->addWidget(reuse_); outer->addLayout(resume);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     auto* camera = new QGroupBox("Stereo cameras"); auto* camera_layout = new QVBoxLayout(camera);
     camera_layout->addWidget(label("LEFT   ·   21LJ530\nRIGHT ·   21LJ548\nSentech STC-MCS500U3V"));
     auto* exposure_form = new QFormLayout;
-    exposure_ = decimal(50000, 1000000, " µs", 0); exposure_->setMinimum(100);
+    exposure_ = decimal(SentechStereoOptions{}.exposure_us, 1000000, " µs", 0); exposure_->setMinimum(100);
     exposure_form->addRow("Exposure", exposure_); camera_layout->addLayout(exposure_form);
     connect_ = button("Connect cameras", "connectCameras"); camera_layout->addWidget(connect_);
     camera_layout->addWidget(label("Independent streams. Hold the board still during each capture.")); settings_layout->addWidget(camera);
@@ -143,6 +149,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     connect(check_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.capture(true); }); });
     connect(compute_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.compute(); }); });
     connect(cancel_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.cancelCapture(); }); });
+    connect(reuse_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.reuseSavedCalibration(); }); });
     connect(finish_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.finish(); }); });
     connect(live_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.selectSample(-1); }); });
     connect(remove_, &QPushButton::clicked, this, [this] {
@@ -160,7 +167,8 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
         const double threshold = threshold_->value(); dispatch([threshold](auto& w) { w.setThreshold(threshold); });
     });
     connect(save_, &QPushButton::clicked, this, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, "Save calibration", "sentech_stereo_calibration.json", "Calibration JSON (*.json)");
+        const QString suggested = state_.suggested_save_path.isEmpty() ? "sentech_stereo_calibration.json" : state_.suggested_save_path;
+        const QString path = QFileDialog::getSaveFileName(this, "Save calibration", suggested, "Calibration JSON (*.json)");
         if (!path.isEmpty()) dispatch([path](auto& w) { w.save(path); });
     });
     connect(load_, &QPushButton::clicked, this, [this] {
@@ -173,6 +181,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     for (auto* spin : {square_mm_, marker_mm_}) connect(spin, &QDoubleSpinBox::valueChanged, this, [this] { refreshActions(); });
     connect(dictionary_, &QComboBox::currentTextChanged, this, [this] { refreshActions(); });
     updateState({});
+    dispatch([](auto& w) { w.restoreSavedCalibration(); });
 }
 fs::calibration::BoardConfig CalibrationWindow::boardFromForm() const {
     return {squares_x_->value(), squares_y_->value(), square_mm_->value()/1000.0, marker_mm_->value()/1000.0,
@@ -192,6 +201,9 @@ void CalibrationWindow::updateState(CalibrationState state) {
     sample_count_->setText(QString("SAMPLES  ·  %1 / 20").arg(state_.samples.size()));
     status_->setText(state_.status); quality_->setText(state_.quality);
     saved_->setText(state_.saved_path.isEmpty() ? "Current calibration has not been saved." : "Saved: " + state_.saved_path);
+    reuse_hint_->setText(state_.can_reuse_saved ? "Saved calibration loaded — you can skip this step.\n" + state_.saved_path : "");
+    reuse_hint_->setVisible(state_.can_reuse_saved);
+    reuse_->setVisible(state_.can_reuse_saved);
     progress_->setValue(state_.busy ? state_.candidates : 0); refreshActions();
 }
 void CalibrationWindow::refreshActions() {
@@ -204,6 +216,7 @@ void CalibrationWindow::refreshActions() {
     compute_->setEnabled(idle && !dirty && state_.samples.size() >= 3);
     check_->setEnabled(idle && !dirty && state_.connected && state_.has_result);
     finish_->setEnabled(idle && !dirty && state_.can_finish);
+    reuse_->setEnabled(idle && !dirty && state_.can_reuse_saved);
     cancel_->setEnabled(!closing_ && state_.busy && state_.candidates <= 5 && state_.status.contains("andidat", Qt::CaseInsensitive));
     samples_->setEnabled(idle); remove_->setEnabled(idle && samples_->currentRow() >= 0);
     live_->setEnabled(idle && state_.connected); overlay_->setEnabled(idle); rectified_->setEnabled(idle && state_.has_result);

@@ -2219,6 +2219,7 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
 
           <p>Then open <strong>Run and Debug</strong>, select <code>Build FoundationStereo Single Engine (800x960)</code>, and press <code>Ctrl+F5</code>. The launch configuration runs <code>fs_build_single_engine</code> with the plugin ONNX and writes <code>onnx/foundationstereo_800x960_gwc_plugin.engine</code>.</p>
           <p><strong>TensorRT 11 precision:</strong> networks are explicit-batch and strongly typed by default. The exported ONNX tensor types determine FP32/FP16 execution; this builder deliberately does not use obsolete <code>kEXPLICIT_BATCH</code>, <code>--fp16</code>, or <code>--fp32</code> builder switches.</p>
+          <p><strong>Command-line build:</strong> export the plugin graph with <code>python python/make_onnx_liu_gwc_plugin.py</code>, build <code>fs_build_single_engine</code>, then pass the input ONNX and output engine paths. Optional builder arguments include <code>--workspace-mb 8192</code>, <code>--optimization-level 3</code> and <code>--no-compilation-cache</code>.</p>
         </div>
         <div class="warning">
           <strong>❗ Runtime requirement</strong>
@@ -2353,10 +2354,10 @@ preallocated GPU output tensor (disp)</code></pre>
 
         <h4>Window layout and implemented controls</h4>
         <ul>
-          <li><strong>Left panel:</strong> connect/disconnect cameras, set exposure before connecting, edit and apply ChArUco board parameters, and adjust the provisional quality threshold.</li>
+          <li><strong>Left panel:</strong> connect/disconnect cameras, set exposure before connecting (default 100,000 µs / 100 ms), edit and apply ChArUco board parameters, and adjust the provisional quality threshold.</li>
           <li><strong>Centre panel:</strong> left/right RGB preview, detection overlays showing ArUco marker outlines/IDs and ChArUco corners/IDs in the raw view, raw or rectified images with horizontal epilines, capture, compute and independent-check controls.</li>
           <li><strong>Right panel:</strong> sample history, corner/shared-corner counts, host arrival gaps, sample selection/deletion, and left/right/stereo RMS results.</li>
-          <li><strong>Session controls:</strong> load/save calibration JSON, cancel capture, return to live preview and finish calibration when its completion conditions pass.</li>
+          <li><strong>Session controls:</strong> automatically restore saved calibration, load/save JSON, skip calibration using a loaded result, cancel capture, return to live preview and finish a new calibration when its completion conditions pass.</li>
         </ul>
         <p><strong>Camera binding:</strong> left <code>STC-MCS500U3V(21LJ530)</code>, right <code>STC-MCS500U3V(21LJ548)</code>. <strong>Confirmed board defaults:</strong> 10×8 squares, 66.5 mm square side, 50.5 mm marker side, <code>DICT_4X4_250</code>. The UI displays millimetres; calibration data stores metres. Applying different board parameters clears the current samples and calibration.</p>
 
@@ -2366,18 +2367,21 @@ preallocated GPU output tensor (disp)</code></pre>
           <li><strong>Build sample coverage:</strong> change board position and tilt between captures. Keep up to 20 pairs in memory, inspect or delete samples, and return to live preview. At least three valid pairs are required to solve; this minimum alone does not ensure a good calibration.</li>
           <li><strong>Compute:</strong> solve each camera’s intrinsics, then solve stereo extrinsics with fixed intrinsics. Display RMS values and allow rectified-image inspection. Adding or deleting samples invalidates the previous result.</li>
           <li><strong>Check with a new pose:</strong> capture a separate pair, estimate the board pose in the left camera and reproject into both cameras. Freeze the check pair for inspection. The editable stereo RMS limit defaults to <strong>1.0 px</strong> for both solving and checking; it is provisional and does not certify area accuracy.</li>
-          <li><strong>Save and finish:</strong> atomically save the existing six calibration matrices plus board, camera identities, image size and quality metadata. Finish requires matching connected cameras/image size, a passing fresh check, a saved result and no pending task. Loading requires matching metadata and a new check; reconnecting also requires a new check.</li>
+          <li><strong>Save and finish:</strong> atomically save the existing six calibration matrices plus board, camera identities, image size and quality metadata. Finish requires matching connected cameras/image size, a passing fresh check, a saved result and no pending task. Loading requires matching metadata and offers the separate saved-result shortcut below. The normal Finish route still requires a fresh check after loading or reconnecting.</li>
         </ol>
 
+        <h4>Automatic loading and skipping calibration</h4>
+        <p>Successful save/load remembers the absolute file path in <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code> (this user: <code>/tmp/FS_Engine-1000/fs_gui.conf</code>). This history follows the system’s <code>/tmp</code> cleanup policy; the calibration JSON remains at the chosen save location. At startup, the window first tries that file, then <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code> in the working directory and executable directory. The first valid file matching the applied board and configured camera identities is loaded. The Save dialog also remembers the path.</p>
+        <p>A matching saved result displays its path and <strong>Skip calibration · Continue</strong>. Clicking it explicitly reuses the result without requiring new samples or a fresh check; cameras need not be connected. If connected, their image grid must match before continuing. Reuse does not claim a new quality check was performed. Invalid or incompatible files display a reason, and the normal calibration controls remain available. You can also choose to check or recalibrate. Applying different board parameters, adding/deleting samples, starting a new check or changing the threshold invalidates the applicable saved-result shortcut. New checks and threshold changes require saving the updated result again.</p>
         <h4>Build and launch</h4>
         <pre><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
 cmake --build cpp/build --target fs_gui --parallel
 ./cpp/build/fs_gui</code></pre>
-        <p>Alternatively, select <strong>Run FS GUI</strong> in VS Code Run and Debug. Its <code>Build FS GUI</code> task configures and builds the executable. The desktop target is enabled by default (disable with <code>-DFS_BUILD_DESKTOP=OFF</code>) and requires Qt 6 Widgets, OpenCV aruco and the Sentech SDK; it does not link OpenCV highgui/Qt 5. See <a href="../cpp/README.md">the C++ README</a> for fresh-build CUDA settings.</p>
+        <p>Alternatively, select <strong>Run FS GUI</strong> in VS Code Run and Debug. Its <code>Build FS GUI</code> task configures and builds the executable. The desktop target is enabled by default (disable with <code>-DFS_BUILD_DESKTOP=OFF</code>) and requires Qt 6 Widgets, OpenCV aruco and the Sentech SDK; it does not link OpenCV highgui/Qt 5. See <a href="code_structure.html#build-setup">C++ build setup</a> for fresh-build CUDA settings.</p>
 
         <h4>Closing and the next window</h4>
         <p><strong>Closing the window also releases both cameras before exiting.</strong> It stops preview, cancels capture, releases SDK resources and ends the worker thread. An active OpenCV calibration calculation is allowed to finish before shutdown. Ordinary close cancels the session and does not automatically save unsaved calibration or open the second window.</p>
-        <p>In this first release, successful <strong>Finish calibration</strong> also releases cameras and exits. <code>DesktopController</code> receives an independently owned calibration result at that completion boundary; the second reconstruction/3D/area window will be connected there in the next stage.</p>
+        <p>In this first release, both <strong>Finish calibration</strong> and <strong>Skip calibration · Continue</strong> release cameras and exit. <code>DesktopController</code> receives an independently owned calibration result at that completion boundary; the second reconstruction/3D/area window will be connected there in the next stage.</p>
 
         <h4>Validation and code locations</h4>
         <p><strong>Passed:</strong> Release build; Qt 6 runtime dependency check; real-camera 2448×2048 stereo preview with correct left/right binding; capture cancellation, disconnect/reconnect and window shutdown. Synthetic checks covered 63-corner detection, calibration and independent reprojection, baseline scale/direction, JSON compatibility and independent matrix ownership. An eight-sample replay completed capture → solve → check → save → finish; premature completion was rejected and a save failure kept the window open.</p>

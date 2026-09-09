@@ -1,13 +1,34 @@
 #include "CalibrationWorker.hpp"
 #include <QSaveFile>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
 #include <QThread>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
 #include <cmath>
+#include <unistd.h>
 
 namespace cal = fs::calibration;
 namespace {
+QString defaultCalibrationPath() {
+    return QDir::current().absoluteFilePath("sentech_stereo_calibration.json");
+}
+QString calibrationSettingsPath() {
+    // Linux-only application: keep temporary path history separate for each user.
+    return QString("/tmp/FS_Engine-%1/fs_gui.conf").arg(getuid());
+}
+QString lastCalibrationPath() {
+    QSettings settings(calibrationSettingsPath(), QSettings::IniFormat);
+    return settings.value("calibration/lastFile").toString();
+}
+void rememberCalibrationPath(const QString& path) {
+    QSettings settings(calibrationSettingsPath(), QSettings::IniFormat);
+    settings.setValue("calibration/lastFile", path);
+    settings.sync();
+}
 QImage displayImage(const cv::Mat& rgb) {
     cv::Mat small;
     const double scale = std::min(1.0, 1000.0 / rgb.cols);
@@ -44,8 +65,13 @@ bool CalibrationWorker::ready() const {
         result_->checked && result_->solve.stereo <= threshold_ && result_->check.stereo <= threshold_ &&
         !state_.saved_path.isEmpty();
 }
+bool CalibrationWorker::reusable() const {
+    return reusable_saved_ && result_ && !state_.busy && QFileInfo(state_.saved_path).isFile() &&
+        (!state_.connected || (image_size_.area() > 0 && result_->image_size == image_size_));
+}
 void CalibrationWorker::publish() {
     state_.has_result = result_.has_value(); state_.can_finish = ready();
+    state_.can_reuse_saved = reusable();
     state_.samples.clear();
     for (std::size_t i = 0; i < samples_.size(); ++i) {
         const auto& s = samples_[i];
@@ -59,13 +85,14 @@ void CalibrationWorker::publish() {
             .arg(result_->solve.pairs).arg(metrics(result_->solve))
             .arg(result_->checked ? metrics(result_->check) : "Not checked in this connection.")
             .arg(threshold_, 0, 'f', 2);
+        if (state_.can_reuse_saved) state_.quality += "\nSaved result available for reuse.";
         if (result_->checked) state_.quality += (result_->solve.stereo <= threshold_ && result_->check.stereo <= threshold_)
             ? (state_.saved_path.isEmpty() ? "\nPASS · save to finish" : "\nPASS · saved") : "\nABOVE THRESHOLD · collect better samples";
     }
     emit stateChanged(state_);
 }
 void CalibrationWorker::invalidate() {
-    result_.reset(); check_sample_.reset(); state_.saved_path.clear();
+    result_.reset(); check_sample_.reset(); state_.saved_path.clear(); reusable_saved_ = false;
     lx_.release(); ly_.release(); rx_.release(); ry_.release();
 }
 void CalibrationWorker::connectCameras(double exposure_us) {
@@ -85,7 +112,8 @@ void CalibrationWorker::disconnectCameras() {
     if (source_) source_->stop();
     source_.reset(); state_.connected = false;
     if (result_) result_->checked = false;
-    state_.status = "Cameras disconnected. Reconnect and run a fresh check before finishing.";
+    state_.status = reusable_saved_ ? "Cameras disconnected. You can continue with the loaded calibration."
+        : "Cameras disconnected. Reconnect and run a fresh check before finishing.";
 }
 void CalibrationWorker::applyBoard(cal::BoardConfig config) {
     auto next = cal::make_board(config);
@@ -101,7 +129,7 @@ void CalibrationWorker::capture(bool for_check) {
     if (capture_ != Capture::None) throw std::runtime_error("Capture already in progress");
     if (for_check && !result_) throw std::runtime_error("Compute or load calibration first");
     if (!for_check && samples_.size() >= 20) throw std::runtime_error("20-pair limit reached. Delete a sample first.");
-    if (for_check) { result_->checked = false; state_.saved_path.clear(); check_sample_.reset(); }
+    if (for_check) { reusable_saved_ = false; result_->checked = false; state_.saved_path.clear(); check_sample_.reset(); }
     capture_ = for_check ? Capture::Check : Capture::Sample;
     candidate_.reset(); state_.candidates = 0; state_.busy = true; state_.selected = -1;
     (void)source_->wait_for_pair(std::chrono::milliseconds(0)); // Discard the already buffered pair.
@@ -140,7 +168,7 @@ void CalibrationWorker::setThreshold(double pixels) {
     if (!std::isfinite(pixels) || pixels <= 0) throw std::runtime_error("Threshold must be positive");
     if (threshold_ == pixels) return;
     threshold_ = pixels;
-    if (result_) { result_->threshold_px = pixels; state_.saved_path.clear(); }
+    if (result_) { result_->threshold_px = pixels; state_.saved_path.clear(); reusable_saved_ = false; }
 }
 void CalibrationWorker::buildMaps() {
     if (!result_) return;
@@ -226,13 +254,39 @@ void CalibrationWorker::poll() {
         state_.status = QString::fromUtf8(e.what()); emit failed(state_.status); publish();
     }
 }
+void CalibrationWorker::restoreSavedCalibration() {
+    QStringList candidates;
+    const QString previous = lastCalibrationPath();
+    state_.suggested_save_path = previous.isEmpty() ? defaultCalibrationPath() : previous;
+    if (!previous.isEmpty()) candidates << previous;
+    for (const auto& directory : {QDir::currentPath(), QCoreApplication::applicationDirPath()}) {
+        candidates << QDir(directory).absoluteFilePath("sentech_stereo_calibration.json")
+                   << QDir(directory).absoluteFilePath("calibration.json");
+    }
+    candidates.removeDuplicates();
+    QStringList errors;
+    for (const auto& path : candidates) {
+        if (!QFileInfo(path).isFile()) continue;
+        try { load(path); return; }
+        catch (const std::exception& e) { errors << path + ": " + QString::fromUtf8(e.what()); }
+    }
+    state_.status = errors.isEmpty() ? "No saved calibration found. Connect cameras to create one."
+        : "Saved calibration could not be loaded. Choose another file or recalibrate.\n" + errors.join("\n");
+}
+void CalibrationWorker::reuseSavedCalibration() {
+    if (!reusable()) throw std::runtime_error("No matching saved calibration is available to reuse");
+    // Explicit reuse is a separate route; it never pretends a fresh check occurred.
+    emit completed(std::make_shared<const cal::SessionResult>(cal::clone(*result_)), state_.saved_path);
+}
 void CalibrationWorker::save(const QString& path) {
     if (!result_) throw std::runtime_error("No calibration to save");
     const auto json = cal::serialize(*result_);
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) || file.write(json.data(), qint64(json.size())) != qint64(json.size()) || !file.commit())
         throw std::runtime_error("Could not save calibration: " + file.errorString().toStdString());
-    state_.saved_path = path;
+    state_.saved_path = QFileInfo(path).absoluteFilePath();
+    state_.suggested_save_path = state_.saved_path;
+    rememberCalibrationPath(state_.saved_path);
     state_.status = "Calibration saved. Finishing also requires a passing check in this camera connection.";
 }
 void CalibrationWorker::load(const QString& path) {
@@ -244,8 +298,10 @@ void CalibrationWorker::load(const QString& path) {
         throw std::runtime_error("Calibration image size differs from current camera output");
     loaded.threshold_px = threshold_;
     invalidate(); result_ = std::move(loaded); samples_.clear(); state_.selected = -1;
-    buildMaps(); state_.saved_path = path;
-    state_.status = "Calibration loaded. Connect cameras and run a fresh independent check; saved checks are not reused.";
+    buildMaps(); state_.saved_path = QFileInfo(path).absoluteFilePath();
+    state_.suggested_save_path = state_.saved_path; reusable_saved_ = true;
+    rememberCalibrationPath(state_.saved_path);
+    state_.status = "Saved calibration loaded. Skip calibration and continue, or connect cameras to check it again.";
 }
 void CalibrationWorker::finish() {
     if (!ready()) throw std::runtime_error("Finish requires connected matching cameras, a passing check and a saved calibration");

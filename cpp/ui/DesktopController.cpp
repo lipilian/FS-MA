@@ -12,7 +12,7 @@ DesktopController::DesktopController() : window_(std::make_unique<CalibrationWin
     });
     connect(&calibration_, &CalibrationController::stopped, this, [this] {
         if (confirmed_) QMessageBox::information(window_.get(), "Calibration complete",
-            "Calibration checked and saved to:\n" + saved_path_ +
+            (confirmed_->checked ? "Calibration checked and saved to:\n" : "Continuing with saved calibration:\n") + saved_path_ +
             "\n\nCameras have been released. The reconstruction window will be added in the next stage.");
         window_->allowClose(); QApplication::quit();
     });
