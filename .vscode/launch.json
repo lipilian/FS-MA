@@ -46,32 +46,16 @@
       "preLaunchTask": "Build TSFS"
     },
     {
-      "name": "Preview Sentech stereo (Left 21LJ530 / Right 21LJ548)",
+      "name": "Run FS GUI",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/cpp/build/fs_sentech",
-      "args": [
-        "--preview"
-      ],
+      "program": "${workspaceFolder}/cpp/build/fs_gui",
+      "args": [],
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "externalConsole": false,
       "MIMode": "gdb",
-      "preLaunchTask": "Build Sentech"
-    },
-    {
-      "name": "List Sentech cameras",
-      "type": "cppdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}/cpp/build/fs_sentech",
-      "args": [
-        "--list"
-      ],
-      "cwd": "${workspaceFolder}",
-      "stopAtEntry": false,
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "preLaunchTask": "Build Sentech"
+      "preLaunchTask": "Build FS GUI"
     }
   ]
 }
