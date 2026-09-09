@@ -124,8 +124,9 @@ target_compile_options(fs_build_single_engine PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
 
-# Keep camera SDK and preview dependencies optional for file-only builds.
-option(FS_BUILD_SENTECH "Build Sentech dual-camera capture and preview" OFF)
-if(FS_BUILD_SENTECH)
+# The Qt desktop owns the camera SDK dependency; file-only builds can disable it.
+option(FS_BUILD_DESKTOP "Build the Qt 6 stereo calibration window" ON)
+if(FS_BUILD_DESKTOP)
     include(cmake/Sentech.cmake)
+    include(cmake/Desktop.cmake)
 endif()

@@ -15,7 +15,9 @@ folders under `src/`:
 - `stereo/`: stereo images, calibration, and rectification (`StereoFrame` and `StereoCalibration`).
 - `inference/`: TensorRT inference (`FS`).
 - `inference/plugins/`: the independent GWC plugin and CUDA kernel.
-- `app/`: CLI and engine-builder entry points.
+- `calibration/`: ChArUco detection, stereo calibration, independent checks and session JSON.
+- `ui/`: Qt 6 calibration window, controller, worker and image widgets.
+- `app/`: CLI, desktop and engine-builder entry points.
 
 Include headers using their full path, for example
 `#include "fs/inference/FS.hpp"` or `#include "fs/stereo/StereoFrame.hpp"`.
@@ -40,6 +42,75 @@ cmake --build cpp/build --parallel
 ```
 
 OpenCV 4 development packages are required.
+
+## Qt 6 calibration window
+
+Install Qt 6 Widgets development files (`qt6-base-dev` on Ubuntu) and OpenCV
+including `aruco` (`libopencv-contrib-dev`). The Sentech SDK defaults to `/opt/sentech`.
+
+```bash
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build --target fs_gui --parallel
+./cpp/build/fs_gui
+```
+
+For a fresh build directory on this machine, if CUDA is not on `PATH`, also
+pass `-DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.3/bin/nvcc`,
+`-DCUDAToolkit_ROOT=/usr/local/cuda-13.3` and `-DCMAKE_CUDA_ARCHITECTURES=120`.
+The existing `cpp/build` cache already has these settings.
+
+`FS_BUILD_DESKTOP` defaults to ON. Set `-DFS_BUILD_DESKTOP=OFF` to disable the
+desktop target and its camera SDK dependency for file-only builds. Existing
+build directories retain their cached option values. The desktop target enables
+the camera source library. The desktop
+requires Qt 6 and does not link OpenCV highgui/Qt 5. VTK is not needed yet.
+In VS Code, select **Run FS GUI**; its build task configures this target.
+
+The first window provides:
+
+1. **Connect cameras**: fixed left `21LJ530`, right `21LJ548`, editable exposure
+   before connecting. Acquisition, corner detection and calibration run on a
+   worker thread. RGB images stay independent of SDK buffers.
+2. **Board settings**: 10 × 8 squares, 66.5 mm square side, 50.5 mm marker side,
+   `DICT_4X4_250`. Inputs display mm; calibration JSON stores metres. Applying
+   different parameters clears samples and calibration. Settings are included
+   in saved calibration; this version starts with the confirmed defaults.
+3. **Capture sample**: hold the board still. Collect five fresh candidates and
+   choose the valid pair with the smallest host arrival gap. At least four
+   shared corners are required; independent device timestamps are not compared.
+   Capture times out after 15 seconds and can be cancelled. History holds up to
+   20 pairs in memory, with selection, deletion and return to live preview.
+4. **Compute**: solve per-camera intrinsics, then stereo extrinsics with fixed
+   intrinsics. At least three valid pairs are required; capture additional varied
+   positions and tilts for useful coverage. Adding/removing samples invalidates
+   the old result. **Detection overlay** in the raw preview draws ArUco marker
+   outlines and IDs together with ChArUco corners and IDs, including in saved
+   sample previews. Marker outlines remain visible when no ChArUco corners are
+   found. Rectified preview provides epilines.
+5. **Check · new pose**: acquire a separate pair, estimate board pose in the left
+   camera, and reproject into both cameras. The preview freezes on this check
+   pair. The provisional stereo RMS limit is editable (default 1.0 px) and applies
+   to both solving and checking; it is not a guarantee of measurement accuracy.
+6. **Save calibration**: atomically write the six matrices accepted by
+   `StereoCalibration::from_file()`, plus board, camera identities, image grid
+   and RMS metadata. Loading requires matching board/camera/grid metadata;
+   matrix-only legacy files remain supported by the CLI but are rejected here.
+   Loading or reconnecting requires a fresh check. Check/threshold changes
+   require saving again. Sample images are not exported in this version.
+7. **Finish calibration**: enabled only when current cameras/grid match, solve
+   and independent check pass, the result is saved, and no task is pending.
+   This release then releases cameras and exits. The second reconstruction
+   window will be added later at `DesktopController`'s successful-completion
+   boundary. Ordinary close cancels the session and releases resources; it
+   never signals successful completion. An in-progress OpenCV solve finishes
+   before shutdown; the UI remains responsive while waiting.
+
+Public algorithms live in `include/fs/calibration/CharucoCalibration.hpp` and
+`src/calibration/CharucoCalibration.cpp` (`fs_calibration`). Qt code lives in
+`ui/` (`fs_calibration_ui`), with `app/desktop_main.cpp` as the executable entry.
+The calibration window does not instantiate an FS engine or run inference.
+Extrinsic JSON field names retain the legacy `right_to_left_*` names; the actual
+values are OpenCV's left-to-right transform, passed unchanged to rectification.
 
 ## Build one FoundationStereo TensorRT engine with the GWC plugin
 
@@ -131,10 +202,9 @@ Its declaration is in `include/fs/stereo/StereoCalibration.hpp`.
 
 ## Sentech stereo cameras
 
-The optional `fs_sentech_source` library implements `IStereoSource` with the
-Sentech StApi SDK. `fs_sentech` provides a small OpenCV preview/capture tool and
-an optional in-memory handoff to `StereoFrame` and FS inference. The full Qt/VTK
-workbench remains a later step.
+The `fs_sentech_source` library implements `IStereoSource` with the Sentech StApi
+SDK and is used by the Qt calibration window. Launch `fs_gui` and click
+**Connect cameras**, or select **Run FS GUI** in VS Code.
 
 Default identities, confirmed for this rig:
 
@@ -143,68 +213,31 @@ Default identities, confirmed for this rig:
 | Left | `STC-MCS500U3V(21LJ530)` | `21LJ530` |
 | Right | `STC-MCS500U3V(21LJ548)` | `21LJ548` |
 
-Matching accepts an exact display name, user-defined name, or serial. Enumeration
-order never assigns a role; missing, ambiguous, or same-camera matches fail.
-Use `--left` and `--right` to override the defaults.
-
-```bash
-cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_SENTECH=ON
-cmake --build cpp/build --parallel
-
-./cpp/build/fs_sentech --list
-./cpp/build/fs_sentech --preview
-
-# Save one pair immediately into a NEW directory:
-./cpp/build/fs_sentech --capture data/sentech_capture_001
-
-# Preview, then press Space to save the displayed pair:
-./cpp/build/fs_sentech --preview --capture data/sentech_capture_002
-```
-
-Preview shows LEFT and RIGHT side by side. Space captures one pair and exits;
-Q/Esc exits without capturing. An existing output directory is never overwritten.
-Saved files are `left.png`, `right.png`, and `capture.json` with identities,
-frame IDs and timestamps. When `--calibration` is supplied, its JSON is copied
-into the capture directory too. Raw captures can be saved without calibration.
-
-To rectify and infer a captured pair, supply calibration for this physical rig,
-left/right assignment, and acquisition resolution:
-
-```bash
-./cpp/build/fs_sentech --preview --capture data/sentech_capture_003 \
-  --calibration /path/to/this_rig/calibration.json --infer
-```
-
-The source is stopped before processing the owned RGB snapshots. FS still uses
-the existing 800×960 engine; `--engine PATH` overrides its path. Inference ends
-with disparity in FS device memory; point clouds/mesh and public disparity
-readback are not implemented by this tool. Calibration matching must be verified
-on the actual rig; the existing JSON does not encode camera serials or image size.
+The source API accepts an exact display name, user-defined name, or serial.
+Enumeration order never assigns a role; missing, ambiguous, or same-camera
+matches fail. The current Qt window uses the fixed identities above.
 
 The capture implementation follows the local reference project at
 `/home/liu4000/Desktop/FS/src/io/sentech_stereo_source.cpp`: timed exposure defaults
 to 50,000 µs (adjusted to supported increments), continuous white balance when
-available, one acquisition worker per camera, and owned image snapshots. It
-converts directly to RGB8 for the current `StereoFrame` contract.
+available, one acquisition worker per camera, and owned RGB8 snapshots.
+Exposure can be changed in the Qt window before connecting.
 
 These are **independent continuous streams, not hardware-synchronized exposures**.
 A delivered pair contains a fresh frame from each side with host-arrival skew
-at most `--max-arrival-skew-ms` (default 100). Host arrival time includes transport
-latency; camera-local device timestamps are retained but never treated as a shared
-clock. This pairing is suitable for connection checks and static-scene trials;
-moving-scene measurement needs a verified synchronization arrangement.
+at most `SentechStereoOptions::max_arrival_skew` (default 100 ms). Host arrival
+time includes transport latency; camera-local device timestamps are retained
+but never treated as a shared clock. Hold the board still during each capture.
 
-`--exposure-us` changes requested exposure; `--timeout-ms` (default 5000) limits
-waiting for valid pairs after streaming starts. Capture errors are propagated,
-workers are joined before SDK buffers/devices are released, and subsequent captures
-can reopen the cameras. Controls are changed in the active camera session; this
-tool does not save camera user sets, change ROI, or perform calibration.
+Capture errors propagate to the Qt worker. Acquisition threads are joined before
+SDK buffers/devices are released, and the cameras can be reopened. The Qt window
+also releases the cameras on ordinary close; it waits for an active calibration
+solve before exiting. Camera settings are not saved to device user sets.
 
 SDK discovery defaults to `/opt/sentech`; override `FS_SENTECH_ROOT` if needed.
-The camera target links StApi TL/IP, GenICam and the SDK's turbojpeg, plus OpenCV
-HighGUI. It supplies the SDK runtime search paths and sets `GENICAM_GENTL64_PATH`
-only when that variable is absent. `FS_BUILD_SENTECH=OFF` keeps SDK/preview
-requirements out of the file-only build (default).
-
-In VS Code, select **Preview Sentech stereo (Left 21LJ530 / Right 21LJ548)** or
-**List Sentech cameras** in Run and Debug; both build the camera target first.
+The source library links StApi TL/IP, GenICam, the SDK's turbojpeg, and OpenCV core.
+It supplies the SDK runtime search paths and sets `GENICAM_GENTL64_PATH` only when
+that variable is absent. Set `-DFS_BUILD_DESKTOP=OFF` for file-only builds without
+Qt or SDK dependencies. The standalone OpenCV preview/capture CLI has been removed;
+raw capture export and camera-to-inference UI will be added with the reconstruction
+window.

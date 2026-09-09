@@ -1396,6 +1396,7 @@
           <div class="toc-links">
             <a href="#urgent-lens-e-heading">Overview</a>
             <a href="#sentech-lens-e-sdk-heading">Integrate the Sentech Lens E SDK</a>
+            <a href="#qt-calibration-window-heading">Qt 6 Calibration Window</a>
           </div>
         </details>
       </div>
@@ -2344,7 +2345,45 @@ preallocated GPU output tensor (disp)</code></pre>
 
       <article class="engine-build-step" aria-labelledby="sentech-lens-e-sdk-heading">
         <h3 id="sentech-lens-e-sdk-heading">1. Integrate the Sentech Lens E SDK</h3>
-        <p>Connect the left and right Sentech cameras for the Lens E setup, acquire stereo images through the SDK, and provide RGB frames to the C++ processing pipeline.</p>
+        <p>The Sentech SDK source connects the left and right cameras for the Lens E setup and supplies owned RGB frames to the Qt calibration window. Use <code>fs_gui</code> → <strong>Connect cameras</strong>; the standalone OpenCV preview/capture CLI has been removed.</p>
+      </article>
+      <article class="engine-build-step" aria-labelledby="qt-calibration-window-heading">
+        <h3 id="qt-calibration-window-heading">2. Qt 6 Calibration Window</h3>
+        <p><strong>Implemented · First-window workflow.</strong> The new <code>fs_gui</code> application opens a dedicated Qt 6 Widgets calibration window. Camera acquisition, ChArUco detection and calibration run on a background worker; the window remains responsive during computation.</p>
+
+        <h4>Window layout and implemented controls</h4>
+        <ul>
+          <li><strong>Left panel:</strong> connect/disconnect cameras, set exposure before connecting, edit and apply ChArUco board parameters, and adjust the provisional quality threshold.</li>
+          <li><strong>Centre panel:</strong> left/right RGB preview, detection overlays showing ArUco marker outlines/IDs and ChArUco corners/IDs in the raw view, raw or rectified images with horizontal epilines, capture, compute and independent-check controls.</li>
+          <li><strong>Right panel:</strong> sample history, corner/shared-corner counts, host arrival gaps, sample selection/deletion, and left/right/stereo RMS results.</li>
+          <li><strong>Session controls:</strong> load/save calibration JSON, cancel capture, return to live preview and finish calibration when its completion conditions pass.</li>
+        </ul>
+        <p><strong>Camera binding:</strong> left <code>STC-MCS500U3V(21LJ530)</code>, right <code>STC-MCS500U3V(21LJ548)</code>. <strong>Confirmed board defaults:</strong> 10×8 squares, 66.5 mm square side, 50.5 mm marker side, <code>DICT_4X4_250</code>. The UI displays millimetres; calibration data stores metres. Applying different board parameters clears the current samples and calibration.</p>
+
+        <h4>Calibration workflow</h4>
+        <ol>
+          <li><strong>Connect and capture:</strong> hold the board still while five fresh candidate pairs are collected. Select the valid pair with the smallest host arrival gap and at least four shared corners. These are independent camera streams, without hardware synchronization. Capture can be cancelled and times out after 15 seconds.</li>
+          <li><strong>Build sample coverage:</strong> change board position and tilt between captures. Keep up to 20 pairs in memory, inspect or delete samples, and return to live preview. At least three valid pairs are required to solve; this minimum alone does not ensure a good calibration.</li>
+          <li><strong>Compute:</strong> solve each camera’s intrinsics, then solve stereo extrinsics with fixed intrinsics. Display RMS values and allow rectified-image inspection. Adding or deleting samples invalidates the previous result.</li>
+          <li><strong>Check with a new pose:</strong> capture a separate pair, estimate the board pose in the left camera and reproject into both cameras. Freeze the check pair for inspection. The editable stereo RMS limit defaults to <strong>1.0 px</strong> for both solving and checking; it is provisional and does not certify area accuracy.</li>
+          <li><strong>Save and finish:</strong> atomically save the existing six calibration matrices plus board, camera identities, image size and quality metadata. Finish requires matching connected cameras/image size, a passing fresh check, a saved result and no pending task. Loading requires matching metadata and a new check; reconnecting also requires a new check.</li>
+        </ol>
+
+        <h4>Build and launch</h4>
+        <pre><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build --target fs_gui --parallel
+./cpp/build/fs_gui</code></pre>
+        <p>Alternatively, select <strong>Run FS GUI</strong> in VS Code Run and Debug. Its <code>Build FS GUI</code> task configures and builds the executable. The desktop target is enabled by default (disable with <code>-DFS_BUILD_DESKTOP=OFF</code>) and requires Qt 6 Widgets, OpenCV aruco and the Sentech SDK; it does not link OpenCV highgui/Qt 5. See <a href="../cpp/README.md">the C++ README</a> for fresh-build CUDA settings.</p>
+
+        <h4>Closing and the next window</h4>
+        <p><strong>Closing the window also releases both cameras before exiting.</strong> It stops preview, cancels capture, releases SDK resources and ends the worker thread. An active OpenCV calibration calculation is allowed to finish before shutdown. Ordinary close cancels the session and does not automatically save unsaved calibration or open the second window.</p>
+        <p>In this first release, successful <strong>Finish calibration</strong> also releases cameras and exits. <code>DesktopController</code> receives an independently owned calibration result at that completion boundary; the second reconstruction/3D/area window will be connected there in the next stage.</p>
+
+        <h4>Validation and code locations</h4>
+        <p><strong>Passed:</strong> Release build; Qt 6 runtime dependency check; real-camera 2448×2048 stereo preview with correct left/right binding; capture cancellation, disconnect/reconnect and window shutdown. Synthetic checks covered 63-corner detection, calibration and independent reprojection, baseline scale/direction, JSON compatibility and independent matrix ownership. An eight-sample replay completed capture → solve → check → save → finish; premature completion was rejected and a save failure kept the window open.</p>
+        <p><strong>Still to validate:</strong> calibration accuracy with the physical board and physical camera-unplug behaviour. The camera preview used during verification did not detect the board. Sample images currently remain in session memory; matrix-only legacy calibration files are supported by the CLI but require recalibration or complete matching metadata for this window.</p>
+        <p><code>cpp/app/desktop_main.cpp</code> is the entry point; <code>cpp/cmake/Desktop.cmake</code> defines the desktop targets; <code>cpp/ui/</code> contains the window, controllers, worker and image widget; <code>cpp/include/fs/calibration/</code> and <code>cpp/src/calibration/</code> contain the OpenCV algorithms.</p>
+        <p><a href="code_structure.html#qt-calibration">Qt code structure and module responsibilities →</a></p>
       </article>
     </section>
 
