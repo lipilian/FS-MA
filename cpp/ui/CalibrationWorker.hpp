@@ -12,10 +12,10 @@
 
 struct CalibrationState {
     fs::calibration::BoardConfig board;
-    bool connected{false}, busy{false}, has_result{false}, can_finish{false};
+    bool connected{false}, busy{false}, has_result{false}, can_finish{false}, can_reuse_saved{false};
     int candidates{0}, selected{-1};
     QStringList samples;
-    QString status{"Connect the stereo cameras to begin."}, quality{"No calibration yet."}, saved_path;
+    QString status{"Connect the stereo cameras to begin."}, quality{"No calibration yet."}, saved_path, suggested_save_path;
 };
 using ConfirmedCalibration = std::shared_ptr<const fs::calibration::SessionResult>;
 Q_DECLARE_METATYPE(CalibrationState)
@@ -38,6 +38,8 @@ public:
     void deleteSample(int index);
     void setDisplay(bool detect_corners, bool rectified);
     void setThreshold(double pixels);
+    void restoreSavedCalibration();
+    void reuseSavedCalibration();
     void save(const QString& path);
     void load(const QString& path);
     void finish();
@@ -56,6 +58,7 @@ private:
     void show(const fs::calibration::Sample& sample, const QString& caption);
     void buildMaps();
     bool ready() const;
+    bool reusable() const;
     CalibrationState state_;
     SourceFactory source_factory_;
     std::unique_ptr<IStereoSource> source_;
@@ -68,6 +71,6 @@ private:
     cv::Size image_size_;
     cv::Mat lx_, ly_, rx_, ry_;
     enum class Capture { None, Sample, Check } capture_{Capture::None};
-    bool detection_{true}, rectified_{false}, shutting_down_{false};
+    bool detection_{true}, rectified_{false}, shutting_down_{false}, reusable_saved_{false};
     double threshold_{1.0};
 };

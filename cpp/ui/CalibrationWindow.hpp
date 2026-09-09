@@ -33,9 +33,9 @@ private:
     QDoubleSpinBox *square_mm_, *marker_mm_, *exposure_, *threshold_;
     QComboBox* dictionary_;
     QGroupBox* board_group_;
-    QPushButton *connect_, *apply_, *capture_, *compute_, *check_, *save_, *load_, *finish_, *cancel_, *remove_, *live_;
+    QPushButton *connect_, *apply_, *capture_, *compute_, *check_, *save_, *load_, *finish_, *cancel_, *remove_, *live_, *reuse_;
     QCheckBox *overlay_, *rectified_;
-    QLabel *status_, *quality_, *caption_, *sample_count_, *saved_;
+    QLabel *status_, *quality_, *caption_, *sample_count_, *saved_, *reuse_hint_;
     QListWidget* samples_;
     QProgressBar* progress_;
     StereoImageView *left_, *right_;

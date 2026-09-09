@@ -116,21 +116,20 @@
 │   │       └── <a href="#plugins">plugins/</a>
 │   │           ├── GWCVolumePlugin.hpp
 │   │           └── GWCVolumeKernel.hpp
-│   ├── src/
-│   │   ├── calibration/CharucoCalibration.cpp
-│   │   ├── capture/
-│   │   │   ├── SentechStereoSource.cpp
-│   │   │   └── StereoCaptureSupport.hpp
-│   │   ├── core/Logger.cpp
-│   │   ├── stereo/
-│   │   │   ├── StereoFrame.cpp
-│   │   │   └── StereoCalibration.cpp
-│   │   └── inference/
-│   │       ├── FS.cpp
-│   │       └── plugins/
-│   │           ├── GWCVolumePlugin.cpp
-│   │           └── GWCVolumeKernel.cu
-│   └── README.md
+│   └── src/
+│       ├── calibration/CharucoCalibration.cpp
+│       ├── capture/
+│       │   ├── SentechStereoSource.cpp
+│       │   └── StereoCaptureSupport.hpp
+│       ├── core/Logger.cpp
+│       ├── stereo/
+│       │   ├── StereoFrame.cpp
+│       │   └── StereoCalibration.cpp
+│       └── inference/
+│           ├── FS.cpp
+│           └── plugins/
+│               ├── GWCVolumePlugin.cpp
+│               └── GWCVolumeKernel.cu
 ├── <a href="#python">python/</a>                     # Experiments, exports, geometry reference
 ├── FoundationStereo/            # Upstream model implementation
 ├── docs/                        # Development documentation
@@ -231,6 +230,16 @@ fs_gui  [executable: FS_BUILD_DESKTOP=ON by default]
           </tbody>
         </table>
       </div>
+      <h3 id="build-setup">C++ build setup</h3>
+      <p>Install OpenCV 4 development files, including aruco (<code>libopencv-contrib-dev</code> on Ubuntu), Qt 6 Widgets (<code>qt6-base-dev</code>), CUDA and TensorRT development files. The current workstation uses CUDA 13.3, TensorRT 11.2 and GPU architecture 120. The Sentech SDK defaults to <code>/opt/sentech</code>; override it with <code>-DFS_SENTECH_ROOT=/path/to/sdk</code>.</p>
+      <p><code>FS_BUILD_DESKTOP</code> defaults to <code>ON</code>. Use <code>-DFS_BUILD_DESKTOP=OFF</code> for file-only builds without Qt or Sentech SDK dependencies. Existing CMake build directories retain their cached option values. VTK is not needed for the current calibration window.</p>
+      <p>For a fresh build directory on this workstation when CUDA is not on <code>PATH</code>, supply its location explicitly. The existing <code>cpp/build</code> cache already contains these settings:</p>
+      <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.3/bin/nvcc \
+  -DCUDAToolkit_ROOT=/usr/local/cuda-13.3 \
+  -DCMAKE_CUDA_ARCHITECTURES=120
+cmake --build cpp/build --parallel</code></pre>
+      <p>In VS Code, <code>Ctrl+Shift+B</code> runs the default <code>Build TSFS</code> task. Use <strong>Run FS GUI</strong> for calibration, <strong>Run TSFS (Volunteer2 lower/0, Release)</strong> for sample inference, or <strong>Build FoundationStereo Single Engine (800x960)</strong> for engine generation. <code>Ctrl+F5</code> starts the selected launch configuration. The CMake Tools extension also provides configure/build controls.</p>
       <details>
         <summary>Build and run from the repository root</summary>
         <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
@@ -254,6 +263,27 @@ cmake --build cpp/build --parallel
         <li><strong>Retain disparity inside FS</strong><p>Output tensor: <code>[1, 1, 800, 960]</code>. The device buffer belongs to the FS instance. The current CLI then exits; it does not yet export disparity or construct geometry.</p></li>
       </ol>
       <p class="note"><code>inference()</code> submits asynchronous GPU work. There is currently no public disparity-result accessor. A synchronized result-copy interface is a planned follow-up.</p>
+      <details id="memory-input">
+        <summary>In-memory stereo input · API and ownership</summary>
+        <p>Public headers use the <code>cpp/include</code> root, for example <code>fs/inference/FS.hpp</code> and <code>fs/stereo/StereoFrame.hpp</code>. The file-path constructor loads RGB images and calibration, then delegates to the same validated memory constructor:</p>
+        <pre tabindex="0"><code>#include "fs/stereo/StereoFrame.hpp"
+
+// left_rgb and right_rgb are matching CV_8UC3 RGB images.
+StereoCalibration calibration = StereoCalibration::from_file("calibration.json");
+StereoFrame frame(left_rgb, right_rgb, calibration);
+frame.rectify();
+
+// Use frame.rectified_left(), frame.rectified_right(),
+// and frame.rectified_camera_parameters() for inference.</code></pre>
+        <p>Fully in-memory callers can populate the six <code>StereoCalibration</code> fields directly: <code>left_camera_matrix</code>, <code>right_camera_matrix</code>, <code>left_distortion</code>, <code>right_distortion</code>, <code>right_to_left_rotation</code> and <code>right_to_left_translation</code>.</p>
+        <ul>
+          <li>Images must be non-empty, equal-size 2D RGB <code>CV_8UC3</code>. Non-contiguous ROIs are supported. Convert BGR sources to RGB first; the Sentech source already provides RGB.</li>
+          <li>Matrices must be finite, single-channel <code>CV_32F</code> or <code>CV_64F</code>. Intrinsics are 3×3 with positive focal lengths and last row <code>[0, 0, 1]</code>. Distortion is a row/column vector containing 4, 5, 8, 12 or 14 coefficients; use explicit zeros for no distortion.</li>
+          <li>Rotation must be a proper 3×3 rotation. Translation is a nonzero three-element row/column vector in metres. Calibration must match the input image grid.</li>
+          <li>Legacy <code>right_to_left_*</code> field names are preserved. The calibration solver stores OpenCV’s left-to-right transform; these values pass unchanged to <code>stereoRectify</code>, without inversion or unit conversion.</li>
+          <li><code>StereoFrame</code> deep-copies both images and every matrix, storing calibration as <code>CV_64F</code>. Callers may reuse or release their buffers after construction. Invalid input throws <code>std::invalid_argument</code>; missing or unreadable calibration files also raise exceptions. <code>from_file()</code> reads the required matrices; the frame constructor validates their shapes and values.</li>
+        </ul>
+      </details>
     </section>
 
     <section id="boundaries" aria-labelledby="boundaries-heading">
@@ -279,6 +309,13 @@ cmake --build cpp/build --parallel
 cmake --build cpp/build --target fs_gui --parallel
 ./cpp/build/fs_gui</code></pre>
       <p class="note">Click <strong>Connect cameras</strong> in the Qt calibration window. The SDK defaults to <code>/opt/sentech</code>. The desktop target enables the camera source by default; set <code>-DFS_BUILD_DESKTOP=OFF</code> for file-only builds without Qt or the SDK. The standalone OpenCV preview/capture CLI has been removed.</p>
+      <details>
+        <summary>Sentech source settings and SDK behaviour</summary>
+        <p>The source follows <code>/home/liu4000/Desktop/FS/src/io/sentech_stereo_source.cpp</code>. The Qt window binds left <code>STC-MCS500U3V(21LJ530)</code> and right <code>STC-MCS500U3V(21LJ548)</code>. The source API also accepts exact user-defined names or serials; missing, ambiguous or same-camera matches fail.</p>
+        <p>Requested timed exposure defaults to 100,000 µs (100 ms) and is adjusted to the camera’s supported increments. Edit it before connecting; the input is disabled while connected. Continuous automatic white balance is requested when supported. Each camera has its own acquisition worker and produces owned RGB8 snapshots; camera settings are not saved to device user sets.</p>
+        <p><code>SentechStereoOptions::max_arrival_skew</code> defaults to 100 ms. Host arrival includes transport latency, while device timestamps belong to independent camera clocks. Keep the board still during capture. Capture errors propagate to the Qt worker, and acquisition threads join before SDK buffers/devices are released.</p>
+        <p>The library links StApi TL/IP, GenICam, the SDK’s turbojpeg and OpenCV core. It supplies SDK runtime search paths and sets <code>GENICAM_GENTL64_PATH</code> only when absent.</p>
+      </details>
     </section>
     <section id="qt-calibration" aria-labelledby="qt-calibration-heading">
       <h2 id="qt-calibration-heading">07 · Qt 6 calibration window</h2>
@@ -289,13 +326,13 @@ cmake --build cpp/build --target fs_gui --parallel
         </article>
         <article class="card"><h3>Desktop · fs_calibration_ui / fs_gui</h3>
           <p><code>app/desktop_main.cpp</code> starts <code>DesktopController</code>. <code>CalibrationWindow</code> displays settings, stereo images, sample history and quality. <code>CalibrationController</code> owns the worker thread; <code>CalibrationWorker</code> owns the camera source and performs detection, capture, solve, check and save. <code>widgets/StereoImageView</code> displays owned QImage snapshots.</p>
-          <p>Finishing requires saved calibration, matching cameras/grid and a passing fresh check. This release releases cameras and exits at completion; the reconstruction window will be added at that boundary. Ordinary close cancels the session.</p>
+          <p>New calibration requires a saved result, matching cameras/grid and a passing fresh check. Startup reads temporary path history from <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code> and can automatically load the last saved file or a default calibration JSON and offer <strong>Skip calibration · Continue</strong> to explicitly reuse it without a fresh check. This release releases cameras and exits at either completion boundary; the reconstruction window will be added at that boundary. Ordinary close cancels the session.</p>
         </article>
       </div>
       <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
 cmake --build cpp/build --target fs_gui --parallel
 ./cpp/build/fs_gui</code></pre>
-      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source but does not link highgui/Qt 5 or initialize an inference engine. See <a href="../cpp/README.md">cpp/README.md</a> for the workflow, metadata checks and current limits.</p>
+      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source but does not link highgui/Qt 5 or initialize an inference engine. See <a href="index.html#qt-calibration-window-heading">the calibration workflow</a> for controls, metadata checks and current limits, and <a href="#build-setup">build setup</a> for dependencies and CUDA configuration.</p>
     </section>
     <footer><a href="index.html">Back to development notes</a> · <a href="#top">Back to top</a></footer>
   </main>
