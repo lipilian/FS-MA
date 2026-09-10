@@ -15,9 +15,12 @@ class IExecutionContext;
 }
 
 /**
- * Future TensorRT FoundationStereo inference engine.
+ * TensorRT FoundationStereo inference engine and disparity filtering.
  *
- * This class owns the TensorRT engine and reusable OpenCV-to-GPU input buffers.
+ * This class owns the TensorRT engine, CUDA stream, and reusable input/output buffers.
+ * Calls on an instance must be serialized by the caller, in this order:
+ * loadEngine -> prepare_stereo_images -> inference -> filter_disparity.
+ * Input preparation and inference readiness are not tracked internally.
  */
 class FS {
 public:
@@ -50,6 +53,20 @@ public:
      * in FS's preallocated device buffer for subsequent CUDA processing.
      */
     void inference();
+
+    /**
+     * Filter the full image after inference and wait for GPU completion.
+     * Checks both kernel launch and asynchronous execution errors before returning.
+     * Uses FS's stream and overwrites disparity_output_device_ in place.
+     * Invalid pixels become zero; raw disparity is not retained. Rerun inference
+     * before relaxing filtering criteria. After changing inputs or replacing the
+     * engine, prepare inputs and run inference before filtering again.
+     * Selection-mask upload and CPU result access are not exposed yet.
+     */
+    void filter_disparity(bool remove_invisible = true);
+
+    /** Wait for queued GPU work and report asynchronous execution errors. */
+    void synchronize();
 
     /** Execute ten inferences, print each GPU execution time, and return their mean in milliseconds. */
     float inference_time_measure();
