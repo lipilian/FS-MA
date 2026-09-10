@@ -6,6 +6,7 @@
 #include <cuda_runtime_api.h>
 #include <opencv2/imgproc.hpp>
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -247,6 +248,11 @@ void FS::allocate_input_buffers() {
                "failed to allocate TensorRT disparity output buffer");
     disparity_output_device_.reset(static_cast<float*>(disparity_device));
 
+    void* xyz_device = nullptr;
+    check_cuda(cudaMalloc(&xyz_device, output_element_count * 3 * sizeof(float)),
+               "failed to allocate XYZ map buffer");
+    xyz_map_device_.reset(static_cast<float*>(xyz_device));
+
     void* left_host = nullptr;
     check_cuda(cudaMallocHost(&left_host, input_byte_count), "failed to allocate pinned left input buffer");
     left_input_host_.reset(static_cast<float*>(left_host));
@@ -264,6 +270,14 @@ void FS::allocate_input_buffers() {
 
 void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
                                      const cv::Size& rectified_image_size) {
+    if (rectified_image_size.width <= 0 || rectified_image_size.height <= 0 ||
+        !std::isfinite(rectified_camera_parameters.fx) || rectified_camera_parameters.fx <= 0.0 ||
+        !std::isfinite(rectified_camera_parameters.fy) || rectified_camera_parameters.fy <= 0.0 ||
+        !std::isfinite(rectified_camera_parameters.cx) || !std::isfinite(rectified_camera_parameters.cy) ||
+        !std::isfinite(rectified_camera_parameters.baseline_meters) ||
+        rectified_camera_parameters.baseline_meters <= 0.0F) {
+        throw std::invalid_argument("XYZ reconstruction requires valid camera parameters and image size");
+    }
     const double scale_x = static_cast<double>(rectified_image_size.width) / kTensorRtInputWidth;
     const double scale_y = static_cast<double>(rectified_image_size.height) / kTensorRtInputHeight;
     model_camera_parameters_ = rectified_camera_parameters;
@@ -330,14 +344,18 @@ void FS::inference() {
     }
 }
 
-void FS::filter_disparity(bool remove_invisible) {
-    if (!isEngineLoaded() || !disparity_output_device_) {
-        throw std::logic_error("loadEngine must complete before disparity filtering");
+void FS::compute_xyz_map(float min_depth_m, float max_depth_m) {
+    if (!isEngineLoaded() || !disparity_output_device_ || !xyz_map_device_) {
+        throw std::logic_error("loadEngine must complete before XYZ reconstruction");
     }
-    check_cuda(fs::postprocessing::filter_disparity(
-                   disparity_output_device_.get(), nullptr,
-                   kTensorRtInputWidth, kTensorRtInputHeight, remove_invisible, stream_),
-               "failed to launch disparity filter");
+    const auto& camera = model_camera_parameters_;
+    check_cuda(fs::postprocessing::compute_xyz_map(
+                   disparity_output_device_.get(), xyz_map_device_.get(), nullptr,
+                   kTensorRtInputWidth, kTensorRtInputHeight,
+                   static_cast<float>(camera.fx), static_cast<float>(camera.fy),
+                   static_cast<float>(camera.cx), static_cast<float>(camera.cy), camera.baseline_meters,
+                   min_depth_m, max_depth_m, stream_),
+               "failed to launch XYZ reconstruction");
     synchronize();
 }
 

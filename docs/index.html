@@ -1389,7 +1389,7 @@
             <a href="#stereo-preprocessing-800-heading">Stereo Preprocessing · 800 × 960 with Intrinsic Rescale</a>
             <a href="#gpu-io-preparation-heading">GPU Tensor I/O Preparation</a>
             <a href="#inference-memory-heading">Inference Memory Reduction</a>
-            <a href="#disparity-filter-heading">Disparity Filter · In-place CUDA Processing</a>
+            <a href="#disparity-filter-heading">Disparity Filter + XYZ · Fused CUDA Processing</a>
           </div>
         </details>
         <details class="toc-group">
@@ -2341,22 +2341,23 @@ preallocated GPU output tensor (disp)</code></pre>
       </article>
 
       <article class="engine-build-step" aria-labelledby="disparity-filter-heading">
-        <h3 id="disparity-filter-heading">5. Disparity Filter · In-place CUDA Processing</h3>
-        <p>After inference, <code>FS::filter_disparity()</code> filters the <code>800 × 960</code> FP32 disparity map directly in <code>disparity_output_device_</code>. Valid values retain their original pixel disparity; invalid values become <code>0</code>. No additional disparity buffer or output <code>valid_mask</code> is allocated. Validity can be read from <code>disparity &gt; 0</code>.</p>
-        <pre><code>// After loading the engine and preparing stereo images:
+        <h3 id="disparity-filter-heading">5. Disparity Filter + XYZ · Fused CUDA Processing</h3>
+        <p><code>FS::compute_xyz_map()</code> fuses disparity validation, depth clipping and XYZ reconstruction into one CUDA kernel. It preserves the original <code>disparity_output_device_</code> and writes a reusable <code>xyz_map_device_</code> buffer: FP32 <code>[800][960][3]</code>, interleaved <code>X,Y,Z</code> in metres. Invalid or out-of-range pixels become <code>(0,0,0)</code>; no output validity mask is stored.</p>
+        <pre><code>// After loading the engine, setting camera parameters and preparing images:
 fs.inference();
-fs.filter_disparity();  // Filters in place and waits for GPU completion.</code></pre>
-        <p><strong>Filtering rules:</strong> for pixel column <code>u</code> and disparity <code>d</code>, retain a value only when all enabled conditions pass:</p>
+fs.compute_xyz_map();             // Default: 0 &lt; Z ≤ 1 metre; waits for completion.
+fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusing disparity.</code></pre>
+        <p><strong>Fused calculation:</strong> each thread handles one pixel at column <code>u</code>, row <code>v</code>:</p>
         <ul>
-          <li><code>d</code> is finite and <code>d &gt; 0</code>, excluding NaN, infinity, zero and negative values.</li>
-          <li>With <code>remove_invisible=true</code> (the FS default), require <code>u ≥ d</code> so the corresponding right-image position <code>u − d</code> is not left of the image boundary.</li>
-          <li>The CUDA launcher accepts an optional selection mask; nonzero bytes select pixels. FS currently passes <code>nullptr</code> to process the whole image.</li>
+          <li>Require finite positive disparity <code>d</code>. Always require <code>u ≥ d</code>; the visibility check cannot be disabled. An optional device selection mask is supported by the launcher; FS currently passes <code>nullptr</code> for the full image.</li>
+          <li>Compute <code>Z = fx × baseline / d</code>. Keep only finite positive Z within the inclusive range <code>[min_depth_m, max_depth_m]</code>. Limits must be finite with <code>0 ≤ min_depth_m &lt; max_depth_m</code>.</li>
+          <li>Compute <code>X = (u − cx) × Z / fx</code> and <code>Y = (v − cy) × Z / fy</code>. Non-finite coordinates also reject the entire point; all three output components are zeroed.</li>
         </ul>
-        <p><strong>Implementation:</strong> <code>cpp/src/inference/PostProcessing.cu</code> implements the kernel and launcher declared in <code>cpp/include/fs/inference/PostProcessing.hpp</code>. Each thread processes one pixel, with a bounds check: the fixed grid uses <code>3000 blocks × 256 threads</code>, without a strided loop.</p>
-        <p><strong>Stream and completion:</strong> FS passes its inference stream to the asynchronous CUDA launcher. <code>FS::filter_disparity()</code> checks the launch status, then calls <code>synchronize()</code> internally to wait for inference and filtering and report execution errors. The caller needs no additional synchronization after this method returns. The CLI filters once after ordinary inference or the tenth <code>--measure</code> inference; filtering is excluded from the inference timings.</p>
-        <p><strong>Data lifetime:</strong> filtering overwrites the raw disparity. Relaxing the visibility or selection criteria cannot recover values already cleared to zero; rerun inference to restore them. The caller ensures the preparation → inference → filtering order.</p>
-        <p><strong>Validation:</strong> the Qt-free Release build passed, and 17 synthetic GPU cases matched a CPU reference exactly. A real capture verified updates to the original FS buffer, CPU-reference agreement and recovery through a new inference. Moving synchronization inside the FS method also passed a real CLI run.</p>
-        <p><strong>Next:</strong> download the filtered disparity and save a pseudocolor image for inspection, then implement depth/XYZ processing. FS selection-mask upload is also pending. See <a href="code_structure.html#postprocessing">the postprocessing module</a> for the API and ownership details.</p>
+        <p><strong>Camera grid:</strong> FS uses the intrinsics scaled by <code>set_model_camera_parameters()</code> to the 800×960 model grid and a baseline in metres. Positive Z indicates valid XYZ. The output layout corresponds to CPU <code>CV_32FC3</code>; after a future download, <code>cv::extractChannel(xyz_map, depth, 2)</code> can extract Z for a depth colormap.</p>
+        <p><strong>Implementation:</strong> <code>PostProcessing.hpp</code> declares the launcher and <code>PostProcessing.cu</code> implements the fused kernel. The fixed grid uses <code>3000 blocks × 256 threads</code>, one pixel per thread with a bounds check. XYZ occupies <code>9,216,000 bytes</code>; it is allocated with the engine buffers and reused. Raw disparity remains available for new depth thresholds without another inference.</p>
+        <p><strong>Stream and completion:</strong> FS submits reconstruction on its inference stream and calls <code>synchronize()</code> internally. The method checks launch and execution errors before returning. The CLI runs this stage once after ordinary inference or the tenth <code>--measure</code> inference; its cost is excluded from inference timings. The caller ensures the preparation → inference → XYZ order.</p>
+        <p><strong>Validation:</strong> the Qt-free Release build and normal/measured CLI paths passed. 24 GPU cases matched the notebook's postprocessing with denoising disabled and the near-depth limit applied; 23 invalid-parameter cases were rejected. Real-capture checks confirmed CPU-reference agreement, unchanged disparity, XYZ buffer reuse and threshold recomputation (430654 valid points at 0–1 m).</p>
+        <p><strong>Next:</strong> download disparity/XYZ, extract Z and save a depth colormap; then add neighbourhood denoising and mesh processing. FS selection-mask upload is pending. See <a href="code_structure.html#postprocessing">the postprocessing module</a> for the API contract.</p>
       </article>
     </section>
 
