@@ -12,7 +12,7 @@
 - 当前实现支持文件导入或 Sentech 双目相机采集，可从已有 JSON 读取标定；Qt 窗口 1 已新增 ChArUco 标定求解、独立检查和保存。
 - 相机输入：左 STC-MCS500U3V(21LJ530)、右 STC-MCS500U3V(21LJ548)；已连接并验证单次拍摄和关闭后重新连接。采用独立连续流，尚未实现硬件同步。
 - 测量交互：在校正后的左图编辑 2D mask，联动 3D 点云、mesh 和曲面面积。
-- 第一版默认支持一个无孔多边形区域；包含专用标定窗口；不包含自动分割、连续实时重建和多视角融合。
+- 第一版默认支持一个无孔多边形区域；包含专用标定窗口，计划加入 SAM 2.1 Hiera Base+ 提示式辅助选区；不包含无提示全自动分割、连续实时重建和多视角融合。
 - Python 保留作为算法实验和结果对照；实际应用以 C++ 为主。
 
 ## 当前代码基础
@@ -170,6 +170,7 @@ FS_Engine/
 - 第一窗口由 `CalibrationController` / `CalibrationWorker` 组织检测、采样、求解和检查；第二窗口继续使用 `PipelineController` / `PipelineWorker`。两窗口只组织控件和显示状态。
 - 切换时停止并等待标定专用后台任务，交接独立持有的标定结果；两个窗口不得同时打开同一组相机或重复创建采集线程。
 - 推理、几何处理和流程编排放入核心库，避免窗口类承担计算逻辑。
+- 拟在 `cpp/include/fs/inference/SamSegmenter.hpp` 与 `cpp/src/inference/SamSegmenter.cpp` 实现独立的 `fs::SamSegmenter`，管理 SAM encoder/decoder 两个 TensorRT engine、GPU 缓冲区和图像特征缓存；与 `FS` 分开管理模型，供后台 worker 调用。
 
 ## 核心接口与数据流
 
@@ -305,6 +306,24 @@ cmake --build cpp/build --target fs_gui --parallel
 - [ ] 显示曲面面积、有效点数、三角形数量和结果更新状态。
 - [ ] 导出输入图像、标定、mask、点云 PLY、mesh PLY 和测量参数及面积。
 
+#### SAM 2.1 Hiera Base+ 辅助选区
+
+采用 Qt + C++ TensorRT 接入，用前景点、背景点或框帮助用户生成并修正 selection mask。Python/AnyLabeling 用于结果对照，正式应用不依赖 Python 进程。此功能属于阶段 3；可先通过 SSH 完成离线 engine 验证，再接 Qt 交互。
+
+- [x] 确认本机 AnyLabeling 使用独立的 SAM 2.1 Hiera Base+ encoder/decoder ONNX，通过 ONNX Runtime 推理，并缓存同一图像的 encoder 特征。
+- [x] 确认本机缓存已有模型：`/home/liu4000/anylabeling_data/models/sam2.1_hiera_base_plus_20260221/`；两个 ONNX 均通过 TensorRT 11.2.1.2 parser 检查。
+- [ ] **下一步：离线构建 encoder 和 decoder TensorRT engine**，为 decoder 的动态提示点输入配置 optimization profile，固定单图 batch；记录模型版本、构建参数和 engine 路径。
+- [ ] 用固定校正左图及相同点/框提示，对照 AnyLabeling 的预处理、输出 mask 和评分；核对 RGB、归一化、1024×1024 输入缩放、提示坐标、候选 mask 选择，以及 logits 恢复原图尺寸后再阈值化的顺序。先验证数值，再评估精度优化。
+- [ ] 实现独立 `SamSegmenter`：冻结校正左图后运行一次 encoder，缓存 image embedding 和两组高分辨率特征；同图追加/修改提示只运行 decoder。更换图像时使特征和提示失效。
+- [ ] 明确输入图像、提示、特征缓存及输出 mask 的所有权和生命周期；模型/engine 路径可配置，不依赖本机 AnyLabeling 缓存目录。
+- [ ] 在 Qt mask 编辑器中加入前景点、背景点、框选、清空提示、mask 叠加预览和确认；支持继续修正提示及手动修改选区。
+- [ ] 统一 Qt 显示坐标 ↔ 校正左图坐标 ↔ SAM 1024×1024 坐标的映射；确认后的二值 selection mask 以校正左图为基准，用最近邻缩放到 FS 宽 960 × 高 800 网格，接入 XYZ、邻域去噪及 mesh/面积计算。
+- [ ] 明确 SAM 输出多个连通区域或孔洞时的处理方式，与第一版单个无孔区域约束一致；确认栅格 mask 与可编辑轮廓转换对边界和面积的影响。
+- [ ] 在后台 worker 执行 SAM 推理，合并快速提示修改；按图像和提示版本丢弃过期结果，避免旧 mask 覆盖当前编辑。修改提示不重新执行 FS inference。
+- [ ] 实测 encoder 首次处理、缓存后 decoder 交互耗时，以及 SAM 与 FS 同时加载的显存占用；验证换图、清空及退出时的缓存和 GPU 资源释放。
+
+当前仅完成 ONNX 解析检查，尚未构建 SAM TensorRT engine、验证推理数值或性能，也未接入 Qt。无需为静态图像选区引入视频记忆模块。
+
 ### 阶段 4：相机输入（按当前优先级提前推进）
 
 - [x] 实现 `IStereoSource` 和 Sentech 采集适配器，配置左右身份，输出自有 RGB 图像及帧元数据。
@@ -346,3 +365,6 @@ cmake --build cpp/build --target fs_gui --parallel
 - `/home/liu4000/Desktop/FS/include/ffs_viewer/calibration/` 与 `src/calibration/`：ChArUco 检测、求解和检查参考。
 - [VTK：QVTKOpenGLNativeWidget](https://vtk.org/doc/nightly/html/classQVTKOpenGLNativeWidget.html)
 - [Qt：Threads and QObjects](https://doc.qt.io/qt-6/threads-qobject.html)
+- [AnyLabeling：SAM ONNX 导出说明](https://anylabeling.nrl.ai/docs/samexporter)
+- [SAM 2.1 ONNX 模型](https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models)
+- [NVIDIA：SAM2 ONNX/TensorRT 参考](https://github.com/NVIDIA/DeepStream/blob/main/tools/sam2-onnx-tensorrt/README.md)（含视频流程；本项目仅需静态图像 encoder/decoder。）
