@@ -15,11 +15,12 @@ class IExecutionContext;
 }
 
 /**
- * TensorRT FoundationStereo inference engine and disparity filtering.
+ * TensorRT FoundationStereo inference engine and XYZ reconstruction.
  *
  * This class owns the TensorRT engine, CUDA stream, and reusable input/output buffers.
  * Calls on an instance must be serialized by the caller, in this order:
- * loadEngine -> prepare_stereo_images -> inference -> filter_disparity.
+ * loadEngine -> set_model_camera_parameters -> prepare_stereo_images
+ * -> inference -> compute_xyz_map.
  * Input preparation and inference readiness are not tracked internally.
  */
 class FS {
@@ -55,15 +56,16 @@ public:
     void inference();
 
     /**
-     * Filter the full image after inference and wait for GPU completion.
-     * Checks both kernel launch and asynchronous execution errors before returning.
-     * Uses FS's stream and overwrites disparity_output_device_ in place.
-     * Invalid pixels become zero; raw disparity is not retained. Rerun inference
-     * before relaxing filtering criteria. After changing inputs or replacing the
-     * engine, prepare inputs and run inference before filtering again.
+     * Fuse full-image disparity validation and XYZ reconstruction, then synchronize.
+     * Uses model_camera_parameters_; call set_model_camera_parameters first.
+     * Preserves disparity_output_device_ and reuses xyz_map_device_ (FP32 HWC XYZ,
+     * in metres). Invalid or out-of-range points are (0,0,0); valid Z is positive
+     * and within [min_depth_m, max_depth_m], inclusive. Defaults to 0 < Z <= 1 m.
+     * Always excludes pixels with u < disparity.
+     * May be repeated with different thresholds without another inference.
      * Selection-mask upload and CPU result access are not exposed yet.
      */
-    void filter_disparity(bool remove_invisible = true);
+    void compute_xyz_map(float min_depth_m = 0.0F, float max_depth_m = 1.0F);
 
     /** Wait for queued GPU work and report asynchronous execution errors. */
     void synchronize();
@@ -100,6 +102,7 @@ private:
     std::unique_ptr<float, CudaDeviceBufferDeleter> left_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> right_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> disparity_output_device_;
+    std::unique_ptr<float, CudaDeviceBufferDeleter> xyz_map_device_;
     std::unique_ptr<float, CudaHostBufferDeleter> left_input_host_;
     std::unique_ptr<float, CudaHostBufferDeleter> right_input_host_;
     cudaStream_t stream_{nullptr};

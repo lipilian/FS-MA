@@ -46,9 +46,9 @@ int main(int argc, char* argv[]) {
             fs.inference();
         }
 
-        Logger::log("Filtering disparity.");
-        fs.filter_disparity();
-        Logger::log("Disparity filtering completed on GPU.");
+        Logger::log("Computing XYZ map (0 < depth <= 1 m).");
+        fs.compute_xyz_map();
+        Logger::log("XYZ reconstruction completed on GPU.");
         return 0;
     } catch (const std::exception& error) {
         Logger::error(std::string("stereo_rectify: ") + error.what());
