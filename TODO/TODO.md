@@ -226,6 +226,16 @@ FS_Engine/
 - [ ] 增加同步后的视差结果读取接口，明确数据所有权。
 - [ ] 验证现有 CLI 输入、校正和推理行为保持正常。
 
+本阶段接着完成 inference 后的基础几何处理，放入 `fs_core`，通过 CLI 在 SSH 环境验证。参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及其调用的 `postprocess_disparity_gpu()`；本轮先完成有效视差筛选与深度/XYZ 点图，邻域去噪、mesh 和面积计算留在后续阶段。
+
+- [x] 建立 `PostProcessing.hpp` / `PostProcessing.cu` 并加入 `fs_core` 构建，预留借用调用方 stream 和缓冲区的筛选接口；当前占位实现返回 `cudaErrorNotSupported`，尚未实现筛选或接入 `FS`。
+- [ ] 明确 GPU 后处理的输入与结果所有权，在 inference 的同一 CUDA stream 上衔接处理，保留原始视差供重复处理；CPU 读取接口用于同步后的验证和导出。
+- [ ] 对齐 `960×800` 视差网格和缩放后的内参，baseline 使用米；支持可选选区 mask，无 mask 时使用全图，原图 mask 需随左图校正后用最近邻缩放。
+- [ ] 实现基础 CUDA 后处理：筛选有限且大于零的视差，结合 mask，并按 notebook 的 `remove_invisible=True` 排除 `u - d < 0` 的点。
+- [ ] 计算 `Z = fx × baseline / d`、`X = (u - cx) × Z / fx`、`Y = (v - cy) × Z / fy`；远距阈值默认沿用 notebook 的 1.0 m，保留有限且 `0 < Z ≤ z_far_m` 的深度。
+- [ ] 输出保留像素对应关系的 `xyz_map` 和 `valid_mask`，无效点 XYZ 清零，并提供同步后读取结果的方式。
+- [ ] 使用 `FS_BUILD_DESKTOP=OFF` 构建和运行 CLI；对固定视差、内参及 mask，与 Python 关闭去噪（`denoise=False`）后的结果比较有效点数、有效掩码及 XYZ/深度数值，同时检查无效视差、越界和深度阈值边界。
+
 核心库构建拆分和目录迁移均已验证：Release 配置及全部目标构建成功，
 `data/Volunteer2_lower/0` 的普通运行与 `--measure` 十次推理均正常退出。
 目录迁移后的 12 个 C++ 文件经比对仅改变位置和 include 路径，算法逻辑保持不变；
@@ -272,7 +282,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - [ ] 完成 capture 目录导入、左右图预览、标定状态及双目校正检查。
 - [ ] 建立 controller、worker 和 pipeline，显示阶段进度、耗时及错误。
 - [ ] 接入真实 FS engine 推理，保证界面保持响应。
-- [ ] 补齐 C++ 点云过滤、受约束 mesh 生成和面积计算模块。
+- [ ] 复用阶段 1 的基础深度/XYZ 后处理，补齐 Python 对应的 3×3 邻域三维距离去噪、受约束 mesh 生成和面积计算模块。
 - [ ] 接入 VTK 点云、mesh、线框显示和基本视角操作。
 - [ ] 对照 Python 验证固定输入的几何结果。
 

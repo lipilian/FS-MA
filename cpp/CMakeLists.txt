@@ -42,6 +42,7 @@ endif()
 # Shared processing code for the CLI and future desktop application.
 add_library(fs_core STATIC
     src/inference/FS.cpp
+    src/inference/PostProcessing.cu
     src/core/Logger.cpp
     src/stereo/StereoFrame.cpp
     src/stereo/StereoCalibration.cpp
@@ -61,7 +62,7 @@ target_link_libraries(fs_core
 )
 
 target_compile_options(fs_core PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
 
 add_executable(TSFS
