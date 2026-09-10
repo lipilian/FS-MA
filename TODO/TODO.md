@@ -1,6 +1,6 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理和内存输入接口，已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 专用标定窗口初版已实现，重建与测量窗口及 VTK 尚未实现。当前可启动标定窗口并连接相机，真实标定板精度验收待进行。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后的就地有效视差筛选和 CLI 接入；视差下载展示、深度/XYZ 仍待实现。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 专用标定窗口初版已实现，重建与测量窗口及 VTK 尚未实现。当前可启动标定窗口并连接相机，真实标定板精度验收待进行。
 
 文档维护约定：后续统一维护 `docs/` 下的 HTML 和本 TODO；功能与操作记录放在 `docs/index.html`，构建、代码结构与接口说明放在 `docs/code_structure.html`。
 
@@ -223,14 +223,19 @@ FS_Engine/
 - [x] 将现有共用代码整理成 `fs_core`，保留 GWC 插件和 engine builder 的独立目标。
 - [x] 按职责迁移 FS、StereoFrame 等代码并更新 include 和 CMake。
 - [x] 增加图像及标定的内存输入接口。
-- [ ] 增加同步后的视差结果读取接口，明确数据所有权。
+- [ ] 增加筛选后视差的 CPU 读取接口，返回独立持有的 `800×960` FP32 数据；GPU 筛选已同步完成，结果下载仍需保证复制完成和数据生命周期。
+- [ ] 将下载后的视差转换为伪彩图，无效零值显示黑色；先通过 CLI 保存 PNG 检查，再接入 Qt 展示。
 - [x] 验证现有 CLI 输入、校正和推理行为保持正常；接入筛选后的普通及 `--measure` 真实样本运行均通过。
 
-本阶段接着完成 inference 后的基础几何处理，放入 `fs_core`，通过 CLI 在 SSH 环境验证。参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及其调用的 `postprocess_disparity_gpu()`；本轮先完成有效视差筛选与深度/XYZ 点图，邻域去噪、mesh 和面积计算留在后续阶段。
+**当前里程碑：有效视差筛选及 FS/CLI 接入已完成。** 实现在 `fs_core` 中，可通过 SSH 下的 CLI 运行。参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及其调用的 `postprocess_disparity_gpu()`；下一步为筛选视差下载和展示，再继续深度/XYZ。邻域去噪、mesh 和面积计算留在后续阶段，阶段 1 尚未全部完成。
 
 - [x] 建立 `PostProcessing.hpp` / `PostProcessing.cu` 并加入 `fs_core` 构建，提供借用调用方 stream 和缓冲区的筛选接口；筛选 kernel 已实现并接入 `FS` 和 CLI。
-- [x] 明确 GPU 后处理的输入与结果所有权：FS 在 inference 的同一 CUDA stream 上直接筛选 `disparity_output_device_`，不额外分配输出空间；筛选覆盖原始值，放宽条件时需重新 inference 才能恢复被清零的像素；调用方保证加载→准备输入→推理→筛选顺序，更换输入或 engine 后须重新准备和推理；FS 不再保存输入/视差就绪标志，`filter_disparity()` 返回前调用 `synchronize()` 检查异步错误，CLI 无需再单独同步。CPU 读取接口仍待实现。
-- [ ] 对齐 `960×800` 视差网格和缩放后的内参，baseline 使用米；支持可选选区 mask，无 mask 时使用全图，原图 mask 需随左图校正后用最近邻缩放。
+- [x] FS 直接复用 `disparity_output_device_` 就地筛选，不额外分配视差输出，也不保存 `valid_mask`；放宽筛选条件时需重新 inference 才能恢复被清零的像素。
+- [x] `FS::filter_disparity()` 在 inference 的同一 stream 启动筛选，内部调用 `synchronize()`；返回时筛选已完成，并检查启动及异步执行错误。
+- [x] CLI 在普通 inference 或 `--measure` 十次推理后调用一次 `filter_disparity()`，无需单独同步，筛选不计入 inference 耗时。
+- [x] 按用户要求移除 `inputs_prepared_` / `disparity_available_`，由调用方保证加载→准备输入→推理→筛选顺序；仍保留资源与 CUDA 错误检查。
+- [x] FS 使用固定 `960×800` 视差网格，现有内参缩放保持一致，baseline 使用米；当前 FS 筛选全图，底层 kernel 支持可选 device selection mask。
+- [ ] 接入 FS 选区 mask 上传；原图 mask 需随左图校正后用最近邻缩放。若直接用于就地视差筛选，扩大选区前须重新 inference。
 - [x] 实现基础 CUDA 后处理：筛选有限且大于零的视差，结合可选 mask，并按 `remove_invisible` 开关排除 `u - d < 0` 的点；有效视差原样保留，无效值清零，就地更新视差；有效性通过 `disparity > 0` 判断，不分配或写出 `valid_mask`。每线程处理一个像素，800×960 输入使用 3000 个 block × 256 个线程，无跨步循环。
 - [ ] 计算 `Z = fx × baseline / d`、`X = (u - cx) × Z / fx`、`Y = (v - cy) × Z / fy`；远距阈值默认沿用 notebook 的 1.0 m，保留有限且 `0 < Z ≤ z_far_m` 的深度。
 - [ ] 输出保留像素对应关系的 `xyz_map`，由正的筛选视差及深度范围判定有效点，无效点 XYZ 清零，并提供同步后读取结果的方式。
@@ -238,7 +243,7 @@ FS_Engine/
 
 筛选 kernel 验证：关闭 Qt 的 Release `fs_core` / `TSFS` 构建通过；临时测试在 GPU 上完成 17 组输入，与 CPU 参考逐像素精确一致，覆盖 NaN/Inf、零/负值、可选 mask、非零 mask 值、可见性开关、`u = d` 及相邻浮点边界、非整块尺寸、960×800 网格和较大尺寸图像。检查了非法参数返回值、就地视差更新、selection mask 不变，以及非默认 stream 上上传→筛选→下载的执行顺序。测试位于 `/tmp`，未新增仓库测试目标；此项验证针对独立 kernel；Python 完整几何对照与展示仍待完成。
 
-FS 接入验证：关闭 Qt 的 Release 构建、`data/Volunteer2_lower/0` 普通及 `--measure` 十次推理后筛选均通过。临时诊断逐像素对照真实原始视差的 CPU 筛选参考：开启可见性筛选保留 717783/768000 个点，关闭后保留 768000 个点；当前就地实现验证：直接复用原始输出指针，筛选值与 CPU 参考一致；筛选后放宽条件仍保留已清零像素，重新 inference 后可恢复。验证了存在已提交工作时重新加载 engine，以及带待完成任务析构。此前验证过的输入/视差就绪状态检查已按用户要求移除，当前由调用方保证正确调用顺序，仍保留资源与 CUDA 错误检查。FS 当前处理全图，mask 上传、下载和展示接口仍待实现。
+FS 接入验证：关闭 Qt 的 Release 构建、`data/Volunteer2_lower/0` 普通及 `--measure` 十次推理后筛选均通过。临时诊断逐像素对照真实原始视差的 CPU 筛选参考：开启可见性筛选保留 717783/768000 个点，关闭后保留 768000 个点；当前就地实现验证：直接复用原始输出指针，筛选值与 CPU 参考一致；筛选后放宽条件仍保留已清零像素，重新 inference 后可恢复。验证了存在已提交工作时重新加载 engine，以及带待完成任务析构。此前验证过的输入/视差就绪状态检查已按用户要求移除，当前由调用方保证正确调用顺序，仍保留资源与 CUDA 错误检查。最终同步方式已验证：将 `synchronize()` 移入 `filter_disparity()` 并删除 CLI 重复调用后，Release 构建及真实样本普通推理/筛选通过。FS 当前处理全图，mask 上传、下载和展示接口仍待实现。
 
 核心库构建拆分和目录迁移均已验证：Release 配置及全部目标构建成功，
 `data/Volunteer2_lower/0` 的普通运行与 `--measure` 十次推理均正常退出。
