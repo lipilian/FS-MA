@@ -17,8 +17,8 @@
 
 ## 当前代码基础
 
-- `cpp/app/TSFS.cpp` 已完成文件输入、双目校正和 FS engine 推理的串联。
-- `cpp/include/fs/inference/FS.hpp` 中的 `FS::inference()` 提交 GPU 工作，视差保留在内部 GPU 缓冲区，尚需补充结果读取接口。
+- `cpp/app/TSFS.cpp` 已完成文件输入、双目校正、FS engine 推理和有效视差筛选的串联，`filter_disparity()` 内部同步检查 GPU 错误后返回。
+- `cpp/include/fs/inference/FS.hpp` 中的 `FS::inference()` 和 `filter_disparity()` 在同一 stream 提交 GPU 工作；FS 就地修改其持有的 `disparity_output_device_`，不另存原始视差或筛选视差，`filter_disparity()` 内部调用 `synchronize()` 检查完成，尚需补充 CPU 结果读取接口和选区 mask 上传。
 - `StereoFrame` 已支持文件路径和内存 RGB 图像 + `StereoCalibration` 两种输入，共用校验并复制持有数据；完整标定类型位于 `cpp/include/fs/stereo/StereoCalibration.hpp`。
 - `python/fs_high_resolution_utils.py` 已有点云过滤、受约束 mesh 生成和面积计算，可作为 C++ 实现的参考。
 - `docs/index.html` 继续作为开发文档；桌面应用单独建立入口。
@@ -207,7 +207,7 @@ FS_Engine/
 ## 测量与更新规则
 
 - mask 编辑以校正左图为基准，映射到当前 `800×960` 推理网格时使用最近邻采样；相机内参同步缩放，baseline 保持米。
-- 修改选区不重新运行 FS 推理。缓存视差；由于现有 Python 去噪依赖 mask，重新执行与选区相关的过滤、mesh 和面积计算。
+- 修改选区时，计划复用全图基础筛选后的视差，在后续几何阶段应用选区并重新执行依赖 mask 的去噪、mesh 和面积计算。当前视差 kernel 就地修改数据；若将选区直接用于视差清零，扩大选区时必须重新 inference，不能从零值恢复。
 - 修改输入、标定或 engine 时，使对应下游结果失效并重算，避免旧面积与新图像混用。窗口 2 导入文件时也需核对其标定与图像来源，不能静默覆盖第一窗口确认的标定。
 - 结束一次选区编辑后自动提交计算，合并待处理修改，仅展示最新版本结果；旧面积标记为“待更新”。
 - 面积为有效三角形的三维曲面面积，内部保存 m²，界面显示 cm²；仅代表当前可见重建区域，不推算遮挡面。
@@ -224,17 +224,21 @@ FS_Engine/
 - [x] 按职责迁移 FS、StereoFrame 等代码并更新 include 和 CMake。
 - [x] 增加图像及标定的内存输入接口。
 - [ ] 增加同步后的视差结果读取接口，明确数据所有权。
-- [ ] 验证现有 CLI 输入、校正和推理行为保持正常。
+- [x] 验证现有 CLI 输入、校正和推理行为保持正常；接入筛选后的普通及 `--measure` 真实样本运行均通过。
 
 本阶段接着完成 inference 后的基础几何处理，放入 `fs_core`，通过 CLI 在 SSH 环境验证。参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及其调用的 `postprocess_disparity_gpu()`；本轮先完成有效视差筛选与深度/XYZ 点图，邻域去噪、mesh 和面积计算留在后续阶段。
 
-- [x] 建立 `PostProcessing.hpp` / `PostProcessing.cu` 并加入 `fs_core` 构建，预留借用调用方 stream 和缓冲区的筛选接口；当前占位实现返回 `cudaErrorNotSupported`，尚未实现筛选或接入 `FS`。
-- [ ] 明确 GPU 后处理的输入与结果所有权，在 inference 的同一 CUDA stream 上衔接处理，保留原始视差供重复处理；CPU 读取接口用于同步后的验证和导出。
+- [x] 建立 `PostProcessing.hpp` / `PostProcessing.cu` 并加入 `fs_core` 构建，提供借用调用方 stream 和缓冲区的筛选接口；筛选 kernel 已实现并接入 `FS` 和 CLI。
+- [x] 明确 GPU 后处理的输入与结果所有权：FS 在 inference 的同一 CUDA stream 上直接筛选 `disparity_output_device_`，不额外分配输出空间；筛选覆盖原始值，放宽条件时需重新 inference 才能恢复被清零的像素；调用方保证加载→准备输入→推理→筛选顺序，更换输入或 engine 后须重新准备和推理；FS 不再保存输入/视差就绪标志，`filter_disparity()` 返回前调用 `synchronize()` 检查异步错误，CLI 无需再单独同步。CPU 读取接口仍待实现。
 - [ ] 对齐 `960×800` 视差网格和缩放后的内参，baseline 使用米；支持可选选区 mask，无 mask 时使用全图，原图 mask 需随左图校正后用最近邻缩放。
-- [ ] 实现基础 CUDA 后处理：筛选有限且大于零的视差，结合 mask，并按 notebook 的 `remove_invisible=True` 排除 `u - d < 0` 的点。
+- [x] 实现基础 CUDA 后处理：筛选有限且大于零的视差，结合可选 mask，并按 `remove_invisible` 开关排除 `u - d < 0` 的点；有效视差原样保留，无效值清零，就地更新视差；有效性通过 `disparity > 0` 判断，不分配或写出 `valid_mask`。每线程处理一个像素，800×960 输入使用 3000 个 block × 256 个线程，无跨步循环。
 - [ ] 计算 `Z = fx × baseline / d`、`X = (u - cx) × Z / fx`、`Y = (v - cy) × Z / fy`；远距阈值默认沿用 notebook 的 1.0 m，保留有限且 `0 < Z ≤ z_far_m` 的深度。
-- [ ] 输出保留像素对应关系的 `xyz_map` 和 `valid_mask`，无效点 XYZ 清零，并提供同步后读取结果的方式。
-- [ ] 使用 `FS_BUILD_DESKTOP=OFF` 构建和运行 CLI；对固定视差、内参及 mask，与 Python 关闭去噪（`denoise=False`）后的结果比较有效点数、有效掩码及 XYZ/深度数值，同时检查无效视差、越界和深度阈值边界。
+- [ ] 输出保留像素对应关系的 `xyz_map`，由正的筛选视差及深度范围判定有效点，无效点 XYZ 清零，并提供同步后读取结果的方式。
+- [ ] 使用 `FS_BUILD_DESKTOP=OFF` 构建和运行 CLI；对固定视差、内参及 mask，与 Python 关闭去噪（`denoise=False`）后的结果比较有效点数、由筛选视差推导的有效位置及 XYZ/深度数值，同时检查无效视差、越界和深度阈值边界。
+
+筛选 kernel 验证：关闭 Qt 的 Release `fs_core` / `TSFS` 构建通过；临时测试在 GPU 上完成 17 组输入，与 CPU 参考逐像素精确一致，覆盖 NaN/Inf、零/负值、可选 mask、非零 mask 值、可见性开关、`u = d` 及相邻浮点边界、非整块尺寸、960×800 网格和较大尺寸图像。检查了非法参数返回值、就地视差更新、selection mask 不变，以及非默认 stream 上上传→筛选→下载的执行顺序。测试位于 `/tmp`，未新增仓库测试目标；此项验证针对独立 kernel；Python 完整几何对照与展示仍待完成。
+
+FS 接入验证：关闭 Qt 的 Release 构建、`data/Volunteer2_lower/0` 普通及 `--measure` 十次推理后筛选均通过。临时诊断逐像素对照真实原始视差的 CPU 筛选参考：开启可见性筛选保留 717783/768000 个点，关闭后保留 768000 个点；当前就地实现验证：直接复用原始输出指针，筛选值与 CPU 参考一致；筛选后放宽条件仍保留已清零像素，重新 inference 后可恢复。验证了存在已提交工作时重新加载 engine，以及带待完成任务析构。此前验证过的输入/视差就绪状态检查已按用户要求移除，当前由调用方保证正确调用顺序，仍保留资源与 CUDA 错误检查。FS 当前处理全图，mask 上传、下载和展示接口仍待实现。
 
 核心库构建拆分和目录迁移均已验证：Release 配置及全部目标构建成功，
 `data/Volunteer2_lower/0` 的普通运行与 `--measure` 十次推理均正常退出。
@@ -243,7 +247,7 @@ FS_Engine/
 当时的测试覆盖文件/内存校正一致性、图像和标定独立持有、非连续缓冲区、
 浮点标定及行/列向量、无效输入和缺失 JSON 字段。真实样本首次对比出现过一次
 校正后右图不一致；补充原始左右图检查与最大差异诊断后，连续五次复测通过，
-首次差异原因尚未定位，后续回归时继续关注。视差结果接口完成后仍需重新验证 CLI。
+首次差异原因尚未定位，后续回归时继续关注。上述记录属于早期验证；筛选接入后的 CLI 验证见本节新增记录，后续增加下载接口时仍需验证。
 
 按用户要求已删除两个自动化测试源文件及 CMake 测试目标；上面的测试结果保留为历史验证记录。
 

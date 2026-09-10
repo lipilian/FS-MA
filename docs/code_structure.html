@@ -72,7 +72,7 @@
       <h1>Code Structure</h1>
       <p class="intro">A map of the FoundationStereo repository after the C++ core-library extraction and directory reorganization. Start here to locate a module, follow the inference call sequence, or understand the build targets.</p>
       <div class="badges" aria-label="Implementation status">
-        <span class="badge">C++: file / memory input → GPU disparity</span>
+        <span class="badge">C++: file / memory input → filtered GPU disparity</span>
         <span class="badge">Sentech: dual-camera capture</span>
         <span class="badge reference">Python: geometry reference</span>
         <span class="badge">Qt 6: calibration window</span>
@@ -151,7 +151,7 @@
         <article class="card" id="entrypoints">
           <p class="label">Application entry points</p>
           <h3>app/</h3>
-          <p><code>TSFS.cpp</code> parses a capture directory and optional <code>--measure</code>, loads the engine, and calls rectification and inference in sequence. It also reports failures and returns the process exit status.</p>
+          <p><code>TSFS.cpp</code> parses a capture directory and optional <code>--measure</code>, loads the engine, and calls rectification, inference, and full-image disparity filtering in sequence. The filter method waits for GPU completion before returning. It also reports failures and returns the process exit status.</p>
           <p><code>desktop_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>, which currently runs the calibration window and exits after completion or cancellation.</p>
           <p><code>build_single_engine.cpp</code> is a separate tool: it registers the GWC plugin, parses ONNX, and builds a serialized TensorRT engine.</p>
         </article>
@@ -178,13 +178,13 @@
           <p>Resizes RGB images to <strong>800 high × 960 wide</strong>, packs FP32 NCHW inputs, and submits inference. It scales the rectified camera intrinsics to that grid and retains the baseline.</p>
         </article>
         <article class="card" id="postprocessing">
-          <p class="label">CUDA postprocessing · Scaffold</p>
+          <p class="label">CUDA postprocessing · Validity filter</p>
           <h3>inference/ · PostProcessing</h3>
           <code class="file">fs/inference/PostProcessing.hpp</code>
-          <p><code>PostProcessing.hpp</code> declares <code>fs::postprocessing::filter_disparity()</code>; <code>PostProcessing.cu</code> provides its placeholder implementation. The CUDA source is compiled into <code>fs_core</code>.</p>
-          <p>The interface accepts device pointers for the original disparity, an optional selection mask, separate filtered-disparity and validity-mask outputs, image dimensions, the <code>remove_invisible</code> flag, and a caller-owned <code>cudaStream_t</code>. It does not allocate buffers or create, synchronize, or destroy the stream.</p>
-          <p>When integrated, <code>FS</code> will supply its stream and manage the output buffers. Filtering can follow inference on that same stream; downloading results for display will require waiting for the copy to complete. Separate filtering, depth/XYZ, and neighbourhood-denoising kernels can share this CUDA file while retaining intermediate outputs.</p>
-          <p><strong>Current status:</strong> the function returns <code>cudaErrorNotSupported</code> without writing outputs. No filtering kernel or call from <code>FS</code> or the CLI exists yet.</p>
+          <p><code>PostProcessing.hpp</code> declares <code>fs::postprocessing::filter_disparity()</code>; <code>PostProcessing.cu</code> implements the filtering kernel and asynchronous launcher. Each thread processes one pixel; the fixed 800×960 grid uses 3000 blocks of 256 threads, with a bounds check and no strided loop. The CUDA source is compiled into <code>fs_core</code>.</p>
+          <p>The interface accepts a mutable device pointer for disparity and an optional selection mask, image dimensions, the <code>remove_invisible</code> flag, and a caller-owned <code>cudaStream_t</code>. It does not allocate buffers or create, synchronize, or destroy the stream.</p>
+          <p><code>FS::filter_disparity(bool remove_invisible = true)</code> supplies its stream and filters directly in its existing <code>disparity_output_device_</code> buffer, without allocating another disparity buffer. It currently passes a null selection mask to process the whole image. Filtering follows inference on that same stream; the FS method calls <code>synchronize()</code> internally and checks completion before returning. The low-level CUDA launcher remains asynchronous. Selection-mask upload and CPU result download are still pending. Separate filtering, depth/XYZ, and neighbourhood-denoising kernels can share this CUDA file while retaining intermediate outputs.</p>
+          <p><strong>Current status:</strong> the kernel preserves finite positive disparities selected by the optional mask, additionally requiring <code>u ≥ disparity</code> when <code>remove_invisible</code> is enabled. Invalid values become zero. Validity is determined by <code>disparity &gt; 0</code>; no validity-mask output is allocated or written. The launcher rejects missing required pointers or nonpositive dimensions or a pixel count exceeding <code>INT_MAX</code> with <code>cudaErrorInvalidValue</code> and otherwise returns the CUDA launch status. Completion errors must be checked by the caller. Both <code>FS</code> and the CLI now call the filter. Filtering overwrites the raw disparity. Repeating a filter can remove additional values but cannot recover zeros; rerun inference before relaxing the criteria. The caller must follow <code>loadEngine → prepare_stereo_images → inference → filter_disparity</code> and prepare/infer again after changing inputs or replacing the engine. FS does not track input-preparation or disparity-readiness flags; CUDA error and resource checks remain. The instance must be used serially by its caller.</p>
         </article>
         <article class="card" id="plugins">
           <p class="label">Independent shared library</p>
@@ -215,7 +215,7 @@
       <p class="description">The core targets are defined in <code>cpp/CMakeLists.txt</code>. With <code>FS_BUILD_DESKTOP=ON</code>, it also includes <code>cpp/cmake/Sentech.cmake</code> for capture and <code>cpp/cmake/Desktop.cmake</code> for calibration and Qt targets. The core library lets another application reuse the processing code.</p>
       <pre tabindex="0" aria-label="CMake target dependency diagram"><code>TSFS  [executable: app/TSFS.cpp]
 └── fs_core  [static library: libfs_core.a]
-    ├── FS + PostProcessing (scaffold) + StereoFrame + StereoCalibration + Logger
+    ├── FS + PostProcessing + StereoFrame + StereoCalibration + Logger
     ├── OpenCV + CUDA runtime             PUBLIC dependencies
     └── TensorRT + GWCVolumePlugin        PRIVATE dependencies
 
@@ -280,16 +280,17 @@ cmake --build cpp/build --parallel
 
     <section id="runtime" aria-labelledby="runtime-heading">
       <h2 id="runtime-heading">04 · Runtime flow</h2>
-      <p class="description">This is the actual call order in <code>app/TSFS.cpp</code>. CPU images are prepared first; inference produces a GPU-resident disparity buffer.</p>
+      <p class="description">This is the actual call order in <code>app/TSFS.cpp</code>. CPU images are prepared first; inference and filtering use the same FS CUDA stream and reuse the same disparity GPU buffer.</p>
       <ol class="steps">
         <li><strong>Load the engine</strong><p><code>FS::loadEngine()</code> registers the custom plugin, deserializes the engine, creates the execution context, and prepares reusable buffers.</p></li>
         <li><strong>Load the stereo capture</strong><p><code>StereoFrame(left_path, right_path, calibration_path)</code> reads <code>left.png</code>, <code>right.png</code>, and <code>calibration.json</code>.</p></li>
         <li><strong>Rectify the images</strong><p><code>StereoFrame::rectify()</code> performs <code>stereoRectify → initUndistortRectifyMap → remap</code>. Output: rectified RGB images, intrinsics, and baseline.</p></li>
         <li><strong>Prepare the model grid and GPU inputs</strong><p><code>set_model_camera_parameters()</code> scales intrinsics; <code>prepare_stereo_images()</code> resizes, packs, and uploads the pair. Input tensors: <code>[1, 3, 800, 960]</code>.</p></li>
         <li><strong>Submit inference or measure ten runs</strong><p><code>inference()</code> calls TensorRT <code>enqueueV3()</code> on the FS CUDA stream. With <code>--measure</code>, <code>inference_time_measure()</code> runs ten inferences, prints GPU timings in milliseconds, and returns their mean.</p></li>
-        <li><strong>Retain disparity inside FS</strong><p>Output tensor: <code>[1, 1, 800, 960]</code>. The device buffer belongs to the FS instance. The current CLI then exits; it does not yet export disparity or construct geometry.</p></li>
+        <li><strong>Filter disparity inside FS</strong><p>Raw output tensor: <code>[1, 1, 800, 960]</code>. <code>filter_disparity()</code> queues full-image filtering in place in the existing FP32 inference output buffer owned by FS. The CLI filters once after ordinary inference or after the tenth measured inference; filtering is excluded from the inference timings.</p></li>
+        <li><strong>Return after GPU completion</strong><p>Inside <code>FS::filter_disparity()</code>, <code>synchronize()</code> waits for the FS stream and reports asynchronous errors. The CLI needs no separate synchronization call. Filtered disparity remains on the GPU; raw disparity is overwritten; export, display, and depth/geometry construction are not yet implemented.</p></li>
       </ol>
-      <p class="note"><code>inference()</code> submits asynchronous GPU work. There is currently no public disparity-result accessor. A synchronized result-copy interface is a planned follow-up.</p>
+      <p class="note"><code>inference()</code> submits asynchronous GPU work; <code>FS::filter_disparity()</code> waits for inference and filtering to finish and reports completion errors before returning. FS destruction also waits before releasing its buffers and TensorRT resources. There is currently no public disparity-result accessor. A synchronized result-copy interface is a planned follow-up.</p>
       <details id="memory-input">
         <summary>In-memory stereo input · API and ownership</summary>
         <p>Public headers use the <code>cpp/include</code> root, for example <code>fs/inference/FS.hpp</code> and <code>fs/stereo/StereoFrame.hpp</code>. The file-path constructor loads RGB images and calibration, then delegates to the same validated memory constructor:</p>
@@ -320,11 +321,11 @@ frame.rectify();
           <h3>Implemented and verified</h3>
           <p>Core-library extraction, module-directory migration, and in-memory stereo input are complete. Historical validation recorded in <code>TODO/TODO.md</code> includes Release builds of all targets, normal CLI inference, and ten-run timing on <code>data/Volunteer2_lower/0</code>.</p>
           <p>Earlier input checks covered file/memory equivalence, buffer ownership, and invalid calibration. The test sources and targets have since been removed. One initial real-capture comparison failed; five consecutive diagnostic reruns passed. The observation remains recorded in <code>TODO/TODO.md</code>.</p>
-          <p>Geometry and area computation already exist in the Python reference workflow. The C++ runtime currently ends at disparity inference. The new <code>PostProcessing</code> scaffold has passed a Release build of <code>fs_core</code> and <code>TSFS</code> with <code>FS_BUILD_DESKTOP=OFF</code>; filtering itself is not implemented or verified.</p>
+          <p>Geometry and area computation already exist in the Python reference workflow. The C++ runtime now runs full-image validity filtering after disparity inference. The <code>PostProcessing</code> filter has passed a Release build of <code>fs_core</code> and <code>TSFS</code> with <code>FS_BUILD_DESKTOP=OFF</code>, plus 17 synthetic GPU cases compared exactly against a CPU reference. These cover invalid values, optional masks, visibility boundaries, odd dimensions, the model grid, larger image dimensions, invalid arguments, unchanged selection masks, and non-default stream ordering. The kernel updates the disparity input in place. Real capture <code>data/Volunteer2_lower/0</code> also passed normal and <code>--measure</code> CLI runs with filtering. Temporary FS diagnostics matched the CPU reference exactly (717783/768000 retained pixels with visibility filtering), verified in-place CPU agreement, reuse of the original disparity buffer, and recovery of removed values by rerunning inference. Earlier integration diagnostics also verified engine reload and destruction with queued work. Earlier diagnostics also checked readiness flags, which have since been removed; call order is now the caller’s responsibility. These checks add no repository test targets. CPU download and display remain pending.</p>
         </article>
         <article class="card">
           <h3>Planned extensions</h3>
-          <p>Stage 1 now includes valid-disparity filtering, depth/XYZ maps, and CLI comparison against the Python reference. The next implementation step is the filtering kernel and its integration after inference; synchronized result access is also pending. Neighbourhood denoising, mesh construction, and area calculation follow later.</p>
+          <p>Stage 1 now includes valid-disparity filtering, depth/XYZ maps, and CLI comparison against the Python reference. The filtering kernel is implemented. FS and CLI integration is complete for full-image filtering. Next are synchronized CPU result access and display; the FS selection-mask upload interface is also pending. Neighbourhood denoising, mesh construction, and area calculation follow later.</p>
           <p>Sentech capture has been verified on the real pair at 2448×2048. Camera-rig calibration validation, exposure synchronization, C++ geometry/pipeline modules, and the second Qt/VTK reconstruction window remain pending. The first Qt 6 calibration window is implemented; real-board accuracy validation is still needed.</p>
           <p>The implementation checklist lives in <code>TODO/TODO.md</code>. See the <a href="stereo_reconstruction_pipeline.html">algorithm overview</a> for the intended end-to-end reconstruction workflow.</p>
         </article>

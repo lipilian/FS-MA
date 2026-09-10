@@ -46,7 +46,9 @@ int main(int argc, char* argv[]) {
             fs.inference();
         }
 
-        // Continue processing FS's GPU-resident disparity here.
+        Logger::log("Filtering disparity.");
+        fs.filter_disparity();
+        Logger::log("Disparity filtering completed on GPU.");
         return 0;
     } catch (const std::exception& error) {
         Logger::error(std::string("stereo_rectify: ") + error.what());

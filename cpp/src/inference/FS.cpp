@@ -1,6 +1,7 @@
 #include "fs/inference/FS.hpp"
 
 #include "fs/inference/plugins/GWCVolumePlugin.hpp"
+#include "fs/inference/PostProcessing.hpp"
 
 #include <cuda_runtime_api.h>
 #include <opencv2/imgproc.hpp>
@@ -68,8 +69,10 @@ FS::FS() {
                "failed to create CUDA stream");
 }
 FS::~FS() {
-    // The stream waits for outstanding work before its buffers are released.
+    // Explicitly wait before releasing buffers and TensorRT resources. Destruction
+    // cannot report errors; callers use synchronize() to check completion.
     if (stream_ != nullptr) {
+        cudaStreamSynchronize(stream_);
         cudaStreamDestroy(stream_);
     }
 }
@@ -188,10 +191,18 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
               << " MiB)"
               << std::endl;
 
+    // Previous work must finish before replacing its context or buffers.
+    synchronize();
     execution_context_ = std::move(execution_context);
     engine_ = std::move(engine);
     runtime_ = std::move(runtime);
-    allocate_input_buffers();
+    try {
+        allocate_input_buffers();
+    } catch (...) {
+        // A partially allocated/bound engine must not appear ready to callers.
+        execution_context_.reset();
+        throw;
+    }
 }
 
 void FS::allocate_input_buffers() {
@@ -319,6 +330,21 @@ void FS::inference() {
     }
 }
 
+void FS::filter_disparity(bool remove_invisible) {
+    if (!isEngineLoaded() || !disparity_output_device_) {
+        throw std::logic_error("loadEngine must complete before disparity filtering");
+    }
+    check_cuda(fs::postprocessing::filter_disparity(
+                   disparity_output_device_.get(), nullptr,
+                   kTensorRtInputWidth, kTensorRtInputHeight, remove_invisible, stream_),
+               "failed to launch disparity filter");
+    synchronize();
+}
+
+void FS::synchronize() {
+    check_cuda(cudaStreamSynchronize(stream_), "failed to complete FS CUDA work");
+}
+
 float FS::inference_time_measure() {
     if (!isEngineLoaded() || stream_ == nullptr || !disparity_output_device_) {
         throw std::logic_error("loadEngine must complete before TensorRT inference");
@@ -335,9 +361,7 @@ float FS::inference_time_measure() {
         for (int iteration = 0; iteration < kInferenceIterations; ++iteration) {
             check_cuda(cudaEventRecord(start, stream_), "failed to record TensorRT inference start event");
 
-            if (!execution_context_->enqueueV3(stream_)) {
-                throw std::runtime_error("failed to enqueue TensorRT inference");
-            }
+            inference();
 
             check_cuda(cudaEventRecord(stop, stream_), "failed to record TensorRT inference stop event");
             check_cuda(cudaEventSynchronize(stop), "failed to synchronize TensorRT inference stop event");
