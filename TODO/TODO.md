@@ -348,7 +348,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - [x] 继续使用 PipelineWorker 的后台 QThread 串行管理 FS 与 SAM；它们使用各自的 CUDA stream。第一条有效提示编码当前冻结校正左图一次；同图修改提示只跑 decoder，清空提示保留特征，成功换图清除特征。没有虚拟推理预热。
 - [x] RGB 图像线性缩放到 1024×1024，按 mean/std 归一化；提示保持浮点坐标。Decoder 接收完整提示列表，`mask_input=0`、`has_mask_input=0`；选择三个候选中评分最高者，先把 logits 线性恢复到原图尺寸，再以 >0 阈值化。未照搬本机 AnyLabeling 的重复通道交换和整数坐标截断。
 - [x] Region measurement 支持拖框、前景点、背景点、拖动点、删除提示、撤销提示、清空、mask 叠加及 Finish draw 确认。右键可删除提示，Backspace 撤销点，Escape 取消正在拖动的框/点。原 Polygon selection 面板已移除，Clear mask 清空提示、预测及手工修补。移除右侧面板，统一左栏按步骤显示：第一步 Input and calibration，第二步 Mask draw，第三步 Depth range / Geometry · pending；Finish draw 在顶部替代原 Use mask 按钮，确认后进入第三步；SAM 2.1 auto draw / Manual draw 分隔模型提示与刷子工具。
-- [x] Brush (+) / Eraser (−) 直接补选或擦除像素，大小为原图 1–100 px（默认 12 px），鼠标显示刷子轮廓，连续笔画不留断点。选中 Brush/Eraser 后在图内滚轮每格调整 1 px，同步大小输入框和轮廓。Mask draw 底部文字、Surface measurement 和 Export 面板已移除。修补层保留到后续 SAM 结果中，刷子不触发推理；Escape 取消本次笔画，修改后需重新 Finish draw。
+- [x] Brush (+) / Eraser (−) 直接补选或擦除像素，大小为原图 1–100 px（默认 50 px），鼠标显示刷子轮廓，连续笔画不留断点。选中 Brush/Eraser 后在图内滚轮每格调整 1 px，同步大小输入框和轮廓。Mask draw 底部文字、Surface measurement 和 Export 面板已移除。修补层保留到后续 SAM 结果中，刷子不触发推理；Escape 取消本次笔画，修改后需重新 Finish draw。
 - [x] 已确认的 mask 按完整校正左图坐标保留在内存；Export 面板及保存入口已按要求移除。SAM 保留原始二值区域及孔洞，不经过 AnyLabeling 的外轮廓简化/小区域过滤。
 - [x] 使用图像编号及原子提示版本跳过过期排队任务、丢弃旧推理结果；修改 SAM 提示不触发 FS inference。关闭窗口等待后台阶段结束，再释放两模型及相机资源。
 - [x] 实际 Large TensorRT encoder/decoder 推理通过；三组点/框提示与 ONNX Runtime mask IoU 为 0.99981、0.99980、0.99673（对齐 RGB 和浮点坐标，现有 engine 允许 TF32）。临时 Qt 测试通过实际标定 → splash → 重建窗口启动链、splash 失败重试、FS/SAM 同时加载、框/正负点/拖点/删点/撤销、确认与导出、缩放不改变 mask、清空/换图过滤旧结果，以及 FS 重建和关闭。

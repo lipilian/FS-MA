@@ -64,5 +64,5 @@ private:
     QPointF stroke_last_;
     std::optional<QPointF> cursor_;
     bool overlay_{true}, editing_{true}, brushing_{false}, accepted_before_stroke_{false};
-    int brush_size_{12}, wheel_delta_{0};
+    int brush_size_{50}, wheel_delta_{0};
 };
