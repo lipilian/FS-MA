@@ -18,6 +18,7 @@ private:
     ConfirmedCalibration confirmed_;
     QString saved_path_;
     SharedStereoSource source_;
+    double camera_exposure_us_{SentechStereoOptions{}.exposure_us};
     std::unique_ptr<PipelineController> pipeline_;
     std::unique_ptr<ReconstructionWindow> reconstruction_;
     std::unique_ptr<InferenceSplashWindow> splash_;

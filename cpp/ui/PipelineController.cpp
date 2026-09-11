@@ -1,8 +1,8 @@
 #include "PipelineController.hpp"
 
-PipelineController::PipelineController(ConfirmedCalibration calibration, QString path, SharedStereoSource source, QObject* parent)
+PipelineController::PipelineController(ConfirmedCalibration calibration, QString path, SharedStereoSource source, double exposure_us, QObject* parent)
     : QObject(parent), cancel_(std::make_shared<std::atomic_bool>(false)),
-      worker_(new PipelineWorker(std::move(calibration), std::move(path), std::move(source), cancel_)) {
+      worker_(new PipelineWorker(std::move(calibration), std::move(path), std::move(source), cancel_, exposure_us)) {
     qRegisterMetaType<PipelineState>();
     worker_->moveToThread(&thread_);
     connect(worker_, &PipelineWorker::stateChanged, this, [this](PipelineState state) {
@@ -32,6 +32,12 @@ void PipelineController::initialize(const QString& engine_path) {
     if (busy_ || stopping_) return;
     initializing_ = true;
     submit([engine_path](auto& worker) { worker.initialize(engine_path); });
+}
+void PipelineController::setPreviewRectified(bool enabled) {
+    if (stopping_) return;
+    auto* worker = worker_;
+    // A display preference must not be dropped by the task busy guard.
+    QMetaObject::invokeMethod(worker, [worker, enabled] { worker->setPreviewRectified(enabled); }, Qt::QueuedConnection);
 }
 void PipelineController::cancel() { cancel_->store(true); }
 void PipelineController::stop() {

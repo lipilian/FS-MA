@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace fs::calibration {
+inline constexpr double kQualityThresholdPx = 1.0;
 struct BoardConfig {
     int squares_x{10}, squares_y{8};
     double square_length_m{0.0665}, marker_length_m{0.0505};
@@ -35,7 +36,7 @@ struct SessionResult {
     std::string left_serial{"21LJ530"}, right_serial{"21LJ548"};
     Quality solve, check;
     bool checked{false};
-    double threshold_px{1.0}; // Provisional, editable; not a measurement-accuracy guarantee.
+    double threshold_px{kQualityThresholdPx}; // Desktop uses the fixed 1 px limit; retained in saved metadata.
 };
 std::vector<std::string> dictionary_names();
 cv::Ptr<cv::aruco::CharucoBoard> make_board(const BoardConfig& config);

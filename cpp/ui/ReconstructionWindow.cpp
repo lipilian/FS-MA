@@ -10,7 +10,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
-#include <QLineEdit>
+#include <QToolButton>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -55,7 +55,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         QPushButton:disabled { color: #9aa8b9; background: #edf1f6; border-color: #dfe5ed; }
         QPushButton#run { background: #2464d9; color: white; border: 0; }
         QPushButton#run:disabled { background: #c3d1e6; }
-        QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox { min-height: 28px; border: 1px solid #ced8e5; border-radius: 4px; background: white; color: #20314a; padding: 2px 5px; }
+        QDoubleSpinBox, QSpinBox, QComboBox { min-height: 28px; border: 1px solid #ced8e5; border-radius: 4px; background: white; color: #20314a; padding: 2px 5px; }
+        QWidget#inputCard { background: white; border: 1px solid #dce3ed; border-radius: 8px; }
+        QToolButton#inputDetailsToggle { border: 0; background: transparent; text-align: left; padding: 10px 8px; font-weight: 600; }
+        QToolButton#inputDetailsToggle:hover { background: #eaf1fc; }
         QLabel#title { font-size: 27px; font-weight: 700; color: #192c49; }
         QLabel#step { font-size: 11px; font-weight: 700; color: #2464d9; }
         QLabel#status { padding: 10px; background: #e5edfa; border-radius: 5px; color: #234772; }
@@ -80,7 +83,18 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
-    auto* input_group = group("Input and calibration", layout);
+    auto* input_group = new QWidget; input_group->setObjectName("inputCard");
+    auto* input_layout = new QVBoxLayout(input_group); input_layout->setContentsMargins(4,4,4,4); input_layout->setSpacing(0);
+    auto* input_toggle = new QToolButton; input_toggle->setObjectName("inputDetailsToggle");
+    input_toggle->setText("Input and calibration"); input_toggle->setCheckable(true); input_toggle->setChecked(false);
+    input_toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); input_toggle->setArrowType(Qt::RightArrow);
+    input_toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); input_layout->addWidget(input_toggle);
+    auto* input_details = new QWidget; input_details->setObjectName("inputDetails");
+    layout = new QVBoxLayout(input_details); layout->setContentsMargins(8,4,8,10);
+    input_layout->addWidget(input_details); input_details->hide();
+    connect(input_toggle, &QToolButton::toggled, this, [input_details, input_toggle](bool expanded) {
+        input_details->setVisible(expanded); input_toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    });
     input_ = label("No stereo pair loaded"); input_->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(input_);
     capture_calibration_ = new QCheckBox("Use capture calibration"); capture_calibration_->setChecked(true); capture_calibration_->setObjectName("captureCalibration");
     capture_calibration_->setToolTip("Import left.png, right.png and calibration.json from one directory. Uncheck to use the confirmed calibration, requiring matching image dimensions.");
@@ -91,15 +105,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         .arg(calibration->image_size.width).arg(calibration->image_size.height)
         .arg(calibration->checked ? "Fresh check passed" : "Saved calibration reused")));
     settings_layout->addWidget(input_group);
-    auto* cameras = group("Camera session", layout);
-    camera_status_ = label("Not connected"); layout->addWidget(camera_status_);
-    exposure_ = decimal(100000, 100, 1000000, " µs"); exposure_->setDecimals(0); layout->addWidget(exposure_);
-    layout->addWidget(label("Independent streams. Capture freezes a pair; preview does not replace the frozen input.")); settings_layout->addWidget(cameras);
-    auto* engine_group = group("FoundationStereo engine", layout);
-    engine_ = new QLineEdit(state_.engine_path); engine_->setObjectName("enginePath"); engine_->setReadOnly(true);
-    engine_->setToolTip(state_.engine_path); layout->addWidget(engine_);
-    layout->addWidget(label("Engine and inference buffers prepared before opening this workspace."));
-    engine_status_ = label(""); layout->addWidget(engine_status_); settings_layout->addWidget(engine_group);
     auto* depth = group("Depth range", layout); auto* form = new QFormLayout;
     minimum_ = decimal(0,0,1000," m"); maximum_ = decimal(1,0.001,1000," m"); minimum_->setObjectName("minimumDepth"); maximum_->setObjectName("maximumDepth");
     minimum_->setSingleStep(0.05); maximum_->setSingleStep(0.05);
@@ -113,13 +118,13 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
 
     tabs_ = new QTabWidget; tabs_->setObjectName("workspaceTabs");
     auto* stereo = new QWidget; auto* stereo_layout = new QVBoxLayout(stereo);
-    auto* view_controls = new QHBoxLayout; rectified_ = new QCheckBox("Rectified"); rectified_->setChecked(true);
-    epilines_ = new QCheckBox("Epipolar guides"); epilines_->setChecked(true);
+    auto* view_controls = new QHBoxLayout; rectified_ = new QCheckBox("Rectified"); rectified_->setObjectName("rectified"); rectified_->setChecked(true);
+    epilines_ = new QCheckBox("Epipolar guides"); epilines_->setObjectName("epipolarGuides"); epilines_->setChecked(true);
     view_controls->addWidget(rectified_); view_controls->addWidget(epilines_); view_controls->addStretch(); stereo_layout->addLayout(view_controls);
     auto* views = new QSplitter; left_ = new StereoImageView("LEFT"); right_ = new StereoImageView("RIGHT");
     left_->setEmptyText("Import a capture directory\nor connect cameras and capture a pair"); right_->setEmptyText("The matching right image\nwill appear here");
     views->addWidget(left_); views->addWidget(right_); stereo_layout->addWidget(views,1);
-    stereo_layout->addWidget(label("Compare horizontal structures in rectified views. Live preview always shows raw RGB."));
+    stereo_layout->addWidget(label("Rectified applies to live preview and captured pairs. Enable Epipolar guides to compare horizontal alignment."));
     tabs_->addTab(stereo,"Stereo inspection");
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
@@ -171,15 +176,20 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         raw_left_ = std::move(l); raw_right_ = std::move(r); rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
         mask_->setImage(rectified_left_); tabs_->setCurrentIndex(0); showImages();
     });
-    connect(&controller_,&PipelineController::preview,this,[this](QImage l,QImage r) { live_left_ = std::move(l); live_right_ = std::move(r); if (state_.live) showImages(); });
+    connect(&controller_,&PipelineController::preview,this,[this](QImage l,QImage r,bool rectified) {
+        // Ignore queued frames from the mode that was selected before a toggle.
+        if (rectified != rectified_->isChecked()) return;
+        live_left_ = std::move(l); live_right_ = std::move(r);
+        if (state_.live) showImages();
+    });
     connect(import_,&QPushButton::clicked,this,[this] {
         const QString path = QFileDialog::getExistingDirectory(this,"Choose capture directory (left.png, right.png, calibration.json)");
         if (path.isEmpty()) return;
         const bool own_calibration = capture_calibration_->isChecked(); controller_.submit([=](auto& w) { w.importCapture(path,own_calibration); });
     });
     connect(camera_,&QPushButton::clicked,this,[this] {
-        const bool connected = state_.connected; const double exposure = exposure_->value();
-        controller_.submit([=](auto& w) { if (connected) w.disconnectCameras(); else w.connectCameras(exposure); });
+        const bool connected = state_.connected;
+        controller_.submit([=](auto& w) { if (connected) w.disconnectCameras(); else w.connectCameras(); });
     });
     connect(preview_,&QPushButton::clicked,this,[this] { const bool live = state_.live; if (!live) { live_left_ = {}; live_right_ = {}; tabs_->setCurrentIndex(0); } controller_.submit([=](auto& w) { w.setLive(!live); }); });
     connect(capture_,&QPushButton::clicked,this,[this] { controller_.submit([](auto& w) { w.freeze(); }); });
@@ -189,7 +199,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(stop_,&QPushButton::clicked,this,[this] { controller_.cancel(); status_->setText("Stop requested · waiting for the current stage to finish…"); });
     connect(minimum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); }); connect(maximum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); });
-    connect(rectified_,&QCheckBox::toggled,this,[this] { showImages(); }); connect(epilines_,&QCheckBox::toggled,this,[this] { showImages(); });
+    connect(rectified_,&QCheckBox::toggled,this,[this](bool enabled) {
+        live_left_ = {}; live_right_ = {};
+        controller_.setPreviewRectified(enabled);
+        refresh(); showImages();
+    }); connect(epilines_,&QCheckBox::toggled,this,[this] { showImages(); });
     connect(draw_,&QPushButton::clicked,this,[this,overlay] { tabs_->setCurrentIndex(1); overlay->setChecked(true); mask_->startPolygon(); });
     connect(finish_,&QPushButton::clicked,mask_,&MaskEditor::finishPolygon); connect(undo_,&QPushButton::clicked,mask_,&MaskEditor::undoVertex);
     connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearPolygon); connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
@@ -202,14 +216,13 @@ void ReconstructionWindow::refresh() {
     const bool idle = !busy_ && !closing_, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
-    camera_status_->setText(state_.connected ? (state_.live ? "Connected · live raw RGB" : "Connected · preview paused") : "Not connected");
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
-    exposure_->setEnabled(idle && !state_.connected); minimum_->setEnabled(idle); maximum_->setEnabled(idle);
+    minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     const bool depth_valid = minimum_->value() < maximum_->value();
     run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid); stop_->setEnabled(busy_ && !closing_);
     run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image inference and GPU XYZ; geometry and measurement stages are pending.");
-    engine_status_->setText(state_.engine);
-    rectified_->setEnabled(!state_.live && state_.has_pair); epilines_->setEnabled(!state_.live && rectified_->isChecked() && state_.has_rectified);
+    rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
+    epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
     draw_->setEnabled(idle && frozen); mask_->setEditingEnabled(idle && frozen);
     finish_->setEnabled(idle && frozen && !mask_->hasSelection() && mask_->vertexCount() >= 3);
     undo_->setEnabled(idle && frozen && !mask_->hasSelection() && mask_->vertexCount() > 0);
@@ -224,7 +237,7 @@ void ReconstructionWindow::refresh() {
     scene_status_->setText((state_.gpu_ready ? "GPU XYZ is ready\n\n" : QString()) + "3D viewport · pending\n\nReserved for VTK point cloud, mesh and wireframe display.\nCPU result download and geometry are not connected yet.\n\nRotation · zoom · pan · reset view");
 }
 void ReconstructionWindow::showImages() {
-    const bool corrected = !state_.live && rectified_->isChecked();
+    const bool corrected = rectified_->isChecked();
     left_->setImage(state_.live ? live_left_ : corrected ? rectified_left_ : raw_left_);
     right_->setImage(state_.live ? live_right_ : corrected ? rectified_right_ : raw_right_);
     left_->setEpilines(corrected && epilines_->isChecked()); right_->setEpilines(corrected && epilines_->isChecked());
