@@ -310,6 +310,8 @@ cmake --build cpp/build --target fs_gui --parallel
 
 当前窗口 2 操作与边界（2026-09-11）：
 
+- [x] 第四步左栏 Save results：独立勾选 raw left.png/right.png、保留原文件名的 calibration JSON、原分辨率校正左图 mask.png、米制 XYZ/RGB/三角面 mesh.ply。选择目录后后台写入；Save all 无视勾选项一次保存全部五个文件，需当前 mesh 就绪；已有文件确认替换，各文件原子提交；禁止保存失效 mesh，保存不影响步骤完成状态。
+
 - [x] 第三步 Reconstruct 旁新增 Next：重建成功且结果仍有效时启用，进入第四步；修改上游输入/参数或任务运行时禁用。日志分别记录 input preparation、inference、post processing（XYZ/去噪及下载/深度图准备分项）和第四步 CPU mesh build，同步后的墙钟耗时以毫秒保留三位小数，不包含主线程渲染。
 
 - 由标定的 Finish / Skip 进入；先停止标定检测/求解线程，再交接同一个运行中的相机源，不重复打开设备。退出重建窗口时在安全阶段边界停止，等待后台任务并释放 GPU / SDK。
@@ -325,7 +327,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - 工作台移除 FoundationStereo engine 信息块，后续推理复用 splash 已准备的同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程包括 GPU XYZ、CPU 下载和固定米制范围的 Jet 深度图，后续几何功能仍标明待接入。
 - `Region measurement` 位于第二个 tab，`Depth map` 位于第三个。Start reconstruction 完成后自动显示校正左图和 Jet 深度图，均为 960×800（宽×高）；左图使用与模型输入一致的线性缩放。Jet 使用本次运行的 Minimum / Maximum（米），无效及超范围点为黑色，标签保留本次范围；修改设置在下次运行生效。重新计算或成功换图会清空旧深度结果，导入失败保留原结果。顶部移除 Stop；右上角仅 Stereo inspection 显示 Capture pair，Region measurement 显示 Finish draw，Depth map 显示 Reconstruct。四个 tab 按输入 → 确认 mask → 重建深度 → 3D 顺序解锁，标题右侧绿勾表示完成、黄点表示待完成。成功拍摄/导入自动进入 Region measurement；Finish draw 确认 mask 后进入第三步，设置深度范围并点击 Reconstruct。编辑 mask 会清除后续 UI 完成状态；Minimum / Maximum 修改也会使深度及后续步骤失效、清空旧结果，改回原值仍需重算；只切换 tab 不会重置完成状态；3D 后端未接入，暂不标完成。
 - 深度图验证：Release 全目标构建通过；临时 Qt offscreen + 真实 `data/Volunteer2_lower/0` 推理验证两张图均为 960×800，左图与模型网格校正 RGB 逐像素一致，Jet 与独立 FP32 深度参考逐像素一致（0–1 m 内 430654 个有效点），0.2–0.3 m 的空范围全黑。覆盖计算完成自动切页、图例保留本次范围、重算/换图清空旧结果、失败导入保留结果、选区跳转及 CPU 下载独立持有。测试及界面截图保存在 `/tmp`。
-- 3D browser 已接入 CPU mesh、线框、顶点及面积/点数/三角形显示；邻域过滤已启用。PLY/测量报告/结果包未实现，Export 面板保持移除。
+- 3D browser 已接入 CPU mesh、线框、顶点及面积/点数/三角形显示；邻域过滤已启用。第四步已支持 raw PNG / calibration JSON / mask PNG / mesh PLY；测量报告及额外结果包元数据仍未实现。
 - 验证：Release 全部目标构建通过；临时 Qt offscreen 检查实际 Desktop 的 Skip → 唯一重建窗口 → 关闭，以及普通关闭标定不跳转。真实 `data/Volunteer2_lower/0` 校正与 CLI 逐像素一致，engine 推理和 GPU XYZ 成功，事件循环保持响应；覆盖导入失败、engine 错误、深度输入、取消、换图失效、mask 坐标/导出。临时回放源验证标定 worker 发出同一个运行中的相机源、线程结束后交接、pipeline 不重复 start、预览、拍摄冻结与断开；真实推理中取消和关闭均等待安全边界完成。测试保留在 `/tmp`，未新增仓库测试目标；真实设备交接及物理拔插仍需现场验收。
 
 - Splash 验证：Release 全部目标构建通过；实际 Qt 顺序切换、缺少/损坏 engine、无 GPU、失败后换路径重试、加载中取消、标定取消均通过临时 offscreen 检查。诊断确认 `loadEngine()` 返回前 GPU/pinned host/CPU resize 缓冲区存在，首次输入预处理复用地址；临时 engine 软链接在加载后移除，仍连续完成两次真实 FS/XYZ 推理，初始化日志只出现一次。回放相机保持同一源，预加载期间 GUI 事件循环响应正常；未新增仓库测试目标。
@@ -351,7 +353,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - [x] RGB 图像线性缩放到 1024×1024，按 mean/std 归一化；提示保持浮点坐标。Decoder 接收完整提示列表，`mask_input=0`、`has_mask_input=0`；选择三个候选中评分最高者，先把 logits 线性恢复到原图尺寸，再以 >0 阈值化。未照搬本机 AnyLabeling 的重复通道交换和整数坐标截断。
 - [x] Region measurement 支持拖框、前景点、背景点、拖动点、删除提示、撤销提示、清空、mask 叠加及 Finish draw 确认。右键可删除提示，Backspace 撤销点，Escape 取消正在拖动的框/点。原 Polygon selection 面板已移除，Clear mask 清空提示、预测及手工修补。移除右侧面板，统一左栏按步骤显示：第一步 Input and calibration，第二步 Mask draw，第三步 Depth range / Geometry；Finish draw 在顶部替代原 Use mask 按钮，确认后进入第三步；SAM 2.1 auto draw / Manual draw 分隔模型提示与刷子工具。
 - [x] Brush (+) / Eraser (−) 直接补选或擦除像素，大小为原图 1–100 px（默认 50 px），鼠标显示刷子轮廓，连续笔画不留断点。选中 Brush/Eraser 后在图内滚轮每格调整 1 px，同步大小输入框和轮廓。Mask draw 底部文字、Surface measurement 和 Export 面板已移除。修补层保留到后续 SAM 结果中，刷子不触发推理；Escape 取消本次笔画，修改后需重新 Finish draw。
-- [x] 已确认的 mask 按完整校正左图坐标保留在内存；Export 面板及保存入口已按要求移除。SAM 保留原始二值区域及孔洞，不经过 AnyLabeling 的外轮廓简化/小区域过滤。
+- [x] 已确认的 mask 按完整校正左图坐标保留在内存；第四步新 Save results 面板支持单独保存当前确认 mask。SAM 保留原始二值区域及孔洞，不经过 AnyLabeling 的外轮廓简化/小区域过滤。
 - [x] 使用图像编号及原子提示版本跳过过期排队任务、丢弃旧推理结果；修改 SAM 提示不触发 FS inference。关闭窗口等待后台阶段结束，再释放两模型及相机资源。
 - [x] 实际 Large TensorRT encoder/decoder 推理通过；三组点/框提示与 ONNX Runtime mask IoU 为 0.99981、0.99980、0.99673（对齐 RGB 和浮点坐标，现有 engine 允许 TF32）。临时 Qt 测试通过实际标定 → splash → 重建窗口启动链、splash 失败重试、FS/SAM 同时加载、框/正负点/拖点/删点/撤销、确认与导出、缩放不改变 mask、清空/换图过滤旧结果，以及 FS 重建和关闭。
 - [x] 确认后的 mask 最近邻缩放到 FS 宽 960 × 高 800 网格，disparity → XYZ 对全图计算；随后仅在 mask 内调用 FS 的 3×3 CUDA 邻域去噪，mask 外 XYZ 原样复制到最终缓冲区。默认 0.01 m / 内部 3 邻居 / 边缘最多 2 邻居，与 Python 一致。新增 GPU mask、pinned staging、CPU resize 和独立 XYZ scratch 均在 splash 分配，使用 FS stream。
