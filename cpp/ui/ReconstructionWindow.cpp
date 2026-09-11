@@ -9,6 +9,10 @@
 #include <QDateTime>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QDir>
+#include <QLineEdit>
+#include <QMessageBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -103,7 +107,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     input_ = label("No stereo pair loaded"); input_->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(input_);
     capture_calibration_ = new QCheckBox("Use capture calibration"); capture_calibration_->setChecked(true); capture_calibration_->setObjectName("captureCalibration");
-    capture_calibration_->setToolTip("Import left.png, right.png and calibration.json from one directory. Uncheck to use the confirmed calibration, requiring matching image dimensions.");
+    capture_calibration_->setToolTip("The folder must contain left.png, right.png and calibration JSON (calibration.json or sentech_stereo_calibration.json; the confirmed calibration filename is also accepted). Uncheck to use the confirmed calibration with matching image dimensions; all three files are still required.");
     layout->addWidget(capture_calibration_);
     calibration_ = label(path); calibration_->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(calibration_);
     layout->addWidget(label(QString("Confirmed camera calibration\nL %1 · R %2\n%3 × %4 · %5")
@@ -196,13 +200,30 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* brush_form=new QFormLayout; brush_form->addRow("Brush size",brush_size_); layout->addLayout(brush_form);
     layout->addWidget(clear_);
     sam->setObjectName("maskDrawPanel"); depth->setObjectName("depthSettings"); filters->setObjectName("geometrySettings");
-    settings_layout->addWidget(sam); settings_layout->addStretch();
+    settings_layout->addWidget(sam);
+    auto* save_panel=group("Save results",layout); save_panel->setObjectName("saveResultsPanel");
+    save_images_=new QCheckBox("Raw left / right images"); save_images_->setObjectName("saveRawImages");
+    save_calibration_=new QCheckBox("Calibration JSON"); save_calibration_->setObjectName("saveCalibration");
+    save_mask_=new QCheckBox("Mask (mask.png)"); save_mask_->setObjectName("saveMask");
+    save_mask_->setToolTip("Full-resolution confirmed mask in rectified-left image coordinates.");
+    save_mesh_=new QCheckBox("Mesh (mesh.ply)"); save_mesh_->setObjectName("saveMesh");
+    save_mesh_->setToolTip("Generate the current mesh before saving it.");
+    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_}) option->setChecked(true);
+    layout->addWidget(save_images_); layout->addWidget(label("left.png · right.png"));
+    layout->addWidget(save_calibration_); save_calibration_name_=label(state_.calibration_filename); layout->addWidget(save_calibration_name_);
+    layout->addWidget(save_mask_); layout->addWidget(save_mesh_);
+    save_directory_=new QLineEdit; save_directory_->setObjectName("saveDirectory"); save_directory_->setReadOnly(true); save_directory_->setPlaceholderText("Choose output folder");
+    layout->addWidget(save_directory_); browse_save_=button("Browse…","browseSaveDirectory"); layout->addWidget(browse_save_);
+    save_selected_=button("Save selected","saveSelected"); layout->addWidget(save_selected_);
+    save_all_=button("Save all","saveAll"); layout->addWidget(save_all_);
+    settings_layout->addWidget(save_panel); settings_layout->addStretch();
     split->setSizes({290,1170}); split->setStretchFactor(1,1); outer->addWidget(split,1);
-    const auto update_step_tools = [this,input_group,sam,depth,filters,settings_panel] {
+    const auto update_step_tools = [this,input_group,sam,depth,filters,save_panel,settings_panel] {
         const int step=tabs_->currentIndex();
         input_group->setVisible(step==0); sam->setVisible(step==1);
         depth->setVisible(step==2); filters->setVisible(step==2);
-        settings_panel->setVisible(step<3);
+        save_panel->setVisible(step==3);
+        settings_panel->setVisible(true);
     };
     connect(tabs_,&QTabWidget::currentChanged,this,update_step_tools);
     update_step_tools();
@@ -244,7 +265,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (state_.live) showImages();
     });
     connect(import_,&QPushButton::clicked,this,[this] {
-        const QString path = QFileDialog::getExistingDirectory(this,"Choose capture directory (left.png, right.png, calibration.json)");
+        const QString path = QFileDialog::getExistingDirectory(this,"Choose capture directory (left.png, right.png, calibration JSON)");
         if (path.isEmpty()) return;
         const bool own_calibration = capture_calibration_->isChecked(); controller_.submit([=](auto& w) { w.importCapture(path,own_calibration); });
     });
@@ -260,6 +281,37 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         const QImage selected=mask_->mask();
         const bool denoise=denoise_->isChecked(); const float distance=neighbor_distance_->value();
         controller_.submit([=](auto& w) { w.reconstruct(low,high,selected,denoise,distance); });
+    });
+    connect(browse_save_,&QPushButton::clicked,this,[this] {
+        const auto directory=QFileDialog::getExistingDirectory(this,"Choose output folder",save_directory_->text());
+        if (!directory.isEmpty()) save_directory_->setText(directory);
+    });
+    connect(save_directory_,&QLineEdit::textChanged,this,[this] { refresh(); });
+    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_})
+        connect(option,&QCheckBox::toggled,this,[this] { refresh(); });
+    const auto save_results=[this](ReconstructionSaveOptions options) {
+        const QString directory=save_directory_->text();
+        const QDir dir(directory);
+        QStringList names;
+        if (options.images) names << "left.png" << "right.png";
+        if (options.calibration) names << state_.calibration_filename;
+        if (options.mask) names << "mask.png";
+        if (options.mesh) names << "mesh.ply";
+        QStringList existing;
+        for (const auto& name:names) if (QFileInfo::exists(dir.filePath(name)) || QFileInfo(dir.filePath(name)).isSymLink()) existing << name;
+        const bool overwrite=!existing.isEmpty();
+        if (overwrite && QMessageBox::question(this,"Replace existing files?",
+            "These files already exist in the chosen folder:\n"+existing.join("\n")+"\n\nReplace them?",
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
+        const QImage selection=mask_->mask();
+        const SharedMesh mesh=mesh_valid_ ? mesh_result_ : SharedMesh{};
+        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite); });
+    };
+    connect(save_selected_,&QPushButton::clicked,this,[this,save_results] {
+        save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked()});
+    });
+    connect(save_all_,&QPushButton::clicked,this,[save_results] {
+        save_results({true,true,true,true});
     });
     connect(next_,&QPushButton::clicked,this,[this] { tabs_->setCurrentIndex(3); });
     connect(build_mesh_,&QPushButton::clicked,this,[this] {
@@ -347,6 +399,14 @@ void ReconstructionWindow::refresh() {
     progress_->setRange(0,busy_ ? 0 : 4); if (!busy_) progress_->setValue(result_current ? 4 : state_.has_rectified ? 1 : 0);
     if (!mesh_valid_ && mesh_result_) { mesh_result_.reset(); mesh_view_->setMesh({}); }
     mesh_mode_->setEnabled(mesh_valid_);
+    browse_save_->setEnabled(idle);
+    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_}) option->setEnabled(idle);
+    save_calibration_name_->setText(state_.calibration_filename);
+    const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked();
+    const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
+        (!save_mesh_->isChecked() || (mesh_valid_ && mesh_result_));
+    save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
+    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && mesh_result_ && !save_directory_->text().isEmpty());
     scene_status_->setText(mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")
         .arg(mesh_result_->vertices.size()).arg(mesh_result_->triangles.size()).arg(mesh_result_->area_m2*1e4,0,'f',2)
         : result_current ? "Depth ready. Click Generate mesh." : "Reconstruct depth before generating a mesh.");
