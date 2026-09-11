@@ -4,6 +4,7 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     : QObject(parent), cancel_(std::make_shared<std::atomic_bool>(false)),
       worker_(new PipelineWorker(std::move(calibration), std::move(path), std::move(source), cancel_, exposure_us)) {
     qRegisterMetaType<PipelineState>();
+    qRegisterMetaType<SharedMesh>();
     worker_->moveToThread(&thread_);
     connect(worker_, &PipelineWorker::stateChanged, this, [this](PipelineState state) {
         state_ = std::move(state); emit stateChanged(state_);
@@ -11,6 +12,7 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     connect(worker_, &PipelineWorker::images, this, &PipelineController::images);
     connect(worker_, &PipelineWorker::preview, this, &PipelineController::preview);
     connect(worker_, &PipelineWorker::depthImages, this, &PipelineController::depthImages);
+    connect(worker_, &PipelineWorker::meshReady, this, &PipelineController::meshReady);
     connect(worker_, &PipelineWorker::maskReady, this, &PipelineController::maskReady);
     connect(worker_, &PipelineWorker::log, this, &PipelineController::log);
     connect(worker_, &PipelineWorker::actionFinished, this, [this] {
