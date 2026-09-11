@@ -1,6 +1,7 @@
 #include "MaskEditor.hpp"
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QPainter>
 #include <algorithm>
 #include <cmath>
@@ -99,7 +100,7 @@ void MaskEditor::mouseReleaseEvent(QMouseEvent* event) {
     if (!editing_ || event->button()!=Qt::LeftButton) return;
     if (brushing_) {
         paintStroke(stroke_last_,toImage(event->position())); brushing_=false; before_stroke_={};
-        emit selectionChanged(); emit hint("Mask edited. Use mask to confirm; brush edits are retained when SAM prompts change."); return;
+        emit selectionChanged(); emit hint("Mask edited. Finish draw to confirm; brush edits are retained when SAM prompts change."); return;
     }
     if (boxing_) {
         box_=QRectF(box_start_,toImage(event->position())).normalized(); boxing_=false;
@@ -124,7 +125,7 @@ void MaskEditor::keyPressEvent(QKeyEvent* event) {
     if (event->key()==Qt::Key_Return || event->key()==Qt::Key_Enter) { acceptPrediction(); return; }
     QWidget::keyPressEvent(event);
 }
-void MaskEditor::leaveEvent(QEvent* event) { cursor_.reset(); update(); QWidget::leaveEvent(event); }
+void MaskEditor::leaveEvent(QEvent* event) { wheel_delta_=0; cursor_.reset(); update(); QWidget::leaveEvent(event); }
 
 QImage MaskEditor::mask() const {
     return accepted_ ? sam_mask_.copy() : QImage();
@@ -132,7 +133,7 @@ QImage MaskEditor::mask() const {
 
 void MaskEditor::setTool(Tool tool) {
     if (!editing_ || image_.isNull()) return;
-    tool_=tool; overlay_=true; setFocus(); update();
+    wheel_delta_=0; tool_=tool; overlay_=true; setFocus(); update();
     emit hint(brushTool() ? "Drag to paint or erase the mask. Brush size is in original-image pixels. SAM updates retain your brush edits."
         : tool==Tool::Box ? "Drag a box around the target. Then add foreground / background points to refine it."
         : tool==Tool::Remove ? "Click a prompt point or box edge to remove it."
@@ -158,7 +159,20 @@ void MaskEditor::setPrediction(QImage mask) {
     composeMask(); update(); emit selectionChanged();
 }
 bool MaskEditor::brushTool() const { return tool_==Tool::Brush || tool_==Tool::Eraser; }
-void MaskEditor::setBrushSize(int diameter) { brush_size_=std::clamp(diameter,1,100); update(); }
+void MaskEditor::setBrushSize(int diameter) {
+    diameter=std::clamp(diameter,1,100);
+    if (brush_size_==diameter) return;
+    brush_size_=diameter; update(); emit brushSizeChanged(brush_size_);
+}
+void MaskEditor::wheelEvent(QWheelEvent* event) {
+    if (!editing_ || !overlay_ || image_.isNull() || !brushTool() || !imageRect().contains(event->position())) {
+        wheel_delta_=0; event->ignore(); return;
+    }
+    // Accumulate partial wheel steps from high-resolution mice. One notch changes one pixel.
+    wheel_delta_+=event->angleDelta().y();
+    const int steps=wheel_delta_/120; wheel_delta_%=120;
+    cursor_=event->position(); setBrushSize(brush_size_+steps); update(); event->accept();
+}
 void MaskEditor::composeMask() {
     sam_mask_={}; sam_overlay_={};
     if (image_.isNull() || (base_mask_.isNull() && corrections_.isNull())) return;
@@ -182,7 +196,7 @@ void MaskEditor::paintStroke(QPointF from, QPointF to) {
 }
 void MaskEditor::acceptPrediction() {
     if (!editing_ || sam_mask_.isNull() || boxing_ || point_drag_>=0 || brushing_) return;
-    accepted_=true; update(); emit selectionChanged(); emit hint("Mask selected. Save selection mask to export; prompts and brush edits remain editable.");
+    accepted_=true; update(); emit selectionChanged(); emit hint("Mask selected. Prompts and brush edits remain editable.");
 }
 void MaskEditor::undoPrompt() {
     if (!editing_ || boxing_ || point_drag_>=0 || brushing_) return;

@@ -97,7 +97,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     state_.live = false; latest_.reset();
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
     emit images(image(frame_->left()), image(frame_->right()), image(frame_->rectified_left()), image(frame_->rectified_right()));
-    state_.status = QString("Pair ready · %1 × %2 · rectified in %3 ms. Check epilines, then start reconstruction.")
+    state_.status = QString("Pair ready · %1 × %2 · rectified in %3 ms. Draw a mask and click Finish draw to continue.")
         .arg(frame_->left().cols).arg(frame_->left().rows).arg(elapsed.elapsed());
     emit log(state_.input + "\nCalibration: " + state_.calibration + "\n" + state_.status);
 }
@@ -241,6 +241,8 @@ void PipelineWorker::reconstruct(float minimum, float maximum) {
                cv::Size(FS::kTensorRtInputWidth, FS::kTensorRtInputHeight), 0.0, 0.0, cv::INTER_LINEAR);
     checkpoint();
     state_.depth_ready = true; state_.stage = 4;
+    state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
+    publish(); // Unlock the depth step before delivering its images.
     emit depthImages(image(model_left), image(depth_rgb), minimum, maximum);
     emit log(QString("Depth display: %1 ms · Jet %2–%3 m").arg(elapsed.elapsed()).arg(minimum).arg(maximum));
     state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
@@ -262,7 +264,7 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
         if (cv::countNonZero(mask)==0) {
             emit maskReady(image_id,request_id,{},"No region found. Add a foreground point or adjust the box."); return;
         }
-        const QString message = QString("SAM mask ready · score %1 · %2 ms · %3. Refine prompts or click Use mask.")
+        const QString message = QString("SAM mask ready · score %1 · %2 ms · %3. Refine prompts or click Finish draw.")
             .arg(sam_->score(),0,'f',3).arg(elapsed.elapsed()).arg(encode ? "encoder + decoder" : "cached features + decoder");
         emit maskReady(image_id,request_id,QImage(mask.data,mask.cols,mask.rows,mask.step,QImage::Format_Grayscale8).copy(),message);
         emit log(message);

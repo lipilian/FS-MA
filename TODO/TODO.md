@@ -1,6 +1,6 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后融合有效视差筛选、深度阈值和 XYZ 计算的 CUDA kernel，以及 FS/CLI 接入；已接入独立持有的 XYZ CPU 下载和 Qt Jet 深度图展示。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 标定和 reconstruction window 已实现顺序切换；第二窗口已接入文件导入、相机预览/冻结、双目校正、真实 FS 推理和 GPU XYZ，以及校正左图 mask 编辑和导出。已接入 SAM 2.1 Hiera Large 框/点交互选区；VTK、mesh、面积仍待接入，界面保留明确的 pending 入口。真实标定板精度验收待进行。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后融合有效视差筛选、深度阈值和 XYZ 计算的 CUDA kernel，以及 FS/CLI 接入；已接入独立持有的 XYZ CPU 下载和 Qt Jet 深度图展示。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 标定和 reconstruction window 已实现顺序切换；第二窗口已接入文件导入、相机预览/冻结、双目校正、真实 FS 推理和 GPU XYZ，以及校正左图 mask 编辑。已接入 SAM 2.1 Hiera Large 框/点交互选区；VTK、mesh、面积仍待接入，界面保留明确的 pending 入口。真实标定板精度验收待进行。
 
 文档维护约定：后续统一维护 `docs/` 下的 HTML 和本 TODO；功能与操作记录放在 `docs/index.html`，构建、代码结构与接口说明放在 `docs/code_structure.html`。
 
@@ -317,11 +317,11 @@ cmake --build cpp/build --target fs_gui --parallel
 - 相机曝光从标定阶段随会话交接，重建窗口不再提供曝光设置；断开重连使用标定阶段的请求曝光。未连接相机直接 Skip 时也传递左侧曝光值，标定 JSON 格式保持不变。
 - Import capture 默认读取同目录 `left.png`、`right.png`、`calibration.json`；支持 CLI 的旧矩阵标定，并明确提示未验证身份/尺寸元数据。有尺寸元数据时必须匹配。取消 `Use capture calibration` 则使用交接的内存标定，并要求左右图尺寸匹配；不重新读取可能已更改的标定文件。
 - 相机输入始终使用窗口 1 的确认标定。预览为原始 RGB；Capture pair 冻结并校正一组。预览不会覆盖已冻结输入；缺少新帧、掉线或尺寸不符会显示原因。文件导入失败保留上一组有效输入。
-- Stereo inspection 支持原图/校正图与水平辅助线；Region measurement 将选区操作合并到 SAM 面板，支持框/点、刷子补选和擦除、Use mask 及 Clear mask；已移除多边形入口。切换输入会清空旧选区。
+- Stereo inspection 支持原图/校正图与水平辅助线；Region measurement 将选区操作合并到 SAM 面板，支持框/点、刷子补选和擦除、Finish draw 及 Clear mask；已移除多边形入口。切换输入会清空旧选区。
 - 二值 mask 按完整校正左图坐标导出 PNG；缩放窗口不改变顶点坐标。尚未上传到推理网格，也不会修改 GPU XYZ、点云或面积。
 - Engine 由 splash 自动尝试默认路径，失败时可选择其他文件重试或退出。创建 FS、加载 engine/context 与缓冲区分配都在 `PipelineWorker` 的 QThread 完成；GPU 同步检查成功后，controller 交付就绪状态再创建工作台。无 engine/GPU 时停留在 splash，不打开未就绪的 reconstruction window。
 - 工作台移除 FoundationStereo engine 信息块，后续推理复用 splash 已准备的同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程包括 GPU XYZ、CPU 下载和固定米制范围的 Jet 深度图，后续几何功能仍标明待接入。
-- `Region measurement` 位于第二个 tab，`Depth map` 位于第三个。Start reconstruction 完成后自动显示校正左图和 Jet 深度图，均为 960×800（宽×高）；左图使用与模型输入一致的线性缩放。Jet 使用本次运行的 Minimum / Maximum（米），无效及超范围点为黑色，标签保留本次范围；修改设置在下次运行生效。重新计算或成功换图会清空旧深度结果，导入失败保留原结果。顶部移除 Stop，Capture pair 与 Start reconstruction 放在最右侧。
+- `Region measurement` 位于第二个 tab，`Depth map` 位于第三个。Start reconstruction 完成后自动显示校正左图和 Jet 深度图，均为 960×800（宽×高）；左图使用与模型输入一致的线性缩放。Jet 使用本次运行的 Minimum / Maximum（米），无效及超范围点为黑色，标签保留本次范围；修改设置在下次运行生效。重新计算或成功换图会清空旧深度结果，导入失败保留原结果。顶部移除 Stop；右上角仅 Stereo inspection 显示 Capture pair，Region measurement 显示 Finish draw，Depth map 显示 Reconstruct。四个 tab 按输入 → 确认 mask → 重建深度 → 3D 顺序解锁，标题右侧绿勾表示完成、黄点表示待完成。成功拍摄/导入自动进入 Region measurement；Finish draw 确认 mask 后进入第三步，设置深度范围并点击 Reconstruct。编辑 mask 会清除后续 UI 完成状态；Minimum / Maximum 修改也会使深度及后续步骤失效、清空旧结果，改回原值仍需重算；只切换 tab 不会重置完成状态；3D 后端未接入，暂不标完成。
 - 深度图验证：Release 全目标构建通过；临时 Qt offscreen + 真实 `data/Volunteer2_lower/0` 推理验证两张图均为 960×800，左图与模型网格校正 RGB 逐像素一致，Jet 与独立 FP32 深度参考逐像素一致（0–1 m 内 430654 个有效点），0.2–0.3 m 的空范围全黑。覆盖计算完成自动切页、图例保留本次范围、重算/换图清空旧结果、失败导入保留结果、选区跳转及 CPU 下载独立持有。测试及界面截图保存在 `/tmp`。
 - 3D browser、邻域过滤、mesh/线框、面积/点数/三角形、PLY/测量报告/结果包均保留位置和 pending 状态；不生成虚假数值。
 - 验证：Release 全部目标构建通过；临时 Qt offscreen 检查实际 Desktop 的 Skip → 唯一重建窗口 → 关闭，以及普通关闭标定不跳转。真实 `data/Volunteer2_lower/0` 校正与 CLI 逐像素一致，engine 推理和 GPU XYZ 成功，事件循环保持响应；覆盖导入失败、engine 错误、深度输入、取消、换图失效、mask 坐标/导出。临时回放源验证标定 worker 发出同一个运行中的相机源、线程结束后交接、pipeline 不重复 start、预览、拍摄冻结与断开；真实推理中取消和关闭均等待安全边界完成。测试保留在 `/tmp`，未新增仓库测试目标；真实设备交接及物理拔插仍需现场验收。
@@ -347,9 +347,9 @@ cmake --build cpp/build --target fs_gui --parallel
 - [x] `fs::SamSegmenter` 独立持有 CUDA stream、两个 TensorRT context、GPU I/O、三组特征、pinned CPU staging 和模型尺寸图像缓冲区。Splash 完成加载、接口/profile 校验及分配后才允许打开重建窗口；支持分别选择 FS / SAM encoder / SAM decoder engine 并重试。
 - [x] 继续使用 PipelineWorker 的后台 QThread 串行管理 FS 与 SAM；它们使用各自的 CUDA stream。第一条有效提示编码当前冻结校正左图一次；同图修改提示只跑 decoder，清空提示保留特征，成功换图清除特征。没有虚拟推理预热。
 - [x] RGB 图像线性缩放到 1024×1024，按 mean/std 归一化；提示保持浮点坐标。Decoder 接收完整提示列表，`mask_input=0`、`has_mask_input=0`；选择三个候选中评分最高者，先把 logits 线性恢复到原图尺寸，再以 >0 阈值化。未照搬本机 AnyLabeling 的重复通道交换和整数坐标截断。
-- [x] Region measurement 支持拖框、前景点、背景点、拖动点、删除提示、撤销提示、清空、mask 叠加及 Use mask 确认。右键可删除提示，Backspace 撤销点，Escape 取消正在拖动的框/点。原 Polygon selection 面板已移除，Clear mask 清空提示、预测及手工修补。右侧面板标题为 Mask draw，仅 Region measurement 标签显示；SAM 2.1 auto draw / Manual draw 分隔模型提示与刷子工具。
-- [x] Brush (+) / Eraser (−) 直接补选或擦除像素，大小为原图 1–100 px（默认 12 px），鼠标显示刷子轮廓，连续笔画不留断点。修补层保留到后续 SAM 结果中，刷子不触发推理；Escape 取消本次笔画，修改后需重新 Use mask。
-- [x] 已确认的 mask 按完整校正左图坐标保存 PNG。SAM 保留原始二值区域及孔洞，不经过 AnyLabeling 的外轮廓简化/小区域过滤。
+- [x] Region measurement 支持拖框、前景点、背景点、拖动点、删除提示、撤销提示、清空、mask 叠加及 Finish draw 确认。右键可删除提示，Backspace 撤销点，Escape 取消正在拖动的框/点。原 Polygon selection 面板已移除，Clear mask 清空提示、预测及手工修补。移除右侧面板，统一左栏按步骤显示：第一步 Input and calibration，第二步 Mask draw，第三步 Depth range / Geometry · pending；Finish draw 在顶部替代原 Use mask 按钮，确认后进入第三步；SAM 2.1 auto draw / Manual draw 分隔模型提示与刷子工具。
+- [x] Brush (+) / Eraser (−) 直接补选或擦除像素，大小为原图 1–100 px（默认 12 px），鼠标显示刷子轮廓，连续笔画不留断点。选中 Brush/Eraser 后在图内滚轮每格调整 1 px，同步大小输入框和轮廓。Mask draw 底部文字、Surface measurement 和 Export 面板已移除。修补层保留到后续 SAM 结果中，刷子不触发推理；Escape 取消本次笔画，修改后需重新 Finish draw。
+- [x] 已确认的 mask 按完整校正左图坐标保留在内存；Export 面板及保存入口已按要求移除。SAM 保留原始二值区域及孔洞，不经过 AnyLabeling 的外轮廓简化/小区域过滤。
 - [x] 使用图像编号及原子提示版本跳过过期排队任务、丢弃旧推理结果；修改 SAM 提示不触发 FS inference。关闭窗口等待后台阶段结束，再释放两模型及相机资源。
 - [x] 实际 Large TensorRT encoder/decoder 推理通过；三组点/框提示与 ONNX Runtime mask IoU 为 0.99981、0.99980、0.99673（对齐 RGB 和浮点坐标，现有 engine 允许 TF32）。临时 Qt 测试通过实际标定 → splash → 重建窗口启动链、splash 失败重试、FS/SAM 同时加载、框/正负点/拖点/删点/撤销、确认与导出、缩放不改变 mask、清空/换图过滤旧结果，以及 FS 重建和关闭。
 - [ ] 确认后的 mask 用最近邻缩放到 FS 宽 960 × 高 800 网格，接入 XYZ、邻域去噪、mesh 和面积计算。
