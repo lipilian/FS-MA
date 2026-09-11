@@ -11,7 +11,7 @@ public:
     DesktopController();
     void show();
 private:
-    void initializeInference(const QString& engine_path);
+    void initializeInference(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder);
     void openReconstruction();
     CalibrationController calibration_;
     std::unique_ptr<CalibrationWindow> window_;

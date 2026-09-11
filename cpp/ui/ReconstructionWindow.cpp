@@ -2,6 +2,7 @@
 #include "widgets/MaskEditor.hpp"
 #include "widgets/StereoImageView.hpp"
 #include <QCheckBox>
+#include <QButtonGroup>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
@@ -43,7 +44,7 @@ QDoubleSpinBox* decimal(double value, double minimum, double maximum, const QStr
 }
 ReconstructionWindow::ReconstructionWindow(PipelineController& controller, ConfirmedCalibration calibration, const QString& path)
     : controller_(controller), state_(controller.state()) {
-    if (!state_.engine_ready) throw std::logic_error("Reconstruction window requires an initialized FoundationStereo session.");
+    if (!state_.engine_ready || !state_.sam_ready) throw std::logic_error("Reconstruction window requires initialized FoundationStereo and SAM sessions.");
     setObjectName("reconstructionWindow"); setWindowTitle("FoundationStereo · Reconstruction"); resize(1500, 950); setMinimumSize(1120, 740);
     setStyleSheet(R"(
         QMainWindow, QWidget#root { background: #f3f6fa; color: #20314a; }
@@ -51,6 +52,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         QGroupBox { background: white; border: 1px solid #dce3ed; border-radius: 8px; margin-top: 15px; padding: 16px 12px 12px; font-weight: 600; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
         QPushButton { background: white; color: #243c60; border: 1px solid #cbd6e5; border-radius: 5px; padding: 5px 10px; }
+        QPushButton:checked { background: #dbeafe; color: #1d4ed8; border-color: #2464d9; }
         QPushButton:hover { background: #eaf1fc; border-color: #6c97cf; }
         QPushButton:disabled { color: #9aa8b9; background: #edf1f6; border-color: #dfe5ed; }
         QPushButton#run { background: #2464d9; color: white; border: 0; }
@@ -154,23 +156,45 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     split->addWidget(tabs_);
 
     auto* measurement = new QWidget; auto* measurement_layout = new QVBoxLayout(measurement); measurement_layout->setContentsMargins(8,0,0,0);
-    auto* polygon = group("Polygon selection", layout);
-    draw_ = button("New polygon", "newPolygon"); finish_ = button("Close polygon", "closePolygon");
-    undo_ = button("Undo vertex", "undoVertex"); clear_ = button("Clear selection", "clearSelection");
-    for (auto* b : {draw_, finish_, undo_, clear_}) layout->addWidget(b);
+    auto* sam = group("Mask draw", layout);
     selection_ = label("No selection · full image");
-    selection_->setMinimumHeight(4 * selection_->fontMetrics().lineSpacing() + 8); layout->addWidget(selection_);
-    layout->addWidget(label("Click to add vertices; Enter closes. Drag a vertex to edit. Escape cancels an unfinished polygon.")); measurement_layout->addWidget(polygon);
-    auto* sam = group("SAM 2.1 · pending", layout);
-    for (const auto& text : {"Point prompts", "Box prompt", "Generate mask"}) { auto* b = button(text); b->setEnabled(false); b->setToolTip("Foreground/background points and box prompts require the pending SAM encoder/decoder."); layout->addWidget(b); }
+    selection_->setMinimumHeight(3 * selection_->fontMetrics().lineSpacing() + 8);
+    sam_box_=button("Draw box","samBox"); sam_foreground_=button("Foreground point (+)","samForeground");
+    sam_background_=button("Background point (−)","samBackground"); sam_remove_=button("Remove prompt","samRemove");
+    sam_undo_=button("Undo prompt","samUndo"); sam_accept_=button("Use mask","samAccept");
+    brush_=button("Brush (+)","maskBrush"); eraser_=button("Eraser (−)","maskEraser");
+    clear_=button("Clear mask","clearMask");
+    brush_size_=new QSpinBox; brush_size_->setObjectName("maskBrushSize");
+    brush_size_->setRange(1,100); brush_size_->setValue(mask_->brushSize()); brush_size_->setSuffix(" px");
+    brush_size_->setToolTip("Brush width in full-resolution rectified-left pixels.");
+    auto* sam_tools = new QButtonGroup(this); sam_tools->setExclusive(true);
+    for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_,brush_,eraser_}) { b->setCheckable(true); sam_tools->addButton(b); }
+    sam_box_->setChecked(true);
+    auto* auto_draw = label("SAM 2.1 auto draw");
+    auto_draw->setStyleSheet("font-weight: 600; color: #526680;"); layout->addWidget(auto_draw);
+    for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_,sam_undo_}) layout->addWidget(b);
+    layout->addSpacing(8);
+    auto* manual_draw = label("Manual draw");
+    manual_draw->setStyleSheet("font-weight: 600; color: #526680;"); layout->addWidget(manual_draw);
+    auto* brushes=new QHBoxLayout; brushes->addWidget(brush_); brushes->addWidget(eraser_); layout->addLayout(brushes);
+    auto* brush_form=new QFormLayout; brush_form->addRow("Brush size",brush_size_); layout->addLayout(brush_form);
+    layout->addWidget(sam_accept_); layout->addWidget(clear_); layout->addWidget(selection_);
+    layout->addWidget(label("Draw a box or add points. Red points exclude background. Drag points to move them; right-click removes a prompt. Changes update the mask automatically. Brush and Eraser refine pixels directly; brush edits stay when prompts change. Clear mask resets everything."));
     measurement_layout->addWidget(sam);
     auto* metrics = group("Surface measurement", layout);
     layout->addWidget(label("Surface area    — cm²\n\nValid points     —\nTriangles        —\n\nPending geometry / area backend")); measurement_layout->addWidget(metrics);
     auto* exports = group("Export", layout);
     export_mask_ = button("Save selection mask…", "exportMask"); layout->addWidget(export_mask_);
     for (const auto& text : {"Point cloud / mesh PLY", "Measurement report", "Save result bundle"}) { auto* b = button(text); b->setEnabled(false); b->setToolTip("Available after geometry and result-writer integration."); layout->addWidget(b); }
-    measurement_layout->addWidget(exports); measurement_layout->addStretch(); split->addWidget(scrollPanel(measurement,260));
+    measurement_layout->addWidget(exports); measurement_layout->addStretch();
+    auto* measurement_panel = scrollPanel(measurement,260); measurement_panel->setObjectName("measurementPanel");
+    split->addWidget(measurement_panel);
     split->setSizes({290,890,280}); split->setStretchFactor(1,1); outer->addWidget(split,1);
+    const auto update_measurement_panel = [this,region,measurement_panel] {
+        measurement_panel->setVisible(tabs_->currentWidget() == region);
+    };
+    connect(tabs_,&QTabWidget::currentChanged,this,update_measurement_panel);
+    update_measurement_panel();
     steps_ = label(""); outer->addWidget(steps_);
     progress_ = new QProgressBar; progress_->setRange(0,4); progress_->setValue(0); progress_->setTextVisible(false); outer->addWidget(progress_);
     auto* footer = new QHBoxLayout; status_ = label(""); status_->setObjectName("status"); footer->addWidget(status_,1);
@@ -184,6 +208,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::images,this,[this](QImage l,QImage r,QImage rl,QImage rr) {
         raw_left_ = std::move(l); raw_right_ = std::move(r); rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
         mask_->setImage(rectified_left_); tabs_->setCurrentIndex(0); showImages();
+    });
+    connect(&controller_,&PipelineController::maskReady,this,[this](quint64 image_id,quint64 request_id,QImage mask,QString message) {
+        if (closing_ || image_id!=state_.image_id || request_id!=mask_request_id_) return;
+        mask_->setPrediction(std::move(mask)); status_->setText(message);
     });
     connect(&controller_,&PipelineController::depthImages,this,[this,depth_page](QImage left,QImage depth,float minimum,float maximum) {
         if (closing_) return;
@@ -219,9 +247,23 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         controller_.setPreviewRectified(enabled);
         refresh(); showImages();
     }); connect(epilines_,&QCheckBox::toggled,this,[this] { showImages(); });
-    connect(draw_,&QPushButton::clicked,this,[this,overlay,region] { tabs_->setCurrentWidget(region); overlay->setChecked(true); mask_->startPolygon(); });
-    connect(finish_,&QPushButton::clicked,mask_,&MaskEditor::finishPolygon); connect(undo_,&QPushButton::clicked,mask_,&MaskEditor::undoVertex);
-    connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearPolygon); connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
+    connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearMask);
+    connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
+    connect(brush_size_,&QSpinBox::valueChanged,mask_,&MaskEditor::setBrushSize);
+    const auto tool = [this,overlay,region](QPushButton* button, MaskEditor::Tool tool) {
+        connect(button,&QPushButton::clicked,this,[this,overlay,region,tool] {
+            tabs_->setCurrentWidget(region); overlay->setChecked(true); mask_->setTool(tool);
+        });
+    };
+    tool(sam_box_,MaskEditor::Tool::Box); tool(sam_foreground_,MaskEditor::Tool::Foreground);
+    tool(sam_background_,MaskEditor::Tool::Background); tool(sam_remove_,MaskEditor::Tool::Remove);
+    tool(brush_,MaskEditor::Tool::Brush); tool(eraser_,MaskEditor::Tool::Eraser);
+    connect(sam_undo_,&QPushButton::clicked,mask_,&MaskEditor::undoPrompt);
+    connect(sam_accept_,&QPushButton::clicked,mask_,&MaskEditor::acceptPrediction);
+    connect(mask_,&MaskEditor::promptsChanged,this,[this] {
+        const auto prompts=mask_->prompts(); mask_request_id_=controller_.requestMask(state_.image_id,prompts);
+        if (!prompts.empty()) status_->setText("Updating SAM mask…");
+    });
     connect(mask_,&MaskEditor::selectionChanged,this,[this] { refresh(); }); connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
     connect(export_mask_,&QPushButton::clicked,this,&ReconstructionWindow::exportMask);
     auto* timer = new QTimer(this); timer->setInterval(200); connect(timer,&QTimer::timeout,this,[this] { if (busy_) time_->setText(QString("Running: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); }); timer->start();
@@ -238,12 +280,18 @@ void ReconstructionWindow::refresh() {
     run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image reconstruction and displays the rectified left image and Jet depth map.");
     rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
     epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
-    draw_->setEnabled(idle && frozen); mask_->setEditingEnabled(idle && frozen);
-    finish_->setEnabled(idle && frozen && !mask_->hasSelection() && mask_->vertexCount() >= 3);
-    undo_->setEnabled(idle && frozen && !mask_->hasSelection() && mask_->vertexCount() > 0);
-    clear_->setEnabled(idle && mask_->vertexCount() > 0); export_mask_->setEnabled(idle && frozen && mask_->hasSelection());
-    selection_->setText(mask_->vertexCount() == 0 ? "No selection · full image" : QString("%1 vertices · %2\n%3 × %4 rectified pixels\nGPU mask / area update pending")
-        .arg(mask_->vertexCount()).arg(mask_->hasSelection() ? "closed polygon" : "drawing").arg(mask_->imageSize().width()).arg(mask_->imageSize().height()));
+    mask_->setEditingEnabled(idle && frozen);
+    for (auto* b : {brush_,eraser_}) b->setEnabled(idle && frozen);
+    brush_size_->setEnabled(idle && frozen);
+    for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_}) b->setEnabled(idle && frozen && state_.sam_ready);
+    sam_undo_->setEnabled(idle && frozen && mask_->hasPrompts());
+    sam_accept_->setEnabled(idle && frozen && mask_->hasPrediction() && !mask_->samSelection());
+    clear_->setEnabled(idle && (mask_->hasPrompts() || mask_->hasPrediction()));
+    export_mask_->setEnabled(idle && frozen && mask_->hasSelection());
+    selection_->setText("No selection · full image");
+    if (mask_->hasPrompts() || mask_->hasPrediction()) selection_->setText(QString("%1 prompt points · %2\n%3 × %4 rectified pixels")
+        .arg(mask_->prompts().size()).arg(mask_->samSelection() ? "mask selected" : mask_->hasPrediction() ? "mask preview" : "awaiting mask")
+        .arg(mask_->imageSize().width()).arg(mask_->imageSize().height()));
     input_->setText(state_.input); calibration_->setText(state_.calibration);
     if (!closing_) status_->setText(state_.status);
     if (!state_.depth_ready) {
@@ -273,6 +321,6 @@ void ReconstructionWindow::exportMask() {
 void ReconstructionWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }
     event->ignore(); if (closing_) return;
-    closing_ = true; refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
+    closing_ = true; mask_request_id_=controller_.requestMask(state_.image_id,{}); refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
 }
 void ReconstructionWindow::allowClose() { allow_close_ = true; close(); }

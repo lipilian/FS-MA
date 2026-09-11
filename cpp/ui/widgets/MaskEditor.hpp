@@ -1,29 +1,38 @@
 #pragma once
 #include <QImage>
-#include <QPolygonF>
 #include <QWidget>
+#include <optional>
+#include "fs/inference/SamSegmenter.hpp"
 
-// Polygon vertices are always in full-resolution rectified-left pixel coordinates.
+// Prompts and brush strokes use full-resolution rectified-left pixel coordinates.
 class MaskEditor : public QWidget {
     Q_OBJECT
 public:
     explicit MaskEditor(QWidget* parent = nullptr);
+    enum class Tool { Box, Foreground, Background, Remove, Brush, Eraser };
+    void setTool(Tool tool);
+    Tool tool() const { return tool_; }
+    std::vector<fs::SamPrompt> prompts() const;
+    void setPrediction(QImage mask);
+    void acceptPrediction();
+    void undoPrompt();
+    bool hasPrediction() const { return !sam_mask_.isNull(); }
+    bool hasPrompts() const { return !points_.empty() || box_.has_value(); }
+    bool samSelection() const { return accepted_; }
     void setImage(QImage image);
-    void startPolygon();
-    void clearPolygon();
-    void finishPolygon();
-    void undoVertex();
+    void clearMask();
+    void setBrushSize(int diameter);
+    int brushSize() const { return brush_size_; }
     QImage mask() const;
-    int vertexCount() const { return polygon_.size(); }
-    bool hasSelection() const { return closed_; }
+    bool hasSelection() const { return accepted_; }
     QSize imageSize() const { return image_.size(); }
-    const QPolygonF& polygon() const { return polygon_; }
     void setEditingEnabled(bool enabled);
     QSize minimumSizeHint() const override { return {260, 240}; }
 public slots:
     void setOverlayVisible(bool enabled);
 signals:
     void selectionChanged();
+    void promptsChanged();
     void hint(QString message);
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -31,13 +40,27 @@ protected:
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    void leaveEvent(QEvent*) override;
 private:
     QRectF imageRect() const;
     QPointF toImage(QPointF position) const;
     QPointF toWidget(QPointF position) const;
-    bool validPolygon() const;
-    QImage image_;
-    QPolygonF polygon_, before_drag_;
-    bool closed_{false}, drawing_{false}, overlay_{true}, editing_{true};
-    int dragging_{-1};
+    bool brushTool() const;
+    void paintStroke(QPointF from, QPointF to);
+    void composeMask();
+    void promptsEdited();
+    void removePromptAt(QPointF position);
+    struct Point { QPointF position; int label; };
+    std::vector<Point> points_;
+    std::optional<QRectF> box_, previous_box_;
+    QPointF box_start_, point_before_drag_;
+    bool boxing_{false}, accepted_{false};
+    int point_drag_{-1};
+    Tool tool_{Tool::Box};
+    QImage sam_mask_, sam_overlay_;
+    QImage image_, base_mask_, corrections_, before_stroke_;
+    QPointF stroke_last_;
+    std::optional<QPointF> cursor_;
+    bool overlay_{true}, editing_{true}, brushing_{false}, accepted_before_stroke_{false};
+    int brush_size_{12};
 };
