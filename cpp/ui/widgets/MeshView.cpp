@@ -34,6 +34,10 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
         dirty_ = true;
         update();
     }
+    void setCameraVisible(bool visible) {
+        camera_visible_ = visible;
+        update();
+    }
     void resetView() {
         yaw_ = pitch_ = 0;
         zoom_ = 1;
@@ -82,10 +86,20 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
         if (dirty_)
             upload();
         QMatrix4x4 projection;
-        projection.perspective(40, float(width()) / std::max(1, height()), .01f,
-                               100.f);
+        const float aspect = float(width()) / std::max(1, height());
+        // Fit the camera as well as the mesh while preserving the mesh-centred
+        // rotation pivot. Visibility changes preserve user rotation/pan/zoom.
+        const float half_angle = std::atan(
+            std::tan(20.f * float(CV_PI) / 180.f) * std::min(1.f, aspect));
+        const float distance =
+            camera_visible_ && camera_count_ > 0
+                ? std::max(3.2f, camera_radius_ / std::sin(half_angle) * 1.1f)
+                : 3.2f;
+        projection.perspective(
+            40, aspect, .01f,
+            std::max(100.f, distance / zoom_ + camera_radius_ * 2));
         QMatrix4x4 view;
-        view.translate(pan_.x(), pan_.y(), -3.2f / zoom_);
+        view.translate(pan_.x(), pan_.y(), -distance / zoom_);
         view.rotate(pitch_, 1, 0, 0);
         view.rotate(yaw_, 0, 1, 0);
         program_->bind();
@@ -102,6 +116,8 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
                      : mode_ == 2 ? GL_LINES
                                   : GL_TRIANGLES,
                      0, count_);
+        if (camera_visible_ && camera_count_ > 0)
+            glDrawArrays(GL_LINES, count_, camera_count_);
         program_->disableAttributeArray(pos);
         program_->disableAttributeArray(col);
         buffer_.release();
@@ -154,7 +170,7 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
                          : mesh_->triangles.size() * (mode_ == 2 ? 36 : 18));
         const auto add = [&](int id, float light) {
             auto p = (mesh_->vertices[id] - center) / scale;
-            auto c = mesh_->colors[id];
+            const auto c = mode_ == 2 ? cv::Vec3b(0, 0, 0) : mesh_->colors[id];
             data.insert(data.end(),
                         {p[0], -p[1], -p[2], c[0] / 255.f * light,
                          c[1] / 255.f * light, c[2] / 255.f * light});
@@ -180,6 +196,58 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
                         add(f[i], light);
             }
         count_ = int(data.size() / 6);
+        camera_count_ = 0;
+        camera_radius_ = .87f; // Radius of the mesh's normalized bounding box.
+        if (mesh_->camera) {
+            const auto &camera = *mesh_->camera;
+            const double fx = camera.intrinsics(0, 0),
+                         fy = camera.intrinsics(1, 1);
+            const double cx = camera.intrinsics(0, 2),
+                         cy = camera.intrinsics(1, 2);
+            if (camera.image_size.width > 0 && camera.image_size.height > 0 &&
+                std::isfinite(fx) && fx > 0 && std::isfinite(fy) && fy > 0 &&
+                std::isfinite(cx) && std::isfinite(cy)) {
+                // A short frustum depicts field of view, not the depth clip
+                // plane or physical camera housing. Its apex is the true XYZ
+                // origin.
+                const float z = std::clamp(center[2] * .12f, .015f, .06f);
+                const auto ray = [&](double u, double v) {
+                    return cv::Vec3f(float((u - cx) * z / fx),
+                                     float((v - cy) * z / fy), z);
+                };
+                const cv::Vec3f origin(0, 0, 0);
+                const cv::Vec3f corners[] = {
+                    ray(0, 0), ray(camera.image_size.width, 0),
+                    ray(camera.image_size.width, camera.image_size.height),
+                    ray(0, camera.image_size.height)};
+                const auto add_camera = [&](cv::Vec3f world) {
+                    const auto p = (world - center) / scale;
+                    camera_radius_ =
+                        std::max(camera_radius_, float(cv::norm(p)));
+                    data.insert(data.end(),
+                                {p[0], -p[1], -p[2], 1.f, .65f, .12f});
+                };
+                const auto line = [&](cv::Vec3f a, cv::Vec3f b) {
+                    add_camera(a);
+                    add_camera(b);
+                };
+                for (int i = 0; i < 4; ++i) {
+                    line(origin, corners[i]);
+                    line(corners[i], corners[(i + 1) % 4]);
+                }
+                // Optical axis and arrowhead point along the camera's +Z axis.
+                const cv::Vec3f tip(0, 0, z * 1.6f);
+                line(origin, tip);
+                line(tip, cv::Vec3f(-z * .12f, 0, z * 1.35f));
+                line(tip, cv::Vec3f(z * .12f, 0, z * 1.35f));
+                // Up marker distinguishes the image top from the bottom.
+                const auto top = (corners[0] + corners[1]) * .5f;
+                const auto up = top + cv::Vec3f(0, -z * .2f, 0);
+                line(corners[0], up);
+                line(up, corners[1]);
+                camera_count_ = int(data.size() / 6) - count_;
+            }
+        }
         buffer_.bind();
         buffer_.allocate(data.data(), int(data.size() * sizeof(float)));
         buffer_.release();
@@ -188,8 +256,9 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
     QOpenGLBuffer buffer_;
     std::unique_ptr<QOpenGLShaderProgram> program_;
     std::shared_ptr<const fs::MeshResult> mesh_;
-    bool dirty_{true};
-    int mode_{1}, count_{};
+    bool dirty_{true}, camera_visible_{true};
+    int mode_{1}, count_{}, camera_count_{};
+    float camera_radius_{};
     float yaw_{}, pitch_{}, zoom_{1};
     QPointF last_, pan_;
 };
@@ -217,4 +286,9 @@ void MeshView::setMode(int mode) {
 void MeshView::resetView() {
     if (canvas_)
         canvas_->resetView();
+}
+
+void MeshView::setCameraVisible(bool visible) {
+    if (canvas_)
+        canvas_->setCameraVisible(visible);
 }

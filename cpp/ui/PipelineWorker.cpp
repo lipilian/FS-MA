@@ -278,7 +278,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     emit log(state_.status);
 }
 void PipelineWorker::buildMesh(double max_edge_m, double max_depth_jump_m) {
-    if (!state_.depth_ready || state_.live || mesh_xyz_.empty() || mesh_mask_.empty())
+    if (!state_.depth_ready || state_.live || !frame_ || mesh_xyz_.empty() || mesh_mask_.empty())
         throw std::runtime_error("Reconstruct depth before generating a mesh.");
     checkpoint(); state_.status = "Building constrained Delaunay mesh on CPU…"; publish();
     QElapsedTimer elapsed; elapsed.start();
@@ -287,6 +287,11 @@ void PipelineWorker::buildMesh(double max_edge_m, double max_depth_jump_m) {
     checkpoint();
     const double mesh_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Mesh build: %1 ms (CPU)").arg(mesh_ms,0,'f',3));
+    const auto camera=frame_->rectified_camera_parameters();
+    const double sx=double(mesh_xyz_.cols)/frame_->rectified_left().cols;
+    const double sy=double(mesh_xyz_.rows)/frame_->rectified_left().rows;
+    mesh->camera=fs::MeshCamera{cv::Matx33d(camera.fx*sx,0,camera.cx*sx,
+                                          0,camera.fy*sy,camera.cy*sy,0,0,1),mesh_xyz_.size()};
     state_.status = QString("Mesh ready · %1 vertices · %2 triangles · %3 cm²")
         .arg(mesh->vertices.size()).arg(mesh->triangles.size()).arg(mesh->area_m2 * 1e4, 0, 'f', 2);
     if (mesh->skipped_components) emit log(QString("Skipped %1 mask components with insufficient points or degenerate boundaries.").arg(mesh->skipped_components));

@@ -157,12 +157,16 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
     mesh_mode_=new QComboBox; mesh_mode_->addItems({"Point cloud","Mesh","Wireframe"}); mesh_mode_->setCurrentIndex(1); mesh_mode_->setObjectName("meshMode");
     auto* reset=button("Reset view","resetMeshView"); scene_controls->addWidget(mesh_mode_); scene_controls->addWidget(reset); scene_controls->addStretch();
+    auto* show_camera=new QCheckBox("Show camera"); show_camera->setObjectName("showMeshCamera"); show_camera->setChecked(true);
+    show_camera->setToolTip("Show the rectified left camera position and viewing direction.");
+    scene_controls->insertWidget(1,show_camera);
     scene_layout->addLayout(scene_controls);
     mesh_view_=new MeshView; mesh_view_->setObjectName("meshView"); scene_layout->addWidget(mesh_view_,1);
     scene_status_=label("Reconstruct depth, then click Generate mesh."); scene_status_->setObjectName("meshStatus"); scene_layout->addWidget(scene_status_);
     scene_layout->addWidget(label("Left drag: rotate · Right drag: pan · Wheel: zoom")); tabs_->addTab(scene,"3D browser");
     connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); });
     connect(reset,&QPushButton::clicked,this,[this] { mesh_view_->resetView(); });
+    connect(show_camera,&QCheckBox::toggled,this,[this](bool visible) { mesh_view_->setCameraVisible(visible); });
     for (int i=0;i<tabs_->count();++i) {
         tab_status_[i]=new QLabel; tab_status_[i]->setFixedSize(20,20); tab_status_[i]->setAlignment(Qt::AlignCenter);
         tab_status_[i]->setObjectName(QString("stepStatus%1").arg(i));

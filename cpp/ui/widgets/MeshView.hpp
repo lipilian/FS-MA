@@ -10,6 +10,7 @@ class MeshView : public QWidget {
     void setMesh(std::shared_ptr<const fs::MeshResult> mesh);
     void setMode(int mode);
     void resetView();
+    void setCameraVisible(bool visible);
 
   private:
     MeshCanvas *canvas_{};
