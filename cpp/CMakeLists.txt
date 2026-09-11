@@ -126,7 +126,7 @@ target_compile_options(fs_build_single_engine PRIVATE
 )
 
 # The Qt desktop owns the camera SDK dependency; file-only builds can disable it.
-option(FS_BUILD_DESKTOP "Build the Qt 6 stereo calibration window" ON)
+option(FS_BUILD_DESKTOP "Build the Qt 6 calibration and reconstruction desktop" ON)
 if(FS_BUILD_DESKTOP)
     include(cmake/Sentech.cmake)
     include(cmake/Desktop.cmake)

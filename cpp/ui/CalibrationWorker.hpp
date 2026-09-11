@@ -20,6 +20,8 @@ struct CalibrationState {
 using ConfirmedCalibration = std::shared_ptr<const fs::calibration::SessionResult>;
 Q_DECLARE_METATYPE(CalibrationState)
 Q_DECLARE_METATYPE(ConfirmedCalibration)
+using SharedStereoSource = std::shared_ptr<IStereoSource>;
+Q_DECLARE_METATYPE(SharedStereoSource)
 
 // All source lifecycle, detection and solving run exclusively on this object's thread.
 class CalibrationWorker : public QObject {
@@ -49,9 +51,10 @@ signals:
     void preview(QImage left, QImage right, QString caption);
     void failed(QString message);
     void actionFinished();
-    void completed(ConfirmedCalibration result, QString path);
+    void completed(ConfirmedCalibration result, QString path, SharedStereoSource source);
     void stopped();
 private:
+    void completeSession();
     void poll();
     void publish();
     void invalidate();

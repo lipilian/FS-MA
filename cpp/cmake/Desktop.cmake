@@ -11,6 +11,10 @@ add_library(fs_calibration_ui STATIC
     ui/CalibrationController.cpp ui/CalibrationController.hpp
     ui/CalibrationWindow.cpp ui/CalibrationWindow.hpp
     ui/DesktopController.cpp ui/DesktopController.hpp
+    ui/ReconstructionWindow.cpp ui/ReconstructionWindow.hpp
+    ui/PipelineController.cpp ui/PipelineController.hpp
+    ui/PipelineWorker.cpp ui/PipelineWorker.hpp
+    ui/widgets/MaskEditor.cpp ui/widgets/MaskEditor.hpp
     ui/widgets/StereoImageView.cpp ui/widgets/StereoImageView.hpp)
 set_target_properties(fs_calibration_ui PROPERTIES AUTOMOC ON)
 target_include_directories(fs_calibration_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/ui")

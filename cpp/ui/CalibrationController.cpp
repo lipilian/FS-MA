@@ -1,7 +1,7 @@
 #include "CalibrationController.hpp"
 CalibrationController::CalibrationController(QObject* parent, CalibrationWorker::SourceFactory factory)
     : QObject(parent), worker_(new CalibrationWorker(std::move(factory))) {
-    qRegisterMetaType<CalibrationState>(); qRegisterMetaType<ConfirmedCalibration>();
+    qRegisterMetaType<CalibrationState>(); qRegisterMetaType<ConfirmedCalibration>(); qRegisterMetaType<SharedStereoSource>();
     worker_->moveToThread(&thread_);
     connect(worker_, &CalibrationWorker::stateChanged, this, &CalibrationController::stateChanged);
     connect(worker_, &CalibrationWorker::preview, this, &CalibrationController::preview);

@@ -276,7 +276,7 @@ void CalibrationWorker::restoreSavedCalibration() {
 void CalibrationWorker::reuseSavedCalibration() {
     if (!reusable()) throw std::runtime_error("No matching saved calibration is available to reuse");
     // Explicit reuse is a separate route; it never pretends a fresh check occurred.
-    emit completed(std::make_shared<const cal::SessionResult>(cal::clone(*result_)), state_.saved_path);
+    completeSession();
 }
 void CalibrationWorker::save(const QString& path) {
     if (!result_) throw std::runtime_error("No calibration to save");
@@ -305,7 +305,13 @@ void CalibrationWorker::load(const QString& path) {
 }
 void CalibrationWorker::finish() {
     if (!ready()) throw std::runtime_error("Finish requires connected matching cameras, a passing check and a saved calibration");
-    emit completed(std::make_shared<const cal::SessionResult>(cal::clone(*result_)), state_.saved_path);
+    completeSession();
+}
+void CalibrationWorker::completeSession() {
+    auto result = std::make_shared<const cal::SessionResult>(cal::clone(*result_));
+    timer_->stop();
+    state_.connected = false;
+    emit completed(std::move(result), state_.saved_path, SharedStereoSource(std::move(source_)));
 }
 void CalibrationWorker::shutdown() {
     shutting_down_ = true; disconnectCameras(); emit stopped();
