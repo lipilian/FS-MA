@@ -210,21 +210,38 @@ void PipelineWorker::freeze() {
         .arg(fs::calibration::arrival_skew(*latest_) / 1e6, 0, 'f', 1);
     prepare(std::move(frame), input, confirmed_path_);
 }
-void PipelineWorker::reconstruct(float minimum, float maximum) {
+void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& selection_mask,
+                                 bool denoise, float max_neighbor_distance_m) {
     if (!state_.engine_ready || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("FoundationStereo must finish splash initialization before reconstruction.");
     if (!frame_ || state_.live) throw std::runtime_error("Import or freeze a stereo pair before reconstruction.");
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum < 0 || maximum <= minimum)
         throw std::runtime_error("Depth range must satisfy 0 ≤ minimum < maximum (metres).");
+    if (selection_mask.isNull() || selection_mask.width()!=frame_->rectified_left().cols ||
+        selection_mask.height()!=frame_->rectified_left().rows)
+        throw std::runtime_error("Confirm a mask aligned with the current rectified left image first.");
+    if (!std::isfinite(max_neighbor_distance_m) || max_neighbor_distance_m<=0)
+        throw std::runtime_error("Neighbour distance must be positive and finite.");
     state_.gpu_ready = false; state_.depth_ready = false; state_.stage = 1; publish();
     checkpoint(); state_.status = "Running FoundationStereo inference…"; publish();
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
     fs_->prepare_stereo_images(frame_->rectified_left(), frame_->rectified_right());
+    const QImage grayscale=selection_mask.convertToFormat(QImage::Format_Grayscale8);
+    const cv::Mat mask(grayscale.height(),grayscale.width(),CV_8UC1,
+                       const_cast<uchar*>(grayscale.constBits()),grayscale.bytesPerLine());
+    fs_->set_selection_mask(mask);
     fs_->inference(); fs_->synchronize();
     state_.stage = 2; emit log(QString("Inference + input preparation: %1 ms").arg(elapsed.elapsed()));
     checkpoint(); state_.status = "Computing XYZ on GPU…"; publish(); elapsed.restart();
-    fs_->compute_xyz_map(minimum, maximum); checkpoint(); state_.stage = 3; state_.gpu_ready = true;
+    fs_->compute_xyz_map(minimum, maximum); checkpoint();
+    if (denoise) {
+        state_.status = "Denoising selected XYZ on GPU…"; publish();
+        fs_->denoise_xyz_map(max_neighbor_distance_m,3,2); checkpoint();
+    }
+    state_.stage = 3; state_.gpu_ready = true;
+    emit log(denoise ? QString("Full-image XYZ + selected-region 3 × 3 denoising · %1 m · interior 3 / boundary up to 2 neighbours").arg(max_neighbor_distance_m)
+                    : "Full-image XYZ · neighbourhood denoising disabled.");
     emit log(QString("GPU XYZ: %1 ms · depth %2–%3 m").arg(elapsed.elapsed()).arg(minimum).arg(maximum));
     state_.status = "Preparing depth display…"; publish(); elapsed.restart();
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();

@@ -36,8 +36,8 @@ private:
     QPushButton *import_, *camera_, *preview_, *capture_, *run_, *finish_draw_, *clear_;
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
-    QCheckBox *capture_calibration_, *rectified_, *epilines_;
-    QDoubleSpinBox *minimum_, *maximum_;
+    QCheckBox *capture_calibration_, *rectified_, *epilines_, *denoise_;
+    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_;
     QLabel *input_, *calibration_, *status_, *time_, *scene_status_, *depth_status_, *steps_;
     QProgressBar* progress_;
     QPlainTextEdit* log_;
