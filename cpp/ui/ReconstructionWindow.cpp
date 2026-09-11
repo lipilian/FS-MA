@@ -15,11 +15,11 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QSaveFile>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <stdexcept>
@@ -79,9 +79,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* toolbar = new QHBoxLayout;
     import_ = button("Import capture…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     preview_ = button("Resume preview", "preview"); capture_ = button("Capture pair", "capturePair");
-    run_ = button("Start reconstruction", "run");
+    run_ = button("Reconstruct", "run"); finish_draw_ = button("Finish draw", "finishDraw");
     for (auto* b : {import_, camera_, preview_}) toolbar->addWidget(b);
-    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(run_); outer->addLayout(toolbar);
+    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -115,8 +115,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* filters = group("Geometry · pending", layout);
     auto* denoise = new QCheckBox("3 × 3 neighbour filtering"); denoise->setEnabled(false); layout->addWidget(denoise);
     auto* distance = decimal(0.005,0,1," m"); distance->setEnabled(false); distance->setToolTip("Neighbour-distance filtering is not implemented yet."); layout->addWidget(distance);
-    layout->addWidget(label("Reserved for neighbour distance, mesh edge / depth-jump thresholds and constrained triangulation.")); settings_layout->addWidget(filters); settings_layout->addStretch();
-    split->addWidget(scrollPanel(settings,260));
+    layout->addWidget(label("Reserved for neighbour distance, mesh edge / depth-jump thresholds and constrained triangulation.")); settings_layout->addWidget(filters);
+    auto* settings_panel=scrollPanel(settings,260); settings_panel->setObjectName("stepTools");
+    split->addWidget(settings_panel);
 
     tabs_ = new QTabWidget; tabs_->setObjectName("workspaceTabs");
     auto* stereo = new QWidget; auto* stereo_layout = new QVBoxLayout(stereo);
@@ -138,7 +139,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     depth_left_ = new StereoImageView("RECTIFIED LEFT · 960 × 800"); depth_left_->setObjectName("depthLeft");
     depth_map_ = new StereoImageView("DEPTH · JET · 960 × 800"); depth_map_->setObjectName("depthMap");
     for (auto* view : {depth_left_, depth_map_}) {
-        view->setEmptyText("Capture or import a pair, then\nclick Start reconstruction"); depth_views->addWidget(view);
+        view->setEmptyText("Confirm a region, then\nclick Reconstruct"); depth_views->addWidget(view);
     }
     depth_layout->addWidget(depth_views, 1);
     depth_status_ = label("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
@@ -153,15 +154,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     scene_layout->addLayout(scene_controls);
     scene_status_ = label("3D viewport · pending\n\nReserved for the VTK point cloud, mesh and wireframe viewer.\n\nRotation · zoom · pan · reset view");
     scene_status_->setObjectName("scene"); scene_status_->setAlignment(Qt::AlignCenter); scene_layout->addWidget(scene_status_,1); tabs_->addTab(scene,"3D browser");
+    for (int i=0;i<tabs_->count();++i) {
+        tab_status_[i]=new QLabel; tab_status_[i]->setFixedSize(20,20); tab_status_[i]->setAlignment(Qt::AlignCenter);
+        tab_status_[i]->setObjectName(QString("stepStatus%1").arg(i));
+        tabs_->tabBar()->setTabButton(i,QTabBar::RightSide,tab_status_[i]);
+    }
     split->addWidget(tabs_);
 
-    auto* measurement = new QWidget; auto* measurement_layout = new QVBoxLayout(measurement); measurement_layout->setContentsMargins(8,0,0,0);
     auto* sam = group("Mask draw", layout);
-    selection_ = label("No selection · full image");
-    selection_->setMinimumHeight(3 * selection_->fontMetrics().lineSpacing() + 8);
     sam_box_=button("Draw box","samBox"); sam_foreground_=button("Foreground point (+)","samForeground");
     sam_background_=button("Background point (−)","samBackground"); sam_remove_=button("Remove prompt","samRemove");
-    sam_undo_=button("Undo prompt","samUndo"); sam_accept_=button("Use mask","samAccept");
+    sam_undo_=button("Undo prompt","samUndo");
     brush_=button("Brush (+)","maskBrush"); eraser_=button("Eraser (−)","maskEraser");
     clear_=button("Clear mask","clearMask");
     brush_size_=new QSpinBox; brush_size_->setObjectName("maskBrushSize");
@@ -178,23 +181,18 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     manual_draw->setStyleSheet("font-weight: 600; color: #526680;"); layout->addWidget(manual_draw);
     auto* brushes=new QHBoxLayout; brushes->addWidget(brush_); brushes->addWidget(eraser_); layout->addLayout(brushes);
     auto* brush_form=new QFormLayout; brush_form->addRow("Brush size",brush_size_); layout->addLayout(brush_form);
-    layout->addWidget(sam_accept_); layout->addWidget(clear_); layout->addWidget(selection_);
-    layout->addWidget(label("Draw a box or add points. Red points exclude background. Drag points to move them; right-click removes a prompt. Changes update the mask automatically. Brush and Eraser refine pixels directly; brush edits stay when prompts change. Clear mask resets everything."));
-    measurement_layout->addWidget(sam);
-    auto* metrics = group("Surface measurement", layout);
-    layout->addWidget(label("Surface area    — cm²\n\nValid points     —\nTriangles        —\n\nPending geometry / area backend")); measurement_layout->addWidget(metrics);
-    auto* exports = group("Export", layout);
-    export_mask_ = button("Save selection mask…", "exportMask"); layout->addWidget(export_mask_);
-    for (const auto& text : {"Point cloud / mesh PLY", "Measurement report", "Save result bundle"}) { auto* b = button(text); b->setEnabled(false); b->setToolTip("Available after geometry and result-writer integration."); layout->addWidget(b); }
-    measurement_layout->addWidget(exports); measurement_layout->addStretch();
-    auto* measurement_panel = scrollPanel(measurement,260); measurement_panel->setObjectName("measurementPanel");
-    split->addWidget(measurement_panel);
-    split->setSizes({290,890,280}); split->setStretchFactor(1,1); outer->addWidget(split,1);
-    const auto update_measurement_panel = [this,region,measurement_panel] {
-        measurement_panel->setVisible(tabs_->currentWidget() == region);
+    layout->addWidget(clear_);
+    sam->setObjectName("maskDrawPanel"); depth->setObjectName("depthSettings"); filters->setObjectName("geometrySettings");
+    settings_layout->addWidget(sam); settings_layout->addStretch();
+    split->setSizes({290,1170}); split->setStretchFactor(1,1); outer->addWidget(split,1);
+    const auto update_step_tools = [this,input_group,sam,depth,filters,settings_panel] {
+        const int step=tabs_->currentIndex();
+        input_group->setVisible(step==0); sam->setVisible(step==1);
+        depth->setVisible(step==2); filters->setVisible(step==2);
+        settings_panel->setVisible(step<3);
     };
-    connect(tabs_,&QTabWidget::currentChanged,this,update_measurement_panel);
-    update_measurement_panel();
+    connect(tabs_,&QTabWidget::currentChanged,this,update_step_tools);
+    update_step_tools();
     steps_ = label(""); outer->addWidget(steps_);
     progress_ = new QProgressBar; progress_->setRange(0,4); progress_->setValue(0); progress_->setTextVisible(false); outer->addWidget(progress_);
     auto* footer = new QHBoxLayout; status_ = label(""); status_->setObjectName("status"); footer->addWidget(status_,1);
@@ -207,7 +205,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::busyChanged,this,[this](bool busy) { busy_ = busy; if (busy) elapsed_.start(); else time_->setText(QString("Last task: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); refresh(); });
     connect(&controller_,&PipelineController::images,this,[this](QImage l,QImage r,QImage rl,QImage rr) {
         raw_left_ = std::move(l); raw_right_ = std::move(r); rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
-        mask_->setImage(rectified_left_); tabs_->setCurrentIndex(0); showImages();
+        reconstruction_valid_=false; mask_->setImage(rectified_left_); tabs_->setCurrentIndex(1); showImages();
     });
     connect(&controller_,&PipelineController::maskReady,this,[this](quint64 image_id,quint64 request_id,QImage mask,QString message) {
         if (closing_ || image_id!=state_.image_id || request_id!=mask_request_id_) return;
@@ -215,10 +213,12 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(&controller_,&PipelineController::depthImages,this,[this,depth_page](QImage left,QImage depth,float minimum,float maximum) {
         if (closing_) return;
+        reconstruction_valid_=mask_->hasSelection();
         depth_left_->setImage(std::move(left)); depth_map_->setImage(std::move(depth));
         depth_status_->setText(QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid or outside range")
             .arg(minimum,0,'f',3).arg(maximum,0,'f',3));
-        tabs_->setCurrentWidget(depth_page);
+        refreshWorkflow();
+        if (reconstruction_valid_) tabs_->setCurrentWidget(depth_page);
     });
     connect(&controller_,&PipelineController::preview,this,[this](QImage l,QImage r,bool rectified) {
         // Ignore queued frames from the mode that was selected before a toggle.
@@ -238,10 +238,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(preview_,&QPushButton::clicked,this,[this] { const bool live = state_.live; if (!live) { live_left_ = {}; live_right_ = {}; tabs_->setCurrentIndex(0); } controller_.submit([=](auto& w) { w.setLive(!live); }); });
     connect(capture_,&QPushButton::clicked,this,[this] { controller_.submit([](auto& w) { w.freeze(); }); });
     connect(run_,&QPushButton::clicked,this,[this] {
+        reconstruction_valid_=false; refresh();
         const float low = minimum_->value(), high = maximum_->value();
         controller_.submit([=](auto& w) { w.reconstruct(low,high); });
     });
-    connect(minimum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); }); connect(maximum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); });
+    const auto depth_settings_changed = [this] {
+        // Changing parameters invalidates derived results even if the old values are restored later.
+        reconstruction_valid_=false;
+        refresh();
+    };
+    connect(minimum_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
+    connect(maximum_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(rectified_,&QCheckBox::toggled,this,[this](bool enabled) {
         live_left_ = {}; live_right_ = {};
         controller_.setPreviewRectified(enabled);
@@ -250,6 +257,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearMask);
     connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
     connect(brush_size_,&QSpinBox::valueChanged,mask_,&MaskEditor::setBrushSize);
+    connect(mask_,&MaskEditor::brushSizeChanged,brush_size_,&QSpinBox::setValue);
     const auto tool = [this,overlay,region](QPushButton* button, MaskEditor::Tool tool) {
         connect(button,&QPushButton::clicked,this,[this,overlay,region,tool] {
             tabs_->setCurrentWidget(region); overlay->setChecked(true); mask_->setTool(tool);
@@ -259,14 +267,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     tool(sam_background_,MaskEditor::Tool::Background); tool(sam_remove_,MaskEditor::Tool::Remove);
     tool(brush_,MaskEditor::Tool::Brush); tool(eraser_,MaskEditor::Tool::Eraser);
     connect(sam_undo_,&QPushButton::clicked,mask_,&MaskEditor::undoPrompt);
-    connect(sam_accept_,&QPushButton::clicked,mask_,&MaskEditor::acceptPrediction);
+    connect(finish_draw_,&QPushButton::clicked,this,[this,depth_page] {
+        mask_->acceptPrediction();
+        if (mask_->hasSelection()) tabs_->setCurrentWidget(depth_page);
+    });
     connect(mask_,&MaskEditor::promptsChanged,this,[this] {
         const auto prompts=mask_->prompts(); mask_request_id_=controller_.requestMask(state_.image_id,prompts);
         if (!prompts.empty()) status_->setText("Updating SAM mask…");
     });
-    connect(mask_,&MaskEditor::selectionChanged,this,[this] { refresh(); }); connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
-    connect(export_mask_,&QPushButton::clicked,this,&ReconstructionWindow::exportMask);
+    connect(mask_,&MaskEditor::selectionChanged,this,[this] { if (!mask_->hasSelection()) reconstruction_valid_=false; refresh(); }); connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
     auto* timer = new QTimer(this); timer->setInterval(200); connect(timer,&QTimer::timeout,this,[this] { if (busy_) time_->setText(QString("Running: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); }); timer->start();
+    connect(tabs_,&QTabWidget::currentChanged,this,[this] { refreshWorkflow(); });
     refresh();
 }
 void ReconstructionWindow::refresh() {
@@ -276,8 +287,8 @@ void ReconstructionWindow::refresh() {
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     const bool depth_valid = minimum_->value() < maximum_->value();
-    run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
-    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image reconstruction and displays the rectified left image and Jet depth map.");
+    run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid && mask_->hasSelection());
+    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : !mask_->hasSelection() ? "Click Finish draw in Region measurement first." : "Runs full-image reconstruction and displays the rectified left image and Jet depth map.");
     rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
     epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
     mask_->setEditingEnabled(idle && frozen);
@@ -285,38 +296,53 @@ void ReconstructionWindow::refresh() {
     brush_size_->setEnabled(idle && frozen);
     for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_}) b->setEnabled(idle && frozen && state_.sam_ready);
     sam_undo_->setEnabled(idle && frozen && mask_->hasPrompts());
-    sam_accept_->setEnabled(idle && frozen && mask_->hasPrediction() && !mask_->samSelection());
+    finish_draw_->setEnabled(idle && frozen && mask_->hasPrediction());
     clear_->setEnabled(idle && (mask_->hasPrompts() || mask_->hasPrediction()));
-    export_mask_->setEnabled(idle && frozen && mask_->hasSelection());
-    selection_->setText("No selection · full image");
-    if (mask_->hasPrompts() || mask_->hasPrediction()) selection_->setText(QString("%1 prompt points · %2\n%3 × %4 rectified pixels")
-        .arg(mask_->prompts().size()).arg(mask_->samSelection() ? "mask selected" : mask_->hasPrediction() ? "mask preview" : "awaiting mask")
-        .arg(mask_->imageSize().width()).arg(mask_->imageSize().height()));
     input_->setText(state_.input); calibration_->setText(state_.calibration);
-    if (!closing_) status_->setText(state_.status);
-    if (!state_.depth_ready) {
+    if (!closing_) status_->setText(!busy_ && state_.depth_ready && !reconstruction_valid_
+        ? "Selection or depth settings changed. Confirm the mask and reconstruct again." : state_.status);
+    if (!state_.depth_ready || !reconstruction_valid_) {
         depth_left_->setImage({}); depth_map_->setImage({});
         depth_status_->setText("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
     }
+    const bool result_current=reconstruction_valid_ && state_.depth_ready && mask_->hasSelection();
     steps_->setText(QString("%1 Rectification   →   %2 FS inference   →   %3 GPU XYZ   →   %4 Depth map   →   Mesh / area · pending")
-        .arg(state_.stage >= 1 ? "✓" : "○", state_.stage >= 2 ? "✓" : "○", state_.gpu_ready ? "✓" : "○", state_.depth_ready ? "✓" : "○"));
-    progress_->setRange(0,busy_ ? 0 : 4); if (!busy_) progress_->setValue(state_.stage);
-    scene_status_->setText((state_.gpu_ready ? "GPU XYZ is ready\n\n" : QString()) + "3D viewport · pending\n\nReserved for VTK point cloud, mesh and wireframe display.\n3D geometry and viewer are not connected yet.\n\nRotation · zoom · pan · reset view");
+        .arg(state_.has_rectified ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○"));
+    refreshWorkflow();
+    progress_->setRange(0,busy_ ? 0 : 4); if (!busy_) progress_->setValue(result_current ? 4 : state_.has_rectified ? 1 : 0);
+    scene_status_->setText((result_current ? "GPU XYZ is ready\n\n" : QString()) + "3D viewport · pending\n\nReserved for VTK point cloud, mesh and wireframe display.\n3D geometry and viewer are not connected yet.\n\nRotation · zoom · pan · reset view");
+}
+void ReconstructionWindow::refreshWorkflow() {
+    const bool pair_done=state_.has_rectified && !state_.live;
+    const bool region_done=pair_done && mask_->hasSelection();
+    const bool depth_done=region_done && state_.depth_ready && reconstruction_valid_;
+    const bool completed[]={pair_done,region_done,depth_done,false}; // 3D rendering is still pending.
+    const int last_available=depth_done ? 3 : region_done ? 2 : pair_done ? 1 : 0;
+    if (tabs_->currentIndex()>last_available) tabs_->setCurrentIndex(last_available);
+    tabs_->setTabEnabled(1,pair_done);
+    tabs_->setTabEnabled(2,region_done);
+    tabs_->setTabEnabled(3,depth_done);
+    for (int i=0;i<4;++i) {
+        auto* indicator=tab_status_[i];
+        indicator->setText(completed[i] ? "✓" : "●");
+        indicator->setStyleSheet(QString("background: transparent; color: %1; font-size: 16px; font-weight: 600;")
+            .arg(completed[i] ? "#16a34a" : "#eab308"));
+        indicator->setToolTip(completed[i] ? "Completed" : "Pending");
+        indicator->setAccessibleName(completed[i] ? "Completed" : "Pending");
+    }
+    tabs_->setTabToolTip(1,pair_done ? "Draw and confirm a mask." : "Capture or import a stereo pair first.");
+    tabs_->setTabToolTip(2,depth_done ? "Depth map ready." : region_done ? "Set the depth range and click Reconstruct." : "Click Finish draw in Region measurement first.");
+    tabs_->setTabToolTip(3,depth_done ? "3D rendering is pending implementation." : "Complete depth reconstruction first.");
+    capture_->setVisible(tabs_->currentIndex()==0);
+    finish_draw_->setVisible(tabs_->currentIndex()==1);
+    run_->setVisible(tabs_->currentIndex()==2);
+    for (auto* b : {import_,camera_,preview_}) b->setVisible(tabs_->currentIndex()==0);
 }
 void ReconstructionWindow::showImages() {
     const bool corrected = rectified_->isChecked();
     left_->setImage(state_.live ? live_left_ : corrected ? rectified_left_ : raw_left_);
     right_->setImage(state_.live ? live_right_ : corrected ? rectified_right_ : raw_right_);
     left_->setEpilines(corrected && epilines_->isChecked()); right_->setEpilines(corrected && epilines_->isChecked());
-}
-void ReconstructionWindow::exportMask() {
-    const QImage image = mask_->mask(); if (image.isNull()) return;
-    QString path = QFileDialog::getSaveFileName(this,"Save binary mask in rectified-left coordinates","selection_mask.png","PNG image (*.png)");
-    if (path.isEmpty()) return;
-    if (!path.endsWith(".png",Qt::CaseInsensitive)) path += ".png";
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || !image.save(&file,"PNG") || !file.commit()) { status_->setText("Mask export failed: " + file.errorString()); return; }
-    status_->setText("Saved full-resolution binary mask: " + path); log_->appendPlainText("Mask export: " + path);
 }
 void ReconstructionWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }

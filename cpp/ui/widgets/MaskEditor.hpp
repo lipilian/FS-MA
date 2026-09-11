@@ -33,6 +33,7 @@ public slots:
 signals:
     void selectionChanged();
     void promptsChanged();
+    void brushSizeChanged(int diameter);
     void hint(QString message);
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -41,6 +42,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
     void leaveEvent(QEvent*) override;
+    void wheelEvent(QWheelEvent*) override;
 private:
     QRectF imageRect() const;
     QPointF toImage(QPointF position) const;
@@ -62,5 +64,5 @@ private:
     QPointF stroke_last_;
     std::optional<QPointF> cursor_;
     bool overlay_{true}, editing_{true}, brushing_{false}, accepted_before_stroke_{false};
-    int brush_size_{12};
+    int brush_size_{12}, wheel_delta_{0};
 };
