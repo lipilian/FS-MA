@@ -34,7 +34,7 @@ public:
     FS(const FS&) = delete;
     FS& operator=(const FS&) = delete;
 
-    /** Register the GWC plugin, load the fixed 800 × 960 engine/context and allocate GPU I/O/XYZ, pinned host and CPU resize buffers. */
+    /** Register the GWC plugin, load the fixed 800 × 960 engine/context and allocate GPU I/O/XYZ/mask/denoising scratch, pinned host and CPU resize buffers. */
     void loadEngine(const std::filesystem::path& engine_path);
     bool isEngineLoaded() const noexcept { return engine_ != nullptr && execution_context_ != nullptr; }
 
@@ -63,9 +63,26 @@ public:
      * and within [min_depth_m, max_depth_m], inclusive. Defaults to 0 < Z <= 1 m.
      * Always excludes pixels with u < disparity.
      * May be repeated with different thresholds without another inference.
-     * Selection-mask upload is not exposed yet.
+     * Computes the whole image; selection_mask only limits denoise_xyz_map.
      */
     void compute_xyz_map(float min_depth_m = 0.0F, float max_depth_m = 1.0F);
+
+    /** Resize a rectified-left CV_8UC1 mask to 960x800 with nearest-neighbour and
+     * upload to reusable GPU storage. Nonzero pixels select the denoising region; empty
+     * clears the selection (full image). Call after prepare_stereo_images, which
+     * clears the previous mask. Completes the upload before returning.
+     */
+    void set_selection_mask(const cv::Mat& rectified_mask);
+
+    /** One 3x3 XYZ denoising pass matching Python within the selection on FS's stream, then synchronize.
+     * XYZ outside the selection is copied unchanged; only selected neighbours count.
+     * Call compute_xyz_map first. Counts valid neighbours within the Euclidean
+     * distance limit; mask-interior points require min_neighbors, boundary points
+     * require max(1, min(selected_neighbour_count, edge_min_neighbors)).
+     * Uses a separate preallocated output so removed points do not affect neighbours.
+     */
+    void denoise_xyz_map(float max_neighbor_distance_m = 0.01F,
+                         int min_neighbors = 3, int edge_min_neighbors = 2);
 
     /** Download the last computed XYZ map as an owned CV_32FC3 matrix (800 rows × 960 columns, metres).
      * Call compute_xyz_map first. Completes the transfer before returning.
@@ -90,9 +107,11 @@ private:
     };
     struct CudaDeviceBufferDeleter {
         void operator()(float* pointer) const noexcept;
+        void operator()(unsigned char* pointer) const noexcept;
     };
     struct CudaHostBufferDeleter {
         void operator()(float* pointer) const noexcept;
+        void operator()(unsigned char* pointer) const noexcept;
     };
 
     void allocate_input_buffers();
@@ -104,10 +123,15 @@ private:
     StereoCameraParameters model_camera_parameters_;
     cv::Mat model_left_;
     cv::Mat model_right_;
+    cv::Mat model_mask_;
+    bool selection_mask_ready_{false};
     std::unique_ptr<float, CudaDeviceBufferDeleter> left_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> right_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> disparity_output_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> xyz_map_device_;
+    std::unique_ptr<float, CudaDeviceBufferDeleter> xyz_scratch_device_;
+    std::unique_ptr<unsigned char, CudaDeviceBufferDeleter> selection_mask_device_;
+    std::unique_ptr<unsigned char, CudaHostBufferDeleter> selection_mask_host_;
     std::unique_ptr<float, CudaHostBufferDeleter> left_input_host_;
     std::unique_ptr<float, CudaHostBufferDeleter> right_input_host_;
     cudaStream_t stream_{nullptr};

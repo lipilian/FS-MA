@@ -28,7 +28,8 @@ public:
     void setLive(bool enabled);
     void setPreviewRectified(bool enabled);
     void freeze();
-    void reconstruct(float minimum, float maximum);
+    void reconstruct(float minimum, float maximum, const QImage& selection_mask,
+                     bool denoise = true, float max_neighbor_distance_m = 0.01F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
                  const std::shared_ptr<std::atomic_uint64_t>& current_request);
     void shutdown();

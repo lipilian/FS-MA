@@ -7,6 +7,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -100,6 +101,13 @@ void FS::CudaHostBufferDeleter::operator()(float* pointer) const noexcept {
     if (pointer != nullptr) {
         cudaFreeHost(pointer);
     }
+}
+
+void FS::CudaDeviceBufferDeleter::operator()(unsigned char* pointer) const noexcept {
+    if (pointer != nullptr) cudaFree(pointer);
+}
+void FS::CudaHostBufferDeleter::operator()(unsigned char* pointer) const noexcept {
+    if (pointer != nullptr) cudaFreeHost(pointer);
 }
 
 void FS::check_cuda(cudaError_t status, const char* operation) {
@@ -237,6 +245,8 @@ void FS::allocate_input_buffers() {
 
     model_left_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC3);
     model_right_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC3);
+    model_mask_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC1);
+    selection_mask_ready_=false;
 
     void* left_device = nullptr;
     check_cuda(cudaMalloc(&left_device, input_byte_count), "failed to allocate left TensorRT input buffer");
@@ -255,6 +265,16 @@ void FS::allocate_input_buffers() {
     check_cuda(cudaMalloc(&xyz_device, output_element_count * 3 * sizeof(float)),
                "failed to allocate XYZ map buffer");
     xyz_map_device_.reset(static_cast<float*>(xyz_device));
+
+    void* xyz_scratch = nullptr;
+    check_cuda(cudaMalloc(&xyz_scratch, output_element_count * 3 * sizeof(float)), "failed to allocate XYZ denoising scratch");
+    xyz_scratch_device_.reset(static_cast<float*>(xyz_scratch));
+    void* mask_device = nullptr;
+    check_cuda(cudaMalloc(&mask_device, output_element_count), "failed to allocate GPU selection mask");
+    selection_mask_device_.reset(static_cast<unsigned char*>(mask_device));
+    void* mask_host = nullptr;
+    check_cuda(cudaMallocHost(&mask_host, output_element_count), "failed to allocate pinned selection mask");
+    selection_mask_host_.reset(static_cast<unsigned char*>(mask_host));
 
     void* left_host = nullptr;
     check_cuda(cudaMallocHost(&left_host, input_byte_count), "failed to allocate pinned left input buffer");
@@ -291,6 +311,7 @@ void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_cam
 }
 
 void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
+    selection_mask_ready_=false;
     if (!isEngineLoaded() || stream_ == nullptr || !left_input_device_ || !right_input_device_) {
         throw std::logic_error("loadEngine must complete before preparing TensorRT inputs");
     }
@@ -360,6 +381,29 @@ void FS::compute_xyz_map(float min_depth_m, float max_depth_m) {
                    min_depth_m, max_depth_m, stream_),
                "failed to launch XYZ reconstruction");
     synchronize();
+}
+
+void FS::set_selection_mask(const cv::Mat& rectified_mask) {
+    if (!isEngineLoaded() || !selection_mask_device_ || !selection_mask_host_)
+        throw std::logic_error("loadEngine must complete before uploading a mask");
+    if (rectified_mask.empty()) { selection_mask_ready_=false; return; }
+    if (rectified_mask.type()!=CV_8UC1) throw std::invalid_argument("Selection mask must be CV_8UC1");
+    selection_mask_ready_=false;
+    cv::resize(rectified_mask, model_mask_, cv::Size(kTensorRtInputWidth,kTensorRtInputHeight), 0,0,cv::INTER_NEAREST);
+    const size_t bytes=size_t(kTensorRtInputWidth)*kTensorRtInputHeight;
+    std::memcpy(selection_mask_host_.get(),model_mask_.data,bytes);
+    check_cuda(cudaMemcpyAsync(selection_mask_device_.get(),selection_mask_host_.get(),bytes,
+                              cudaMemcpyHostToDevice,stream_),"failed to upload selection mask");
+    synchronize(); selection_mask_ready_=true;
+}
+void FS::denoise_xyz_map(float max_neighbor_distance_m, int min_neighbors, int edge_min_neighbors) {
+    if (!isEngineLoaded() || !xyz_map_device_ || !xyz_scratch_device_)
+        throw std::logic_error("loadEngine and compute_xyz_map must complete before denoising");
+    check_cuda(fs::postprocessing::denoise_xyz_map(
+        xyz_map_device_.get(),xyz_scratch_device_.get(),selection_mask_ready_ ? selection_mask_device_.get() : nullptr,
+        kTensorRtInputWidth,kTensorRtInputHeight,max_neighbor_distance_m,min_neighbors,edge_min_neighbors,stream_),
+        "failed to launch XYZ denoising");
+    synchronize(); xyz_map_device_.swap(xyz_scratch_device_);
 }
 
 cv::Mat FS::download_xyz_map() {

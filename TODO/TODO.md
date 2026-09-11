@@ -233,18 +233,18 @@ FS_Engine/
 - [x] 从 XYZ 提取 Z 通道，使用本次运行预设的米制深度范围生成 Jet colormap，无效点显示黑色；已直接接入 Qt 展示。CLI 深度 PNG 导出和原始 disparity 伪彩图仍未实现。
 - [x] 验证 CLI 普通及 `--measure` 十次推理后均可完成融合 XYZ 计算。
 
-**当前里程碑：有效视差筛选、深度阈值和 XYZ 计算已融合完成，FS/CLI 已接入。** 参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及 `postprocess_disparity_gpu()`，保留原始 disparity，不再就地清零视差。XYZ CPU 下载与 Qt Jet 深度图已完成；原始视差下载、邻域去噪、mesh 和面积仍在后续阶段，阶段 1 尚未全部完成。
+**当前里程碑：有效视差筛选、深度阈值和 XYZ 计算已融合完成，FS/CLI 已接入。** 参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及 `postprocess_disparity_gpu()`，保留原始 disparity，不再就地清零视差。XYZ CPU 下载、Qt Jet 深度图、选区 mask 上传与 CUDA 邻域去噪已完成；原始视差下载、mesh 和面积仍在后续阶段，阶段 1 尚未全部完成。
 
 - [x] 在 `PostProcessing.hpp` / `PostProcessing.cu` 中使用 `compute_xyz_map()` 替代原 `filter_disparity()`，一个 kernel 完成筛选、深度判断和 XYZ 计算。
 - [x] FS 分配并复用 `xyz_map_device_`：连续 FP32 `[800][960][3]`，按 X,Y,Z 交错排列，单位米，占 9,216,000 字节；原始视差不变，无额外筛选视差或有效掩码缓冲区。
 - [x] 每线程处理一个像素，800×960 使用 3000 个 block × 256 个线程，保留边界检查，无跨步循环。
-- [x] 有效条件为有限且正的 disparity、可选 selection mask，以及始终要求 `u ≥ d`；已移除可见性开关。默认 FS 处理全图。
+- [x] 有效条件为有限且正的 disparity、可选 selection mask，以及始终要求 `u ≥ d`；已移除可见性开关。未设置 mask 的 FS/CLI 处理全图，Qt 重建始终传入第二步确认的 mask。
 - [x] 使用模型网格内参和米制 baseline，计算 `Z = fx × baseline / d`、`X = (u - cx) × Z / fx`、`Y = (v - cy) × Z / fy`。
 - [x] 深度阈值可配置，默认 `0 < Z ≤ 1 m`；保留 `Z > 0` 且 `min_depth_m ≤ Z ≤ max_depth_m`，要求阈值有限且 `0 ≤ min_depth_m < max_depth_m`。无效、超范围或非有限 XYZ 全部写 `(0,0,0)`，通过 `Z > 0` 判断有效。
 - [x] `FS::compute_xyz_map()` 使用 inference 同一 stream，内部同步并检查错误；CLI 无需额外同步，XYZ 计算不计入 inference 耗时。
 - [x] 不维护输入/推理就绪标志，由调用方保证加载 engine→设置相机参数→准备图像→inference→XYZ 的顺序；检查必要参数和 CUDA 错误。
 - [x] 对照 notebook 的 `denoise=False` 结果验证融合输出；更换深度范围可重算 XYZ，复用缓冲区和原始视差，无需重新 inference。
-- [ ] 接入 FS 选区 mask 上传；原图 mask 需随左图校正后用最近邻缩放到推理网格。
+- [x] 接入 FS 选区 mask 上传；Qt 第二步在校正左图绘制的 mask 直接最近邻缩放到 960×800，用于限定邻域去噪区域，无需重复校正；XYZ 先对全图计算。
 
 融合 kernel 验证：关闭 Qt 的 Release 构建通过；24 组合成 GPU 输入（可见性筛选始终开启）与 notebook 的 `postprocess_disparity_gpu(denoise=False)` 加近距阈值结果一致（`rtol=2e-6, atol=1e-7`），覆盖 NaN/Inf、零/负值、mask、可见性边界、深度阈值端点、非整块尺寸和模型网格；23 组非法参数被拒绝。检查了 XYZ 全零无效点、重复计算清除旧输出、非有限投影结果、原始视差/selection mask 不变及非默认 stream 顺序。
 
@@ -318,7 +318,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - Import capture 默认读取同目录 `left.png`、`right.png`、`calibration.json`；支持 CLI 的旧矩阵标定，并明确提示未验证身份/尺寸元数据。有尺寸元数据时必须匹配。取消 `Use capture calibration` 则使用交接的内存标定，并要求左右图尺寸匹配；不重新读取可能已更改的标定文件。
 - 相机输入始终使用窗口 1 的确认标定。预览为原始 RGB；Capture pair 冻结并校正一组。预览不会覆盖已冻结输入；缺少新帧、掉线或尺寸不符会显示原因。文件导入失败保留上一组有效输入。
 - Stereo inspection 支持原图/校正图与水平辅助线；Region measurement 将选区操作合并到 SAM 面板，支持框/点、刷子补选和擦除、Finish draw 及 Clear mask；已移除多边形入口。切换输入会清空旧选区。
-- 二值 mask 按完整校正左图坐标导出 PNG；缩放窗口不改变顶点坐标。尚未上传到推理网格，也不会修改 GPU XYZ、点云或面积。
+- 二值 mask 按完整校正左图坐标导出 PNG；缩放窗口不改变顶点坐标。已上传到推理网格并限定 GPU 邻域去噪范围，mask 外 XYZ 原样保留；点云显示及面积尚待接入。
 - Engine 由 splash 自动尝试默认路径，失败时可选择其他文件重试或退出。创建 FS、加载 engine/context 与缓冲区分配都在 `PipelineWorker` 的 QThread 完成；GPU 同步检查成功后，controller 交付就绪状态再创建工作台。无 engine/GPU 时停留在 splash，不打开未就绪的 reconstruction window。
 - 工作台移除 FoundationStereo engine 信息块，后续推理复用 splash 已准备的同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程包括 GPU XYZ、CPU 下载和固定米制范围的 Jet 深度图，后续几何功能仍标明待接入。
 - `Region measurement` 位于第二个 tab，`Depth map` 位于第三个。Start reconstruction 完成后自动显示校正左图和 Jet 深度图，均为 960×800（宽×高）；左图使用与模型输入一致的线性缩放。Jet 使用本次运行的 Minimum / Maximum（米），无效及超范围点为黑色，标签保留本次范围；修改设置在下次运行生效。重新计算或成功换图会清空旧深度结果，导入失败保留原结果。顶部移除 Stop；右上角仅 Stereo inspection 显示 Capture pair，Region measurement 显示 Finish draw，Depth map 显示 Reconstruct。四个 tab 按输入 → 确认 mask → 重建深度 → 3D 顺序解锁，标题右侧绿勾表示完成、黄点表示待完成。成功拍摄/导入自动进入 Region measurement；Finish draw 确认 mask 后进入第三步，设置深度范围并点击 Reconstruct。编辑 mask 会清除后续 UI 完成状态；Minimum / Maximum 修改也会使深度及后续步骤失效、清空旧结果，改回原值仍需重算；只切换 tab 不会重置完成状态；3D 后端未接入，暂不标完成。
@@ -347,12 +347,15 @@ cmake --build cpp/build --target fs_gui --parallel
 - [x] `fs::SamSegmenter` 独立持有 CUDA stream、两个 TensorRT context、GPU I/O、三组特征、pinned CPU staging 和模型尺寸图像缓冲区。Splash 完成加载、接口/profile 校验及分配后才允许打开重建窗口；支持分别选择 FS / SAM encoder / SAM decoder engine 并重试。
 - [x] 继续使用 PipelineWorker 的后台 QThread 串行管理 FS 与 SAM；它们使用各自的 CUDA stream。第一条有效提示编码当前冻结校正左图一次；同图修改提示只跑 decoder，清空提示保留特征，成功换图清除特征。没有虚拟推理预热。
 - [x] RGB 图像线性缩放到 1024×1024，按 mean/std 归一化；提示保持浮点坐标。Decoder 接收完整提示列表，`mask_input=0`、`has_mask_input=0`；选择三个候选中评分最高者，先把 logits 线性恢复到原图尺寸，再以 >0 阈值化。未照搬本机 AnyLabeling 的重复通道交换和整数坐标截断。
-- [x] Region measurement 支持拖框、前景点、背景点、拖动点、删除提示、撤销提示、清空、mask 叠加及 Finish draw 确认。右键可删除提示，Backspace 撤销点，Escape 取消正在拖动的框/点。原 Polygon selection 面板已移除，Clear mask 清空提示、预测及手工修补。移除右侧面板，统一左栏按步骤显示：第一步 Input and calibration，第二步 Mask draw，第三步 Depth range / Geometry · pending；Finish draw 在顶部替代原 Use mask 按钮，确认后进入第三步；SAM 2.1 auto draw / Manual draw 分隔模型提示与刷子工具。
+- [x] Region measurement 支持拖框、前景点、背景点、拖动点、删除提示、撤销提示、清空、mask 叠加及 Finish draw 确认。右键可删除提示，Backspace 撤销点，Escape 取消正在拖动的框/点。原 Polygon selection 面板已移除，Clear mask 清空提示、预测及手工修补。移除右侧面板，统一左栏按步骤显示：第一步 Input and calibration，第二步 Mask draw，第三步 Depth range / Geometry；Finish draw 在顶部替代原 Use mask 按钮，确认后进入第三步；SAM 2.1 auto draw / Manual draw 分隔模型提示与刷子工具。
 - [x] Brush (+) / Eraser (−) 直接补选或擦除像素，大小为原图 1–100 px（默认 50 px），鼠标显示刷子轮廓，连续笔画不留断点。选中 Brush/Eraser 后在图内滚轮每格调整 1 px，同步大小输入框和轮廓。Mask draw 底部文字、Surface measurement 和 Export 面板已移除。修补层保留到后续 SAM 结果中，刷子不触发推理；Escape 取消本次笔画，修改后需重新 Finish draw。
 - [x] 已确认的 mask 按完整校正左图坐标保留在内存；Export 面板及保存入口已按要求移除。SAM 保留原始二值区域及孔洞，不经过 AnyLabeling 的外轮廓简化/小区域过滤。
 - [x] 使用图像编号及原子提示版本跳过过期排队任务、丢弃旧推理结果；修改 SAM 提示不触发 FS inference。关闭窗口等待后台阶段结束，再释放两模型及相机资源。
 - [x] 实际 Large TensorRT encoder/decoder 推理通过；三组点/框提示与 ONNX Runtime mask IoU 为 0.99981、0.99980、0.99673（对齐 RGB 和浮点坐标，现有 engine 允许 TF32）。临时 Qt 测试通过实际标定 → splash → 重建窗口启动链、splash 失败重试、FS/SAM 同时加载、框/正负点/拖点/删点/撤销、确认与导出、缩放不改变 mask、清空/换图过滤旧结果，以及 FS 重建和关闭。
-- [ ] 确认后的 mask 用最近邻缩放到 FS 宽 960 × 高 800 网格，接入 XYZ、邻域去噪、mesh 和面积计算。
+- [x] 确认后的 mask 最近邻缩放到 FS 宽 960 × 高 800 网格，disparity → XYZ 对全图计算；随后仅在 mask 内调用 FS 的 3×3 CUDA 邻域去噪，mask 外 XYZ 原样复制到最终缓冲区。默认 0.01 m / 内部 3 邻居 / 边缘最多 2 邻居，与 Python 一致。新增 GPU mask、pinned staging、CPU resize 和独立 XYZ scratch 均在 splash 分配，使用 FS stream。
+- [x] 第三步 Geometry 启用去噪开关（默认开）和邻居距离设置；改动会重置后续完成状态。Jet 使用最终 Z；mask 外保留原深度，仅无效、超范围或被去噪剔除的点为黑色。
+- [x] 验证：75 组 CUDA 去噪与 Python 逐像素一致；真实样例 mask 内有效点 110596 → 110362，keep mask 完全一致。真实 FS/Qt 覆盖空/全 mask、最近邻缩放、缓冲复用、重复计算、去噪开关和距离、mask 外 XYZ 完全不变及状态失效，临时测试保留在 /tmp。
+- [ ] 将选区及去噪后的 XYZ 接入 mesh 和面积计算。
 - [ ] 根据实际使用评估分割质量、长期显存稳定性，以及是否需要轮廓简化或单连通区域约束。
 
 临时诊断文件位于 `/tmp/fs_sam_*`，未新增仓库测试目标。单次实测 encoder 包含输入处理约 86 ms；Qt 工作流首次 encoder+decoder 约 98–103 ms，同图缓存后的 decoder 和输出处理约 5–10 ms；这些是当前样例观测值，不是性能保证。无需引入视频记忆模块。

@@ -111,11 +111,12 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     minimum_ = decimal(0,0,1000," m"); maximum_ = decimal(1,0.001,1000," m"); minimum_->setObjectName("minimumDepth"); maximum_->setObjectName("maximumDepth");
     minimum_->setSingleStep(0.05); maximum_->setSingleStep(0.05);
     form->addRow("Minimum", minimum_); form->addRow("Maximum", maximum_); layout->addLayout(form);
-    layout->addWidget(label("Applied to full-image GPU XYZ. Selection-mask upload is pending.")); settings_layout->addWidget(depth);
-    auto* filters = group("Geometry · pending", layout);
-    auto* denoise = new QCheckBox("3 × 3 neighbour filtering"); denoise->setEnabled(false); layout->addWidget(denoise);
-    auto* distance = decimal(0.005,0,1," m"); distance->setEnabled(false); distance->setToolTip("Neighbour-distance filtering is not implemented yet."); layout->addWidget(distance);
-    layout->addWidget(label("Reserved for neighbour distance, mesh edge / depth-jump thresholds and constrained triangulation.")); settings_layout->addWidget(filters);
+    layout->addWidget(label("Applied to full-image XYZ.")); settings_layout->addWidget(depth);
+    auto* filters = group("Geometry", layout);
+    denoise_ = new QCheckBox("3 × 3 neighbour filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
+    neighbor_distance_ = decimal(0.01,0.001,1," m"); neighbor_distance_->setObjectName("neighborDistance"); neighbor_distance_->setSingleStep(0.001);
+    auto* neighbor_form=new QFormLayout; neighbor_form->addRow("Neighbour distance",neighbor_distance_); layout->addLayout(neighbor_form);
+    layout->addWidget(label("Mesh generation is pending.")); settings_layout->addWidget(filters);
     auto* settings_panel=scrollPanel(settings,260); settings_panel->setObjectName("stepTools");
     split->addWidget(settings_panel);
 
@@ -132,7 +133,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
-    region_layout->addWidget(label("Full-resolution rectified-left coordinates. The current GPU run processes the full image; selection-to-geometry integration is pending."));
+    region_layout->addWidget(label("The mask limits neighbourhood filtering; XYZ outside it is preserved."));
     tabs_->addTab(region,"Region measurement");
     auto* depth_page = new QWidget; auto* depth_layout = new QVBoxLayout(depth_page);
     auto* depth_views = new QSplitter;
@@ -215,7 +216,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (closing_) return;
         reconstruction_valid_=mask_->hasSelection();
         depth_left_->setImage(std::move(left)); depth_map_->setImage(std::move(depth));
-        depth_status_->setText(QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid or outside range")
+        depth_status_->setText(QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid, out of range or filtered")
             .arg(minimum,0,'f',3).arg(maximum,0,'f',3));
         refreshWorkflow();
         if (reconstruction_valid_) tabs_->setCurrentWidget(depth_page);
@@ -240,7 +241,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(run_,&QPushButton::clicked,this,[this] {
         reconstruction_valid_=false; refresh();
         const float low = minimum_->value(), high = maximum_->value();
-        controller_.submit([=](auto& w) { w.reconstruct(low,high); });
+        const QImage selected=mask_->mask();
+        const bool denoise=denoise_->isChecked(); const float distance=neighbor_distance_->value();
+        controller_.submit([=](auto& w) { w.reconstruct(low,high,selected,denoise,distance); });
     });
     const auto depth_settings_changed = [this] {
         // Changing parameters invalidates derived results even if the old values are restored later.
@@ -249,6 +252,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     };
     connect(minimum_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(maximum_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
+    connect(denoise_,&QCheckBox::toggled,this,depth_settings_changed);
+    connect(neighbor_distance_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(rectified_,&QCheckBox::toggled,this,[this](bool enabled) {
         live_left_ = {}; live_right_ = {};
         controller_.setPreviewRectified(enabled);
@@ -286,9 +291,10 @@ void ReconstructionWindow::refresh() {
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
+    denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
     const bool depth_valid = minimum_->value() < maximum_->value();
     run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid && mask_->hasSelection());
-    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : !mask_->hasSelection() ? "Click Finish draw in Region measurement first." : "Runs full-image reconstruction and displays the rectified left image and Jet depth map.");
+    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : !mask_->hasSelection() ? "Click Finish draw in Region measurement first." : "Runs full-image XYZ and optional neighbourhood filtering inside the mask, then displays the Jet depth map.");
     rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
     epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
     mask_->setEditingEnabled(idle && frozen);
@@ -300,7 +306,7 @@ void ReconstructionWindow::refresh() {
     clear_->setEnabled(idle && (mask_->hasPrompts() || mask_->hasPrediction()));
     input_->setText(state_.input); calibration_->setText(state_.calibration);
     if (!closing_) status_->setText(!busy_ && state_.depth_ready && !reconstruction_valid_
-        ? "Selection or depth settings changed. Confirm the mask and reconstruct again." : state_.status);
+        ? "Selection or post-processing settings changed. Confirm the mask and reconstruct again." : state_.status);
     if (!state_.depth_ready || !reconstruction_valid_) {
         depth_left_->setImage({}); depth_map_->setImage({});
         depth_status_->setText("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
