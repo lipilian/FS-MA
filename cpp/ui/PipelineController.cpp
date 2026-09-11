@@ -5,11 +5,17 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
       worker_(new PipelineWorker(std::move(calibration), std::move(path), std::move(source), cancel_)) {
     qRegisterMetaType<PipelineState>();
     worker_->moveToThread(&thread_);
-    connect(worker_, &PipelineWorker::stateChanged, this, &PipelineController::stateChanged);
+    connect(worker_, &PipelineWorker::stateChanged, this, [this](PipelineState state) {
+        state_ = std::move(state); emit stateChanged(state_);
+    });
     connect(worker_, &PipelineWorker::images, this, &PipelineController::images);
     connect(worker_, &PipelineWorker::preview, this, &PipelineController::preview);
     connect(worker_, &PipelineWorker::log, this, &PipelineController::log);
-    connect(worker_, &PipelineWorker::actionFinished, this, [this] { busy_ = false; emit busyChanged(false); });
+    connect(worker_, &PipelineWorker::actionFinished, this, [this] {
+        const bool initialized = initializing_; initializing_ = false;
+        busy_ = false; emit busyChanged(false);
+        if (initialized && !stopping_) emit initializationFinished(state_.engine_ready, state_.status);
+    });
     connect(worker_, &PipelineWorker::stopped, &thread_, &QThread::quit, Qt::DirectConnection);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(&thread_, &QThread::finished, this, &PipelineController::stopped);
@@ -21,6 +27,11 @@ void PipelineController::submit(std::function<void(PipelineWorker&)> action) {
     busy_ = true; cancel_->store(false); emit busyChanged(true);
     auto* worker = worker_;
     QMetaObject::invokeMethod(worker, [worker, action = std::move(action)] { worker->execute(action); }, Qt::QueuedConnection);
+}
+void PipelineController::initialize(const QString& engine_path) {
+    if (busy_ || stopping_) return;
+    initializing_ = true;
+    submit([engine_path](auto& worker) { worker.initialize(engine_path); });
 }
 void PipelineController::cancel() { cancel_->store(true); }
 void PipelineController::stop() {

@@ -107,6 +107,7 @@
 │   │   ├── CalibrationWindow.hpp / .cpp
 │   │   ├── CalibrationController.hpp / .cpp
 │   │   ├── CalibrationWorker.hpp / .cpp
+│   │   ├── InferenceSplashWindow.hpp / .cpp
 │   │   ├── ReconstructionWindow.hpp / .cpp
 │   │   ├── PipelineController.hpp / .cpp
 │   │   ├── PipelineWorker.hpp / .cpp
@@ -157,7 +158,7 @@
           <p class="label">Application entry points</p>
           <h3>app/</h3>
           <p><code>TSFS.cpp</code> parses a capture directory and optional <code>--measure</code>, loads the engine, and calls rectification, inference, and fused full-image XYZ reconstruction in sequence. The reconstruction method waits for GPU completion before returning. It also reports failures and returns the process exit status.</p>
-          <p><code>desktop_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>, which starts calibration and opens reconstruction only after successful completion or explicit saved-calibration reuse. Ordinary calibration close exits.</p>
+          <p><code>desktop_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>, which starts calibration and opens an inference-loading splash after successful completion or explicit saved-calibration reuse; reconstruction opens only after FS initialization succeeds. Ordinary calibration close exits.</p>
           <p><code>build_single_engine.cpp</code> is a separate tool: it registers the GWC plugin, parses ONNX, and builds a serialized TensorRT engine.</p>
         </article>
         <article class="card" id="core">
@@ -179,7 +180,7 @@
           <p class="label">TensorRT inference</p>
           <h3>inference/ · FS</h3>
           <code class="file">fs/inference/FS.hpp</code>
-          <p>Owns the TensorRT runtime, engine, execution context, CUDA stream, and reusable host/device buffers. Engine loading registers the GWC plugin before deserialization.</p>
+          <p>Owns the TensorRT runtime, engine, execution context, CUDA stream, and reusable host/device buffers. Engine loading registers the GWC plugin before deserialization and preallocates the two 960×800 CPU RGB resize images alongside the existing GPU/pinned buffers.</p>
           <p>Resizes RGB images to <strong>800 high × 960 wide</strong>, packs FP32 NCHW inputs, and submits inference. It scales the rectified camera intrinsics to that grid and retains the baseline.</p>
         </article>
         <article class="card" id="postprocessing">
@@ -361,20 +362,21 @@ cmake --build cpp/build --target fs_gui --parallel
         <article class="card"><h3>Desktop · fs_calibration_ui / fs_gui</h3>
           <p><code>app/desktop_main.cpp</code> starts <code>DesktopController</code>. <code>CalibrationWindow</code> displays settings, stereo images, sample history and quality. <code>CalibrationController</code> owns the worker thread; <code>CalibrationWorker</code> owns the camera source and performs detection, capture, solve, check and save. <code>widgets/StereoImageView</code> displays owned QImage snapshots.</p>
           <p><code>CalibrationWindow::refreshActions()</code> blocks history-list signals and restores the current row while enabling/disabling controls. This prevents automatic Qt focus transfers from submitting historical-sample previews during Capture; explicit user selection still reaches the worker.</p>
-          <p>New calibration requires a saved result, matching cameras/grid and a passing fresh check. Startup reads temporary path history from <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code>, tries the last successfully loaded/saved file, then searches the working directory and executable directory for <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code>. A valid loaded file enables <strong>Skip calibration · Continue</strong> to explicitly reuse it without a fresh check. At either completion boundary the worker stops polling and transfers the current camera source with the confirmed calibration. DesktopController waits for the calibration thread to finish, creates ReconstructionWindow and shows it before closing the first window. Ordinary close cancels the session and exits.</p>
+          <p>New calibration requires a saved result, matching cameras/grid and a passing fresh check. Startup reads temporary path history from <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code>, tries the last successfully loaded/saved file, then searches the working directory and executable directory for <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code>. A valid loaded file enables <strong>Skip calibration · Continue</strong> to explicitly reuse it without a fresh check. At either completion boundary the worker stops polling and transfers the current camera source with the confirmed calibration. DesktopController waits for the calibration thread to finish, shows InferenceSplashWindow, and closes calibration. The splash remains visible while the pipeline worker creates FS, loads its engine/context and allocates buffers; ReconstructionWindow is only created on success. Ordinary close cancels the session and exits.</p>
           <p>The Qt loader requires board, camera identity and image-size metadata and checks the applied board and fixed camera identities. While connected, reuse also waits for a matching image size. Legacy six-matrix JSON files remain supported by the CLI loader. Confirmed results use <code>fs::calibration::SessionResult</code>, deep-copied into <code>ConfirmedCalibration</code> for handoff; the active source is handed off via <code>SharedStereoSource</code>. Only one worker accesses the source at a time.</p>
         </article>
       </div>
       <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_DESKTOP=ON
 cmake --build cpp/build --target fs_gui --parallel
 ./cpp/build/fs_gui</code></pre>
-      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source and does not link highgui/Qt 5. Calibration never initializes an inference engine; reconstruction loads it lazily when requested. See <a href="index.html#qt-calibration-window-heading">the calibration workflow</a> for controls, metadata checks and current limits, and <a href="#build-setup">build setup</a> for dependencies and CUDA configuration.</p>
+      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source and does not link highgui/Qt 5. Calibration never initializes an inference engine. The intermediate splash waits for background initialization before opening reconstruction. See <a href="index.html#qt-calibration-window-heading">the calibration workflow</a> for controls, metadata checks and current limits, and <a href="#build-setup">build setup</a> for dependencies and CUDA configuration.</p>
     </section>
     <section id="qt-reconstruction" aria-labelledby="qt-reconstruction-heading">
       <h2 id="qt-reconstruction-heading">08 · Qt reconstruction workspace</h2>
       <div class="grid">
         <article class="card"><h3>Window and worker boundaries</h3>
-          <p><code>ReconstructionWindow</code> owns input/engine/depth controls, stereo, region, depth and 3D tabs, measurement placeholders and logs. <code>PipelineController</code> serializes actions on a dedicated QThread and provides an atomic cancellation flag. <code>PipelineWorker</code> owns the camera source, frozen StereoFrame and lazy FS instance; it invokes the existing core APIs and emits independently owned QImage snapshots.</p>
+          <p><code>InferenceSplashWindow</code> displays initialization status, elapsed time and cancellation. On failure it offers engine-file selection and retry. <code>PipelineController::initialize()</code> starts worker initialization and emits its completion only after caching the final state and clearing busy status. The reconstruction constructor requires that ready state, so it cannot open with an uninitialized FS. A failed or cancelled load never opens the workspace.</p>
+          <p><code>ReconstructionWindow</code> owns input/engine/depth controls, stereo, region, depth and 3D tabs, measurement placeholders and logs. <code>PipelineController</code> serializes actions on a dedicated QThread and provides an atomic cancellation flag. <code>PipelineWorker</code> owns the camera source, frozen StereoFrame and the FS instance initialized during the splash; it invokes the existing core APIs and emits independently owned QImage snapshots.</p>
           <p>Stopping takes effect at safe CPU/GPU stage boundaries. Closing waits for worker cleanup, including camera stop and FS destruction, before exiting. No new command-line option bypasses calibration.</p>
         </article>
         <article class="card"><h3>Input and calibration ownership</h3>
@@ -386,10 +388,11 @@ cmake --build cpp/build --target fs_gui --parallel
           <p>Export produces a binary grayscale PNG at rectified-left resolution using QSaveFile. GPU mask upload, nearest-neighbour inference-grid conversion and geometry updates are still pending.</p>
         </article>
         <article class="card"><h3>Available computation and reserved stages</h3>
-          <p>Background execution currently reaches StereoFrame rectification → FS input preparation/inference → compute_xyz_map with configurable metre depth limits. The progress/log explicitly stops at GPU XYZ. The engine is not loaded merely by opening either window.</p>
+          <p>Background execution currently reaches StereoFrame rectification → FS input preparation/inference → compute_xyz_map with configurable metre depth limits. The progress/log explicitly stops at GPU XYZ. The engine, context, GPU I/O/XYZ, pinned host staging and model-size CPU RGB buffers are ready before reconstruction opens. Actual input preparation and camera parameters still depend on the chosen images; reconstruction reuses the existing FS and never reloads the engine.</p>
           <p>CPU disparity/XYZ download, depth colormap, VTK point cloud/mesh/wireframe, neighbourhood filtering, surface area, SAM prompts and PLY/report/result-bundle export have visible pending areas. Point/triangle counts and area display dashes until their backend exists.</p>
         </article>
       </div>
+      <p class="note">Splash validation: missing/corrupt engine and no-GPU errors stay in the splash; retry and loading cancellation passed offscreen checks. Diagnostics verified preallocated GPU/pinned/CPU buffers, first-input address reuse, and two inferences after deleting only the temporary engine symlink. Initialization occurred once and the replay source was retained.</p>
       <p class="note">Validation: Release all-target build; temporary offscreen Qt checks for the actual two-window transition and cancellation, file/CLI rectification equivalence, real FS/GPU XYZ, event-loop responsiveness, error recovery, polygon mapping/export and the complete calibration-worker → pipeline replay-source handoff/capture/disconnect, plus cancellation and close during active inference. Physical camera handoff and unplug recovery still need on-device acceptance. No persistent test target was added.</p>
     </section>
     <footer><a href="index.html">Back to development notes</a> · <a href="#top">Back to top</a></footer>

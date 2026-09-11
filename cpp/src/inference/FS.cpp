@@ -235,6 +235,9 @@ void FS::allocate_input_buffers() {
                                              kTensorRtInputHeight * kTensorRtInputWidth;
     const std::size_t output_byte_count = output_element_count * sizeof(float);
 
+    model_left_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC3);
+    model_right_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC3);
+
     void* left_device = nullptr;
     check_cuda(cudaMalloc(&left_device, input_byte_count), "failed to allocate left TensorRT input buffer");
     left_input_device_.reset(static_cast<float*>(left_device));

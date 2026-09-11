@@ -67,7 +67,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     reuse_hint_->setStyleSheet("color: #12634b; font-weight: 600;");
     reuse_ = button("Skip calibration · Continue", "reuseCalibration");
     reuse_->setToolTip("Use the loaded calibration without a new capture or check.");
-    resume->addWidget(reuse_hint_, 1); resume->addWidget(reuse_); outer->addLayout(resume);
+    resume->addWidget(reuse_hint_, 1); outer->addLayout(resume);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     auto* camera = new QGroupBox("Stereo cameras"); auto* camera_layout = new QVBoxLayout(camera);
@@ -125,6 +125,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     auto* footer = new QHBoxLayout;
     cancel_ = button("Cancel capture", "cancelCapture"); footer->addWidget(cancel_);
     footer->addWidget(label("Complete calibration to open the reconstruction workspace."), 1);
+    footer->addWidget(reuse_);
     finish_ = button("Finish calibration", "finish"); footer->addWidget(finish_); outer->addLayout(footer);
 
     connect(&controller_, &CalibrationController::actionFinished, this, [this] { awaiting_ = false; refreshActions(); });

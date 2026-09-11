@@ -4,12 +4,9 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QDateTime>
-#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
-#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -24,6 +21,7 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <stdexcept>
 
 namespace {
 QLabel* label(const QString& text) {
@@ -42,17 +40,10 @@ QScrollArea* scrollPanel(QWidget* content, int minimum) {
 QDoubleSpinBox* decimal(double value, double minimum, double maximum, const QString& suffix) {
     auto* s = new QDoubleSpinBox; s->setDecimals(3); s->setRange(minimum, maximum); s->setValue(value); s->setSuffix(suffix); return s;
 }
-QString defaultEngine() {
-    const QString relative = "onnx/foundationstereo_800x960_gwc_plugin.engine";
-    for (const auto& base : {QDir::currentPath(), QCoreApplication::applicationDirPath() + "/../.."}) {
-        const QFileInfo candidate(QDir(base).filePath(relative));
-        if (candidate.isFile()) return candidate.absoluteFilePath();
-    }
-    return QDir::current().absoluteFilePath(relative);
-}
 }
 ReconstructionWindow::ReconstructionWindow(PipelineController& controller, ConfirmedCalibration calibration, const QString& path)
-    : controller_(controller) {
+    : controller_(controller), state_(controller.state()) {
+    if (!state_.engine_ready) throw std::logic_error("Reconstruction window requires an initialized FoundationStereo session.");
     setObjectName("reconstructionWindow"); setWindowTitle("FoundationStereo · Reconstruction"); resize(1500, 950); setMinimumSize(1120, 740);
     setStyleSheet(R"(
         QMainWindow, QWidget#root { background: #f3f6fa; color: #20314a; }
@@ -105,8 +96,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     exposure_ = decimal(100000, 100, 1000000, " µs"); exposure_->setDecimals(0); layout->addWidget(exposure_);
     layout->addWidget(label("Independent streams. Capture freezes a pair; preview does not replace the frozen input.")); settings_layout->addWidget(cameras);
     auto* engine_group = group("FoundationStereo engine", layout);
-    engine_ = new QLineEdit(defaultEngine()); engine_->setObjectName("enginePath"); layout->addWidget(engine_);
-    browse_ = button("Choose engine…", "browseEngine"); layout->addWidget(browse_);
+    engine_ = new QLineEdit(state_.engine_path); engine_->setObjectName("enginePath"); engine_->setReadOnly(true);
+    engine_->setToolTip(state_.engine_path); layout->addWidget(engine_);
+    layout->addWidget(label("Engine and inference buffers prepared before opening this workspace."));
     engine_status_ = label(""); layout->addWidget(engine_status_); settings_layout->addWidget(engine_group);
     auto* depth = group("Depth range", layout); auto* form = new QFormLayout;
     minimum_ = decimal(0,0,1000," m"); maximum_ = decimal(1,0.001,1000," m"); minimum_->setObjectName("minimumDepth"); maximum_->setObjectName("maximumDepth");
@@ -192,12 +184,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(preview_,&QPushButton::clicked,this,[this] { const bool live = state_.live; if (!live) { live_left_ = {}; live_right_ = {}; tabs_->setCurrentIndex(0); } controller_.submit([=](auto& w) { w.setLive(!live); }); });
     connect(capture_,&QPushButton::clicked,this,[this] { controller_.submit([](auto& w) { w.freeze(); }); });
     connect(run_,&QPushButton::clicked,this,[this] {
-        const QString path = engine_->text().trimmed(); const float low = minimum_->value(), high = maximum_->value();
-        controller_.submit([=](auto& w) { w.reconstruct(path,low,high); });
+        const float low = minimum_->value(), high = maximum_->value();
+        controller_.submit([=](auto& w) { w.reconstruct(low,high); });
     });
     connect(stop_,&QPushButton::clicked,this,[this] { controller_.cancel(); status_->setText("Stop requested · waiting for the current stage to finish…"); });
-    connect(browse_,&QPushButton::clicked,this,[this] { const auto path = QFileDialog::getOpenFileName(this,"Choose TensorRT engine",engine_->text(),"TensorRT engine (*.engine *.plan);;All files (*)"); if (!path.isEmpty()) engine_->setText(path); });
-    connect(engine_,&QLineEdit::textChanged,this,[this] { refresh(); });
     connect(minimum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); }); connect(maximum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); });
     connect(rectified_,&QCheckBox::toggled,this,[this] { showImages(); }); connect(epilines_,&QCheckBox::toggled,this,[this] { showImages(); });
     connect(draw_,&QPushButton::clicked,this,[this,overlay] { tabs_->setCurrentIndex(1); overlay->setChecked(true); mask_->startPolygon(); });
@@ -206,8 +196,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(mask_,&MaskEditor::selectionChanged,this,[this] { refresh(); }); connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
     connect(export_mask_,&QPushButton::clicked,this,&ReconstructionWindow::exportMask);
     auto* timer = new QTimer(this); timer->setInterval(200); connect(timer,&QTimer::timeout,this,[this] { if (busy_) time_->setText(QString("Running: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); }); timer->start();
-    state_.calibration = path; refresh();
-    controller_.submit([](auto& w) { w.initialize(); });
+    refresh();
 }
 void ReconstructionWindow::refresh() {
     const bool idle = !busy_ && !closing_, frozen = state_.has_rectified && !state_.live;
@@ -215,11 +204,11 @@ void ReconstructionWindow::refresh() {
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     camera_status_->setText(state_.connected ? (state_.live ? "Connected · live raw RGB" : "Connected · preview paused") : "Not connected");
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
-    exposure_->setEnabled(idle && !state_.connected); engine_->setEnabled(idle); browse_->setEnabled(idle); minimum_->setEnabled(idle); maximum_->setEnabled(idle);
-    const bool engine_exists = QFileInfo(engine_->text().trimmed()).isFile(), depth_valid = minimum_->value() < maximum_->value();
-    run_->setEnabled(idle && frozen && engine_exists && depth_valid); stop_->setEnabled(busy_ && !closing_);
-    run_->setToolTip(!engine_exists ? "Select an existing TensorRT engine file." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image inference and GPU XYZ; geometry and measurement stages are pending.");
-    engine_status_->setText(engine_exists ? state_.engine : "Engine file missing · input inspection is still available");
+    exposure_->setEnabled(idle && !state_.connected); minimum_->setEnabled(idle); maximum_->setEnabled(idle);
+    const bool depth_valid = minimum_->value() < maximum_->value();
+    run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid); stop_->setEnabled(busy_ && !closing_);
+    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image inference and GPU XYZ; geometry and measurement stages are pending.");
+    engine_status_->setText(state_.engine);
     rectified_->setEnabled(!state_.live && state_.has_pair); epilines_->setEnabled(!state_.live && rectified_->isChecked() && state_.has_rectified);
     draw_->setEnabled(idle && frozen); mask_->setEditingEnabled(idle && frozen);
     finish_->setEnabled(idle && frozen && !mask_->hasSelection() && mask_->vertexCount() >= 3);
