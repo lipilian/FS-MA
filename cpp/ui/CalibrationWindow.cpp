@@ -207,6 +207,10 @@ void CalibrationWindow::updateState(CalibrationState state) {
     progress_->setValue(state_.busy ? state_.candidates : 0); refreshActions();
 }
 void CalibrationWindow::refreshActions() {
+    // Disabling a focused button can move focus into the history list and make
+    // Qt select its first row. UI refreshes must not enqueue a sample preview.
+    const int selected_row = samples_->currentRow();
+    const QSignalBlocker block(samples_);
     const bool idle = !awaiting_ && !state_.busy && !closing_;
     const bool dirty = !fs::calibration::same_board(boardFromForm(), state_.board);
     connect_->setEnabled(idle); connect_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
@@ -218,7 +222,8 @@ void CalibrationWindow::refreshActions() {
     finish_->setEnabled(idle && !dirty && state_.can_finish);
     reuse_->setEnabled(idle && !dirty && state_.can_reuse_saved);
     cancel_->setEnabled(!closing_ && state_.busy && state_.candidates <= 5 && state_.status.contains("andidat", Qt::CaseInsensitive));
-    samples_->setEnabled(idle); remove_->setEnabled(idle && samples_->currentRow() >= 0);
+    samples_->setEnabled(idle); samples_->setCurrentRow(selected_row);
+    remove_->setEnabled(idle && selected_row >= 0);
     live_->setEnabled(idle && state_.connected); overlay_->setEnabled(idle); rectified_->setEnabled(idle && state_.has_result);
     if (dirty && idle) status_->setText("Board edits are pending. Apply parameters before capture, calibration or saving.");
 }
