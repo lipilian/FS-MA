@@ -14,7 +14,7 @@ signals:
     void preview(QImage left, QImage right, QString caption);
     void failed(QString message);
     void actionFinished();
-    void completed(ConfirmedCalibration result, QString path);
+    void completed(ConfirmedCalibration result, QString path, SharedStereoSource source);
     void stopped();
 private:
     QThread thread_;

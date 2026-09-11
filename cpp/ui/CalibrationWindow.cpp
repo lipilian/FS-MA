@@ -56,7 +56,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     )");
     auto* root = new QWidget; root->setObjectName("root"); setCentralWidget(root);
     auto* outer = new QVBoxLayout(root); outer->setContentsMargins(22, 18, 22, 18); outer->setSpacing(12);
-    auto* step = label("01  /  CALIBRATION     →     02  /  RECONSTRUCTION (COMING NEXT)"); step->setObjectName("step"); outer->addWidget(step);
+    auto* step = label("01  /  CALIBRATION     →     02  /  RECONSTRUCTION"); step->setObjectName("step"); outer->addWidget(step);
     auto* heading = new QHBoxLayout;
     auto* title = label("Stereo calibration"); title->setObjectName("title"); heading->addWidget(title); heading->addStretch();
     load_ = button("Load calibration…", "load"); save_ = button("Save calibration…", "save");
@@ -124,7 +124,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     saved_ = label("Calibration has not been saved."); saved_->setTextInteractionFlags(Qt::TextSelectableByMouse); outer->addWidget(saved_);
     auto* footer = new QHBoxLayout;
     cancel_ = button("Cancel capture", "cancelCapture"); footer->addWidget(cancel_);
-    footer->addWidget(label("This release completes calibration and exits. The reconstruction window is the next step."), 1);
+    footer->addWidget(label("Complete calibration to open the reconstruction workspace."), 1);
     finish_ = button("Finish calibration", "finish"); footer->addWidget(finish_); outer->addLayout(footer);
 
     connect(&controller_, &CalibrationController::actionFinished, this, [this] { awaiting_ = false; refreshActions(); });

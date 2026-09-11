@@ -75,8 +75,8 @@
         <span class="badge">C++: file / memory input → GPU XYZ</span>
         <span class="badge">Sentech: dual-camera capture</span>
         <span class="badge reference">Python: geometry reference</span>
-        <span class="badge">Qt 6: calibration window</span>
-        <span class="badge planned">VTK reconstruction: planned</span>
+        <span class="badge">Qt 6: calibration + reconstruction</span>
+        <span class="badge planned">VTK / geometry: pending</span>
       </div>
     </header>
     <nav class="section-nav" aria-label="On this page">
@@ -87,6 +87,7 @@
       <a href="#boundaries">Current boundaries</a>
       <a href="#camera-usage">Camera commands</a>
       <a href="#qt-calibration">Qt calibration</a>
+      <a href="#qt-reconstruction">Qt reconstruction</a>
     </nav>
 
     <section id="layout" aria-labelledby="layout-heading">
@@ -106,6 +107,10 @@
 │   │   ├── CalibrationWindow.hpp / .cpp
 │   │   ├── CalibrationController.hpp / .cpp
 │   │   ├── CalibrationWorker.hpp / .cpp
+│   │   ├── ReconstructionWindow.hpp / .cpp
+│   │   ├── PipelineController.hpp / .cpp
+│   │   ├── PipelineWorker.hpp / .cpp
+│   │   ├── widgets/MaskEditor.hpp / .cpp
 │   │   └── widgets/StereoImageView.hpp / .cpp
 │   ├── include/fs/
 │   │   ├── <a href="#qt-calibration">calibration/CharucoCalibration.hpp</a>
@@ -152,7 +157,7 @@
           <p class="label">Application entry points</p>
           <h3>app/</h3>
           <p><code>TSFS.cpp</code> parses a capture directory and optional <code>--measure</code>, loads the engine, and calls rectification, inference, and fused full-image XYZ reconstruction in sequence. The reconstruction method waits for GPU completion before returning. It also reports failures and returns the process exit status.</p>
-          <p><code>desktop_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>, which currently runs the calibration window and exits after completion or cancellation.</p>
+          <p><code>desktop_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>, which starts calibration and opens reconstruction only after successful completion or explicit saved-calibration reuse. Ordinary calibration close exits.</p>
           <p><code>build_single_engine.cpp</code> is a separate tool: it registers the GWC plugin, parses ONNX, and builds a serialized TensorRT engine.</p>
         </article>
         <article class="card" id="core">
@@ -327,7 +332,7 @@ frame.rectify();
         <article class="card">
           <h3>Planned extensions</h3>
           <p>Stage 1 now includes fused validity filtering, depth limits and XYZ reconstruction. FS and CLI integration is complete for the full image. Next are CPU result access, Z-channel extraction and depth colormap display; FS selection-mask upload is also pending. Neighbourhood denoising, mesh construction and area calculation follow later.</p>
-          <p>Sentech capture has been verified on the real pair at 2448×2048. Camera-rig calibration validation, exposure synchronization, C++ geometry/pipeline modules, and the second Qt/VTK reconstruction window remain pending. The first Qt 6 calibration window is implemented; real-board accuracy validation is still needed.</p>
+          <p>Sentech capture has been verified on the real pair at 2448×2048. Both Qt windows are implemented, with sequential camera-session handoff, file/camera input, background FS inference and GPU XYZ, and polygon mask editing/export. CPU downloads, VTK, C++ geometry/area modules, exposure synchronization and real-board accuracy validation remain pending.</p>
           <p>The implementation checklist lives in <code>TODO/TODO.md</code>. See the <a href="stereo_reconstruction_pipeline.html">algorithm overview</a> for the intended end-to-end reconstruction workflow.</p>
         </article>
       </div>
@@ -355,14 +360,36 @@ cmake --build cpp/build --target fs_gui --parallel
         </article>
         <article class="card"><h3>Desktop · fs_calibration_ui / fs_gui</h3>
           <p><code>app/desktop_main.cpp</code> starts <code>DesktopController</code>. <code>CalibrationWindow</code> displays settings, stereo images, sample history and quality. <code>CalibrationController</code> owns the worker thread; <code>CalibrationWorker</code> owns the camera source and performs detection, capture, solve, check and save. <code>widgets/StereoImageView</code> displays owned QImage snapshots.</p>
-          <p>New calibration requires a saved result, matching cameras/grid and a passing fresh check. Startup reads temporary path history from <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code>, tries the last successfully loaded/saved file, then searches the working directory and executable directory for <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code>. A valid loaded file enables <strong>Skip calibration · Continue</strong> to explicitly reuse it without a fresh check. The application releases cameras, stops the worker, displays a completion message, and exits at either completion boundary; the reconstruction window will be added at that boundary. Ordinary close cancels the session.</p>
-          <p>The Qt loader requires board, camera identity and image-size metadata and checks the applied board and fixed camera identities. While connected, reuse also waits for a matching image size. Legacy six-matrix JSON files remain supported by the CLI loader. Confirmed results use <code>fs::calibration::SessionResult</code>, deep-copied into <code>ConfirmedCalibration</code> for handoff; a live camera session is not handed to a second window yet.</p>
+          <p>New calibration requires a saved result, matching cameras/grid and a passing fresh check. Startup reads temporary path history from <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code>, tries the last successfully loaded/saved file, then searches the working directory and executable directory for <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code>. A valid loaded file enables <strong>Skip calibration · Continue</strong> to explicitly reuse it without a fresh check. At either completion boundary the worker stops polling and transfers the current camera source with the confirmed calibration. DesktopController waits for the calibration thread to finish, creates ReconstructionWindow and shows it before closing the first window. Ordinary close cancels the session and exits.</p>
+          <p>The Qt loader requires board, camera identity and image-size metadata and checks the applied board and fixed camera identities. While connected, reuse also waits for a matching image size. Legacy six-matrix JSON files remain supported by the CLI loader. Confirmed results use <code>fs::calibration::SessionResult</code>, deep-copied into <code>ConfirmedCalibration</code> for handoff; the active source is handed off via <code>SharedStereoSource</code>. Only one worker accesses the source at a time.</p>
         </article>
       </div>
       <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_DESKTOP=ON
 cmake --build cpp/build --target fs_gui --parallel
 ./cpp/build/fs_gui</code></pre>
-      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source but does not link highgui/Qt 5 or initialize an inference engine. See <a href="index.html#qt-calibration-window-heading">the calibration workflow</a> for controls, metadata checks and current limits, and <a href="#build-setup">build setup</a> for dependencies and CUDA configuration.</p>
+      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source and does not link highgui/Qt 5. Calibration never initializes an inference engine; reconstruction loads it lazily when requested. See <a href="index.html#qt-calibration-window-heading">the calibration workflow</a> for controls, metadata checks and current limits, and <a href="#build-setup">build setup</a> for dependencies and CUDA configuration.</p>
+    </section>
+    <section id="qt-reconstruction" aria-labelledby="qt-reconstruction-heading">
+      <h2 id="qt-reconstruction-heading">08 · Qt reconstruction workspace</h2>
+      <div class="grid">
+        <article class="card"><h3>Window and worker boundaries</h3>
+          <p><code>ReconstructionWindow</code> owns input/engine/depth controls, stereo, region, depth and 3D tabs, measurement placeholders and logs. <code>PipelineController</code> serializes actions on a dedicated QThread and provides an atomic cancellation flag. <code>PipelineWorker</code> owns the camera source, frozen StereoFrame and lazy FS instance; it invokes the existing core APIs and emits independently owned QImage snapshots.</p>
+          <p>Stopping takes effect at safe CPU/GPU stage boundaries. Closing waits for worker cleanup, including camera stop and FS destruction, before exiting. No new command-line option bypasses calibration.</p>
+        </article>
+        <article class="card"><h3>Input and calibration ownership</h3>
+          <p>Capture-directory import reads left.png, right.png and, by default, calibration.json. Legacy matrix-only captures follow the CLI path and are labelled as lacking verified grid/camera identity. Available image-size metadata is enforced. The explicit confirmed-calibration option uses the handed-off matrices in memory and requires matching dimensions.</p>
+          <p>Live capture always uses the first window’s confirmed calibration. Preview shows raw RGB and does not replace the frozen input. A fresh capture freezes and rectifies one pair; errors retain the previous valid input. Reconnection binds the confirmed left/right serials.</p>
+        </article>
+        <article class="card"><h3>Polygon editor</h3>
+          <p><code>widgets/MaskEditor</code> stores one simple polygon in full-resolution rectified-left pixel coordinates. It maps through an aspect-preserving display rectangle, supports click-to-add, close, undo, cancel and vertex dragging, and rejects self-intersections or degenerate regions. Resizing preserves vertices; a new input clears them.</p>
+          <p>Export produces a binary grayscale PNG at rectified-left resolution using QSaveFile. GPU mask upload, nearest-neighbour inference-grid conversion and geometry updates are still pending.</p>
+        </article>
+        <article class="card"><h3>Available computation and reserved stages</h3>
+          <p>Background execution currently reaches StereoFrame rectification → FS input preparation/inference → compute_xyz_map with configurable metre depth limits. The progress/log explicitly stops at GPU XYZ. The engine is not loaded merely by opening either window.</p>
+          <p>CPU disparity/XYZ download, depth colormap, VTK point cloud/mesh/wireframe, neighbourhood filtering, surface area, SAM prompts and PLY/report/result-bundle export have visible pending areas. Point/triangle counts and area display dashes until their backend exists.</p>
+        </article>
+      </div>
+      <p class="note">Validation: Release all-target build; temporary offscreen Qt checks for the actual two-window transition and cancellation, file/CLI rectification equivalence, real FS/GPU XYZ, event-loop responsiveness, error recovery, polygon mapping/export and the complete calibration-worker → pipeline replay-source handoff/capture/disconnect, plus cancellation and close during active inference. Physical camera handoff and unplug recovery still need on-device acceptance. No persistent test target was added.</p>
     </section>
     <footer><a href="index.html">Back to development notes</a> · <a href="#top">Back to top</a></footer>
   </main>

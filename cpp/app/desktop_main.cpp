@@ -8,7 +8,7 @@ int main(int argc, char** argv) {
     app.setApplicationName("fs_gui"); app.setApplicationVersion("0.1");
     app.setOrganizationName("FS_Engine"); app.setStyle("Fusion");
     QCommandLineParser parser;
-    parser.setApplicationDescription("FoundationStereo Qt 6 stereo calibration window");
+    parser.setApplicationDescription("FoundationStereo Qt 6 calibration and reconstruction workspace");
     parser.addHelpOption(); parser.addVersionOption(); parser.process(app);
     try {
         // Avoid oversubscribing the desktop during full-resolution detection.
