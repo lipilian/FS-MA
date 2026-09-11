@@ -59,7 +59,7 @@ void CalibrationWorker::execute(const std::function<void(CalibrationWorker&)>& a
 }
 bool CalibrationWorker::ready() const {
     return state_.connected && !state_.busy && result_ && result_->image_size == image_size_ &&
-        result_->checked && result_->solve.stereo <= cal::kQualityThresholdPx && result_->check.stereo <= cal::kQualityThresholdPx &&
+        result_->solve.stereo <= cal::kQualityThresholdPx &&
         !state_.saved_path.isEmpty();
 }
 bool CalibrationWorker::reusable() const {
@@ -103,7 +103,7 @@ void CalibrationWorker::disconnectCameras() {
     source_.reset(); state_.connected = false;
     if (result_) result_->checked = false;
     state_.status = reusable_saved_ ? "Cameras disconnected. You can continue with the loaded calibration."
-        : "Cameras disconnected. Reconnect and run a fresh check before finishing.";
+        : "Cameras disconnected. Reconnect matching cameras before finishing.";
 }
 void CalibrationWorker::applyBoard(cal::BoardConfig config) {
     auto next = cal::make_board(config);
@@ -136,7 +136,7 @@ void CalibrationWorker::compute() {
     auto result = cal::solve(state_.board, samples_);
     result.threshold_px = cal::kQualityThresholdPx;
     result_ = std::move(result); buildMaps(); state_.busy = false;
-    state_.status = "Calibration computed. Move the board to a new pose, then run an independent check.";
+    state_.status = "Calibration computed. Save to finish if solve stereo RMS passes. Checking a new pose is optional.";
 }
 void CalibrationWorker::selectSample(int index) {
     if (index == -2 && check_sample_) { show(*check_sample_, "Independent check · frozen"); return; }
@@ -275,7 +275,7 @@ void CalibrationWorker::save(const QString& path) {
     state_.saved_path = QFileInfo(path).absoluteFilePath();
     state_.suggested_save_path = state_.saved_path;
     rememberCalibrationPath(state_.saved_path);
-    state_.status = "Calibration saved. Finishing also requires a passing check in this camera connection.";
+    state_.status = "Calibration saved. Finish when solve stereo RMS passes and connected cameras match.";
 }
 void CalibrationWorker::load(const QString& path) {
     auto loaded = cal::load(path.toStdString());
@@ -292,7 +292,7 @@ void CalibrationWorker::load(const QString& path) {
     state_.status = "Saved calibration loaded. Skip calibration and continue, or connect cameras to check it again.";
 }
 void CalibrationWorker::finish() {
-    if (!ready()) throw std::runtime_error("Finish requires connected matching cameras, a passing check and a saved calibration");
+    if (!ready()) throw std::runtime_error("Finish requires connected matching cameras, solve stereo RMS at or below 1.0 px and a saved calibration");
     completeSession();
 }
 void CalibrationWorker::completeSession() {
