@@ -77,9 +77,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* toolbar = new QHBoxLayout;
     import_ = button("Import capture…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     preview_ = button("Resume preview", "preview"); capture_ = button("Capture pair", "capturePair");
-    run_ = button("Start reconstruction", "run"); stop_ = button("Stop", "stop");
-    for (auto* b : {import_, camera_, preview_, capture_}) toolbar->addWidget(b);
-    toolbar->addStretch(); toolbar->addWidget(run_); toolbar->addWidget(stop_); outer->addLayout(toolbar);
+    run_ = button("Start reconstruction", "run");
+    for (auto* b : {import_, camera_, preview_}) toolbar->addWidget(b);
+    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(run_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -126,13 +126,13 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     views->addWidget(left_); views->addWidget(right_); stereo_layout->addWidget(views,1);
     stereo_layout->addWidget(label("Rectified applies to live preview and captured pairs. Enable Epipolar guides to compare horizontal alignment."));
     tabs_->addTab(stereo,"Stereo inspection");
+    depth_status_ = label("Depth map · pending\n\nGPU XYZ exists in the backend. CPU download and a fixed-range depth colormap still need to be connected.");
+    depth_status_->setObjectName("scene"); depth_status_->setAlignment(Qt::AlignCenter); tabs_->addTab(depth_status_,"Depth map");
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
     region_layout->addWidget(label("Full-resolution rectified-left coordinates. The current GPU run processes the full image; selection-to-geometry integration is pending."));
     tabs_->addTab(region,"Region measurement");
-    depth_status_ = label("Depth map · pending\n\nGPU XYZ exists in the backend. CPU download and a fixed-range depth colormap still need to be connected.");
-    depth_status_->setObjectName("scene"); depth_status_->setAlignment(Qt::AlignCenter); tabs_->addTab(depth_status_,"Depth map");
     auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
     auto* render = new QComboBox; render->addItems({"Point cloud", "Mesh", "Wireframe"}); render->setEnabled(false);
     auto* color = new QComboBox; color->addItems({"RGB colour", "Depth colour"}); color->setEnabled(false);
@@ -197,14 +197,13 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         const float low = minimum_->value(), high = maximum_->value();
         controller_.submit([=](auto& w) { w.reconstruct(low,high); });
     });
-    connect(stop_,&QPushButton::clicked,this,[this] { controller_.cancel(); status_->setText("Stop requested · waiting for the current stage to finish…"); });
     connect(minimum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); }); connect(maximum_,&QDoubleSpinBox::valueChanged,this,[this] { refresh(); });
     connect(rectified_,&QCheckBox::toggled,this,[this](bool enabled) {
         live_left_ = {}; live_right_ = {};
         controller_.setPreviewRectified(enabled);
         refresh(); showImages();
     }); connect(epilines_,&QCheckBox::toggled,this,[this] { showImages(); });
-    connect(draw_,&QPushButton::clicked,this,[this,overlay] { tabs_->setCurrentIndex(1); overlay->setChecked(true); mask_->startPolygon(); });
+    connect(draw_,&QPushButton::clicked,this,[this,overlay,region] { tabs_->setCurrentWidget(region); overlay->setChecked(true); mask_->startPolygon(); });
     connect(finish_,&QPushButton::clicked,mask_,&MaskEditor::finishPolygon); connect(undo_,&QPushButton::clicked,mask_,&MaskEditor::undoVertex);
     connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearPolygon); connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
     connect(mask_,&MaskEditor::selectionChanged,this,[this] { refresh(); }); connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
@@ -219,7 +218,7 @@ void ReconstructionWindow::refresh() {
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     const bool depth_valid = minimum_->value() < maximum_->value();
-    run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid); stop_->setEnabled(busy_ && !closing_);
+    run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
     run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image inference and GPU XYZ; geometry and measurement stages are pending.");
     rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
     epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
