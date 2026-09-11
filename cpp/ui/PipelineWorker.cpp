@@ -1,5 +1,6 @@
 #include "PipelineWorker.hpp"
 #include <QDir>
+#include <QCoreApplication>
 #include <QFileInfo>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
@@ -37,11 +38,11 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
     }
     publish(); emit actionFinished();
 }
-void PipelineWorker::initialize(const QString& engine_path) {
+void PipelineWorker::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
     // The same worker retains this instance for every subsequent reconstruction.
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false;
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
-    fs_.reset();
+    fs_.reset(); sam_.reset(); state_.sam_ready = false;
     QElapsedTimer elapsed; elapsed.start();
     try {
         state_.engine = "Initializing…";
@@ -55,10 +56,27 @@ void PipelineWorker::initialize(const QString& engine_path) {
         checkpoint();
         state_.status = "Checking that GPU initialization has completed…"; publish();
         next->synchronize(); checkpoint();
+        const auto samPath = [&](const QString& specified, const QString& name) {
+            if (!specified.isEmpty()) return QFileInfo(specified).absoluteFilePath();
+            for (const auto& base : {QFileInfo(state_.engine_path).absolutePath(), QDir::currentPath()+"/onnx",
+                                    QCoreApplication::applicationDirPath()+"/../../onnx"}) {
+                const QFileInfo candidate(QDir(base).filePath(name));
+                if (candidate.isFile()) return candidate.absoluteFilePath();
+            }
+            throw std::runtime_error(("SAM engine not found: " + name + ". Choose both SAM engines in the splash.").toStdString());
+        };
+        const auto encoder = samPath(sam_encoder,"sam2.1_hiera_large.encoder.engine");
+        const auto decoder = samPath(sam_decoder,"sam2.1_hiera_large.decoder.engine");
+        state_.status = "Loading SAM 2.1 Hiera Large encoder / decoder and allocating contexts, GPU features and prompt buffers…";
+        publish(); checkpoint();
+        auto sam = std::make_unique<fs::SamSegmenter>(); sam->loadEngines(encoder.toStdString(),decoder.toStdString());
+        checkpoint();
+        emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
+        sam_ = std::move(sam); state_.sam_ready = true;
         fs_ = std::move(next);
         state_.engine_ready = true;
         state_.engine = "Ready · 960 × 800 · " + QFileInfo(state_.engine_path).fileName();
-        state_.status = "FoundationStereo is ready. Import a capture directory or preview the cameras.";
+        state_.status = "FoundationStereo and SAM 2.1 are ready. Import a capture directory or preview the cameras.";
         if (source_ && source_->running()) {
             state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
             state_.status = liveStatus();
@@ -77,6 +95,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
     state_.has_pair = true; state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; state_.stage = 1;
     state_.live = false; latest_.reset();
+    ++state_.image_id; if (sam_) sam_->clearImage(); publish();
     emit images(image(frame_->left()), image(frame_->right()), image(frame_->rectified_left()), image(frame_->rectified_right()));
     state_.status = QString("Pair ready · %1 × %2 · rectified in %3 ms. Check epilines, then start reconstruction.")
         .arg(frame_->left().cols).arg(frame_->left().rows).arg(elapsed.elapsed());
@@ -227,6 +246,30 @@ void PipelineWorker::reconstruct(float minimum, float maximum) {
     state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
     emit log(state_.status);
 }
+void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
+                             const std::shared_ptr<std::atomic_uint64_t>& current_request) {
+    const auto current = [&] { return !cancel_->load() && current_request->load()==request_id && state_.image_id==image_id; };
+    if (!current()) return;
+    try {
+        if (!sam_ || !state_.sam_ready || !frame_ || state_.live) throw std::runtime_error("Freeze or import an image before drawing SAM prompts.");
+        if (prompts.empty()) return;
+        QElapsedTimer elapsed; elapsed.start();
+        const bool encode = !sam_->hasImage();
+        if (encode) sam_->setImage(frame_->rectified_left());
+        if (!current()) return;
+        const cv::Mat mask = sam_->predict(prompts);
+        if (!current()) return;
+        if (cv::countNonZero(mask)==0) {
+            emit maskReady(image_id,request_id,{},"No region found. Add a foreground point or adjust the box."); return;
+        }
+        const QString message = QString("SAM mask ready · score %1 · %2 ms · %3. Refine prompts or click Use mask.")
+            .arg(sam_->score(),0,'f',3).arg(elapsed.elapsed()).arg(encode ? "encoder + decoder" : "cached features + decoder");
+        emit maskReady(image_id,request_id,QImage(mask.data,mask.cols,mask.rows,mask.step,QImage::Format_Grayscale8).copy(),message);
+        emit log(message);
+    } catch (const std::exception& e) {
+        if (current()) emit maskReady(image_id,request_id,{},QString::fromUtf8(e.what()));
+    }
+}
 void PipelineWorker::shutdown() {
-    disconnectCameras(); fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
+    disconnectCameras(); sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }

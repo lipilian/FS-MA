@@ -42,6 +42,7 @@ endif()
 # Shared processing code for the CLI and future desktop application.
 add_library(fs_core STATIC
     src/inference/FS.cpp
+    src/inference/SamSegmenter.cpp
     src/inference/PostProcessing.cu
     src/core/Logger.cpp
     src/stereo/StereoFrame.cpp

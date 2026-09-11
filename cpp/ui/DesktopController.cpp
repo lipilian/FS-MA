@@ -56,7 +56,7 @@ DesktopController::DesktopController() : window_(std::make_unique<CalibrationWin
         }
         try {
             // The old worker has finished. Model initialization and inference now
-            // share this one pipeline worker and its FS instance for the session.
+            // share this pipeline worker and its FS / SAM instances for the session.
             pipeline_ = std::make_unique<PipelineController>(confirmed_, saved_path_, std::move(source_), camera_exposure_us_);
             splash_ = std::make_unique<InferenceSplashWindow>();
             connect(splash_.get(), &InferenceSplashWindow::retryRequested, this, &DesktopController::initializeInference);
@@ -77,7 +77,7 @@ DesktopController::DesktopController() : window_(std::make_unique<CalibrationWin
                 QApplication::quit();
             });
             splash_->show(); window_->allowClose(); window_.reset();
-            initializeInference(splash_->enginePath());
+            initializeInference(splash_->enginePath(),splash_->samEncoderPath(),splash_->samDecoderPath());
         } catch (const std::exception& e) {
             pipeline_.reset();
             if (source_) source_->stop();
@@ -89,9 +89,9 @@ DesktopController::DesktopController() : window_(std::make_unique<CalibrationWin
         }
     });
 }
-void DesktopController::initializeInference(const QString& engine_path) {
+void DesktopController::initializeInference(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
     if (cancelled_ || !splash_) return;
-    splash_->startLoading(); pipeline_->initialize(engine_path);
+    splash_->startLoading(); pipeline_->initialize(engine_path,sam_encoder,sam_decoder);
 }
 void DesktopController::openReconstruction() {
     if (reconstruction_ || cancelled_) return;

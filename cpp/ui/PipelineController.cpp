@@ -11,6 +11,7 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     connect(worker_, &PipelineWorker::images, this, &PipelineController::images);
     connect(worker_, &PipelineWorker::preview, this, &PipelineController::preview);
     connect(worker_, &PipelineWorker::depthImages, this, &PipelineController::depthImages);
+    connect(worker_, &PipelineWorker::maskReady, this, &PipelineController::maskReady);
     connect(worker_, &PipelineWorker::log, this, &PipelineController::log);
     connect(worker_, &PipelineWorker::actionFinished, this, [this] {
         const bool initialized = initializing_; initializing_ = false;
@@ -29,16 +30,25 @@ void PipelineController::submit(std::function<void(PipelineWorker&)> action) {
     auto* worker = worker_;
     QMetaObject::invokeMethod(worker, [worker, action = std::move(action)] { worker->execute(action); }, Qt::QueuedConnection);
 }
-void PipelineController::initialize(const QString& engine_path) {
+void PipelineController::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
     if (busy_ || stopping_) return;
     initializing_ = true;
-    submit([engine_path](auto& worker) { worker.initialize(engine_path); });
+    submit([engine_path,sam_encoder,sam_decoder](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder); });
 }
 void PipelineController::setPreviewRectified(bool enabled) {
     if (stopping_) return;
     auto* worker = worker_;
     // A display preference must not be dropped by the task busy guard.
     QMetaObject::invokeMethod(worker, [worker, enabled] { worker->setPreviewRectified(enabled); }, Qt::QueuedConnection);
+}
+quint64 PipelineController::requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts) {
+    const quint64 revision = mask_request_->fetch_add(1)+1;
+    if (stopping_ || prompts.empty()) return revision;
+    auto* worker = worker_; auto current = mask_request_;
+    QMetaObject::invokeMethod(worker,[worker,current,image_id,revision,prompts=std::move(prompts)] {
+        worker->segment(image_id,revision,prompts,current);
+    },Qt::QueuedConnection);
+    return revision;
 }
 void PipelineController::cancel() { cancel_->store(true); }
 void PipelineController::stop() {
