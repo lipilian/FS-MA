@@ -35,10 +35,7 @@ QImage displayImage(const cv::Mat& rgb) {
     cv::resize(rgb, small, {}, scale, scale, cv::INTER_AREA);
     return QImage(small.data, small.cols, small.rows, small.step, QImage::Format_RGB888).copy();
 }
-QString metrics(const cal::Quality& q) {
-    return QString("Left: %1 px   Right: %2 px\nStereo: %3 px")
-        .arg(q.left, 0, 'f', 3).arg(q.right, 0, 'f', 3).arg(q.stereo, 0, 'f', 3);
-}
+
 }
 CalibrationWorker::CalibrationWorker(SourceFactory factory, QObject* parent) : QObject(parent), source_factory_(std::move(factory)), timer_(new QTimer(this)), board_(cal::make_board(state_.board)) {
     if (!source_factory_) source_factory_ = [](double exposure_us) {
@@ -62,7 +59,7 @@ void CalibrationWorker::execute(const std::function<void(CalibrationWorker&)>& a
 }
 bool CalibrationWorker::ready() const {
     return state_.connected && !state_.busy && result_ && result_->image_size == image_size_ &&
-        result_->checked && result_->solve.stereo <= threshold_ && result_->check.stereo <= threshold_ &&
+        result_->checked && result_->solve.stereo <= cal::kQualityThresholdPx && result_->check.stereo <= cal::kQualityThresholdPx &&
         !state_.saved_path.isEmpty();
 }
 bool CalibrationWorker::reusable() const {
@@ -79,16 +76,8 @@ void CalibrationWorker::publish() {
             .arg(i + 1, 2, 10, QLatin1Char('0')).arg(s.left.ids.size()).arg(s.right.ids.size())
             .arg(cal::common_corners(s.left, s.right)).arg(cal::arrival_skew(s.images) / 1e6, 0, 'f', 1);
     }
-    state_.quality = "No calibration yet.\nCapture varied positions and tilts.";
-    if (result_) {
-        state_.quality = QString("SOLVE · %1 pairs\n%2\n\nINDEPENDENT CHECK\n%3\n\nGate: %4 px (provisional)")
-            .arg(result_->solve.pairs).arg(metrics(result_->solve))
-            .arg(result_->checked ? metrics(result_->check) : "Not checked in this connection.")
-            .arg(threshold_, 0, 'f', 2);
-        if (state_.can_reuse_saved) state_.quality += "\nSaved result available for reuse.";
-        if (result_->checked) state_.quality += (result_->solve.stereo <= threshold_ && result_->check.stereo <= threshold_)
-            ? (state_.saved_path.isEmpty() ? "\nPASS · save to finish" : "\nPASS · saved") : "\nABOVE THRESHOLD · collect better samples";
-    }
+    state_.solve_quality = result_ ? std::make_optional(result_->solve) : std::nullopt;
+    state_.check_quality = result_ && result_->checked ? std::make_optional(result_->check) : std::nullopt;
     emit stateChanged(state_);
 }
 void CalibrationWorker::invalidate() {
@@ -101,6 +90,7 @@ void CalibrationWorker::connectCameras(double exposure_us) {
     source_ = source_factory_(exposure_us);
     if (!source_) throw std::runtime_error("Camera source is unavailable");
     try { source_->start(); } catch (...) { source_->stop(); source_.reset(); throw; }
+    exposure_us_ = exposure_us;
     image_size_ = {}; latest_.reset();
     if (result_) result_->checked = false;
     state_.connected = true; state_.busy = false; state_.selected = -1;
@@ -144,7 +134,7 @@ void CalibrationWorker::compute() {
     state_.busy = true; state_.status = "Solving camera intrinsics and stereo extrinsics…"; publish();
     invalidate();
     auto result = cal::solve(state_.board, samples_);
-    result.threshold_px = threshold_;
+    result.threshold_px = cal::kQualityThresholdPx;
     result_ = std::move(result); buildMaps(); state_.busy = false;
     state_.status = "Calibration computed. Move the board to a new pose, then run an independent check.";
 }
@@ -163,12 +153,6 @@ void CalibrationWorker::deleteSample(int index) {
 void CalibrationWorker::setDisplay(bool detection, bool rectified) {
     detection_ = detection; rectified_ = rectified;
     selectSample(state_.selected);
-}
-void CalibrationWorker::setThreshold(double pixels) {
-    if (!std::isfinite(pixels) || pixels <= 0) throw std::runtime_error("Threshold must be positive");
-    if (threshold_ == pixels) return;
-    threshold_ = pixels;
-    if (result_) { result_->threshold_px = pixels; state_.saved_path.clear(); reusable_saved_ = false; }
 }
 void CalibrationWorker::buildMaps() {
     if (!result_) return;
@@ -273,8 +257,12 @@ void CalibrationWorker::restoreSavedCalibration() {
     state_.status = errors.isEmpty() ? "No saved calibration found. Connect cameras to create one."
         : "Saved calibration could not be loaded. Choose another file or recalibrate.\n" + errors.join("\n");
 }
-void CalibrationWorker::reuseSavedCalibration() {
+void CalibrationWorker::reuseSavedCalibration(std::optional<double> exposure_us) {
     if (!reusable()) throw std::runtime_error("No matching saved calibration is available to reuse");
+    if (!state_.connected && exposure_us) {
+        if (!std::isfinite(*exposure_us) || *exposure_us <= 0) throw std::runtime_error("Camera exposure must be positive.");
+        exposure_us_ = *exposure_us;
+    }
     // Explicit reuse is a separate route; it never pretends a fresh check occurred.
     completeSession();
 }
@@ -296,7 +284,7 @@ void CalibrationWorker::load(const QString& path) {
     if (!cal::same_board(loaded.board, state_.board)) throw std::runtime_error("Calibration board differs from applied board parameters");
     if (state_.connected && image_size_.area() > 0 && image_size_ != loaded.image_size)
         throw std::runtime_error("Calibration image size differs from current camera output");
-    loaded.threshold_px = threshold_;
+    loaded.threshold_px = cal::kQualityThresholdPx;
     invalidate(); result_ = std::move(loaded); samples_.clear(); state_.selected = -1;
     buildMaps(); state_.saved_path = QFileInfo(path).absoluteFilePath();
     state_.suggested_save_path = state_.saved_path; reusable_saved_ = true;
@@ -311,7 +299,7 @@ void CalibrationWorker::completeSession() {
     auto result = std::make_shared<const cal::SessionResult>(cal::clone(*result_));
     timer_->stop();
     state_.connected = false;
-    emit completed(std::move(result), state_.saved_path, SharedStereoSource(std::move(source_)));
+    emit completed(std::move(result), state_.saved_path, SharedStereoSource(std::move(source_)), exposure_us_);
 }
 void CalibrationWorker::shutdown() {
     shutting_down_ = true; disconnectCameras(); emit stopped();

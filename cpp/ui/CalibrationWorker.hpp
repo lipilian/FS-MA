@@ -15,7 +15,8 @@ struct CalibrationState {
     bool connected{false}, busy{false}, has_result{false}, can_finish{false}, can_reuse_saved{false};
     int candidates{0}, selected{-1};
     QStringList samples;
-    QString status{"Connect the stereo cameras to begin."}, quality{"No calibration yet."}, saved_path, suggested_save_path;
+    QString status{"Connect the stereo cameras to begin."}, saved_path, suggested_save_path;
+    std::optional<fs::calibration::Quality> solve_quality, check_quality;
 };
 using ConfirmedCalibration = std::shared_ptr<const fs::calibration::SessionResult>;
 Q_DECLARE_METATYPE(CalibrationState)
@@ -39,9 +40,8 @@ public:
     void selectSample(int index);
     void deleteSample(int index);
     void setDisplay(bool detect_corners, bool rectified);
-    void setThreshold(double pixels);
     void restoreSavedCalibration();
-    void reuseSavedCalibration();
+    void reuseSavedCalibration(std::optional<double> exposure_us = {});
     void save(const QString& path);
     void load(const QString& path);
     void finish();
@@ -51,7 +51,7 @@ signals:
     void preview(QImage left, QImage right, QString caption);
     void failed(QString message);
     void actionFinished();
-    void completed(ConfirmedCalibration result, QString path, SharedStereoSource source);
+    void completed(ConfirmedCalibration result, QString path, SharedStereoSource source, double exposure_us);
     void stopped();
 private:
     void completeSession();
@@ -64,6 +64,7 @@ private:
     bool reusable() const;
     CalibrationState state_;
     SourceFactory source_factory_;
+    double exposure_us_{SentechStereoOptions{}.exposure_us};
     std::unique_ptr<IStereoSource> source_;
     QTimer* timer_;
     QElapsedTimer capture_clock_, last_frame_clock_;
@@ -75,5 +76,4 @@ private:
     cv::Mat lx_, ly_, rx_, ry_;
     enum class Capture { None, Sample, Check } capture_{Capture::None};
     bool detection_{true}, rectified_{false}, shutting_down_{false}, reusable_saved_{false};
-    double threshold_{1.0};
 };

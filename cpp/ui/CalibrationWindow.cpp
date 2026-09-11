@@ -27,6 +27,31 @@ QLabel* label(const QString& text, QWidget* parent = nullptr) {
 QPushButton* button(const QString& text, const char* name) {
     auto* b = new QPushButton(text); b->setObjectName(name); b->setMinimumHeight(34); return b;
 }
+QString qualityMetrics(const fs::calibration::Quality& quality) {
+    const auto value = [](const QString& name, double rms) {
+        const auto color = rms <= fs::calibration::kQualityThresholdPx ? "#15803d" : "#dc2626";
+        return QString("<span style=\"color:%1\">%2: %3 px</span>")
+            .arg(color, name).arg(rms, 0, 'f', 3);
+    };
+    return value("Left", quality.left) + "<br>" + value("Right", quality.right) + "<br>" + value("Stereo", quality.stereo);
+}
+QString qualityText(const CalibrationState& state) {
+    const QString threshold = QString("<br><br>Stereo RMS gate: %1 px (fixed)")
+        .arg(fs::calibration::kQualityThresholdPx, 0, 'f', 2);
+    if (!state.solve_quality) return "No calibration yet.<br>Capture varied positions and tilts." + threshold;
+    QString text = QString("<b>SOLVE · %1 pairs</b><br>%2<br><br><b>INDEPENDENT CHECK</b><br>%3")
+        .arg(state.solve_quality->pairs).arg(qualityMetrics(*state.solve_quality))
+        .arg(state.check_quality ? qualityMetrics(*state.check_quality) : "Not checked in this connection.");
+    text += threshold;
+    if (state.can_reuse_saved) text += "<br>Saved result available for reuse.";
+    if (state.check_quality) {
+        const bool passed = state.solve_quality->stereo <= fs::calibration::kQualityThresholdPx &&
+                            state.check_quality->stereo <= fs::calibration::kQualityThresholdPx;
+        text += passed ? (state.saved_path.isEmpty() ? "<br>PASS · save to finish" : "<br>PASS · saved")
+                       : "<br>ABOVE THRESHOLD · collect better samples";
+    }
+    return text;
+}
 QDoubleSpinBox* decimal(double value, double maximum, const QString& suffix, int decimals = 2) {
     auto* s = new QDoubleSpinBox; s->setDecimals(decimals); s->setRange(0.001, maximum);
     s->setValue(value); s->setSuffix(suffix); return s;
@@ -89,10 +114,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     board_layout->addLayout(form); apply_ = button("Apply board parameters", "applyBoard"); board_layout->addWidget(apply_);
     board_layout->addWidget(label("Match the physical board. Applying a different board clears samples and calibration."));
     settings_layout->addWidget(board_group_);
-    auto* gate = new QGroupBox("Quality threshold"); auto* gate_layout = new QVBoxLayout(gate);
-    threshold_ = decimal(1, 10, " px"); threshold_->setMinimum(0.01); threshold_->setSingleStep(0.1); gate_layout->addWidget(threshold_);
-    gate_layout->addWidget(label("Provisional stereo RMS limit for both solve and independent check. This does not certify area accuracy."));
-    settings_layout->addWidget(gate); settings_layout->addStretch();
+    settings_layout->addStretch();
     auto* settings_scroll = new QScrollArea; settings_scroll->setWidgetResizable(true); settings_scroll->setFrameShape(QFrame::NoFrame);
     settings_scroll->setWidget(settings); settings_scroll->setMinimumWidth(270); split->addWidget(settings_scroll);
     auto* center = new QWidget; auto* center_layout = new QVBoxLayout(center); center_layout->setContentsMargins(8,0,8,0);
@@ -116,7 +138,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     samples_ = new QListWidget; samples_->setObjectName("samples"); history_layout->addWidget(samples_, 1);
     remove_ = button("Delete selected sample", "removeSample"); history_layout->addWidget(remove_);
     auto* quality_group = new QGroupBox("Calibration quality"); auto* ql = new QVBoxLayout(quality_group);
-    quality_ = label(""); quality_->setTextInteractionFlags(Qt::TextSelectableByMouse); ql->addWidget(quality_);
+    quality_ = label(""); quality_->setObjectName("calibrationQuality"); quality_->setTextFormat(Qt::RichText); quality_->setTextInteractionFlags(Qt::TextSelectableByMouse); ql->addWidget(quality_);
     history_layout->addWidget(quality_group); history->setMinimumWidth(250); split->addWidget(history);
     split->setSizes({285, 790, 290}); split->setStretchFactor(1, 1); outer->addWidget(split, 1);
     progress_ = new QProgressBar; progress_->setRange(0,5); progress_->setValue(0); progress_->setTextVisible(false); outer->addWidget(progress_);
@@ -150,7 +172,9 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     connect(check_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.capture(true); }); });
     connect(compute_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.compute(); }); });
     connect(cancel_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.cancelCapture(); }); });
-    connect(reuse_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.reuseSavedCalibration(); }); });
+    connect(reuse_, &QPushButton::clicked, this, [this] {
+        const double exposure = exposure_->value(); dispatch([exposure](auto& w) { w.reuseSavedCalibration(exposure); });
+    });
     connect(finish_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.finish(); }); });
     connect(live_, &QPushButton::clicked, this, [this] { dispatch([](auto& w) { w.selectSample(-1); }); });
     connect(remove_, &QPushButton::clicked, this, [this] {
@@ -164,9 +188,6 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
         dispatch([=](auto& w) { w.setDisplay(overlay, rectified); });
     };
     connect(overlay_, &QCheckBox::toggled, this, display); connect(rectified_, &QCheckBox::toggled, this, display);
-    connect(threshold_, &QDoubleSpinBox::editingFinished, this, [this] {
-        const double threshold = threshold_->value(); dispatch([threshold](auto& w) { w.setThreshold(threshold); });
-    });
     connect(save_, &QPushButton::clicked, this, [this] {
         const QString suggested = state_.suggested_save_path.isEmpty() ? "sentech_stereo_calibration.json" : state_.suggested_save_path;
         const QString path = QFileDialog::getSaveFileName(this, "Save calibration", suggested, "Calibration JSON (*.json)");
@@ -200,7 +221,7 @@ void CalibrationWindow::updateState(CalibrationState state) {
     if (current != state_.samples) { samples_->clear(); samples_->addItems(state_.samples); }
     samples_->setCurrentRow(state_.selected >= 0 ? state_.selected : -1);
     sample_count_->setText(QString("SAMPLES  ·  %1 / 20").arg(state_.samples.size()));
-    status_->setText(state_.status); quality_->setText(state_.quality);
+    status_->setText(state_.status); quality_->setText(qualityText(state_));
     saved_->setText(state_.saved_path.isEmpty() ? "Current calibration has not been saved." : "Saved: " + state_.saved_path);
     reuse_hint_->setText(state_.can_reuse_saved ? "Saved calibration loaded — you can skip this step.\n" + state_.saved_path : "");
     reuse_hint_->setVisible(state_.can_reuse_saved);
@@ -216,7 +237,7 @@ void CalibrationWindow::refreshActions() {
     const bool dirty = !fs::calibration::same_board(boardFromForm(), state_.board);
     connect_->setEnabled(idle); connect_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     exposure_->setEnabled(idle && !state_.connected); board_group_->setEnabled(idle); apply_->setEnabled(idle && dirty);
-    threshold_->setEnabled(idle); load_->setEnabled(idle && !dirty); save_->setEnabled(idle && !dirty && state_.has_result);
+    load_->setEnabled(idle && !dirty); save_->setEnabled(idle && !dirty && state_.has_result);
     capture_->setEnabled(idle && !dirty && state_.connected && state_.samples.size() < 20);
     compute_->setEnabled(idle && !dirty && state_.samples.size() >= 3);
     check_->setEnabled(idle && !dirty && state_.connected && state_.has_result);

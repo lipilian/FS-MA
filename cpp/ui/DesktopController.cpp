@@ -43,9 +43,10 @@ DesktopController::DesktopController() : window_(std::make_unique<CalibrationWin
         cancelled_ = true; calibration_.stop();
     });
     connect(&calibration_, &CalibrationController::completed, this,
-        [this](ConfirmedCalibration result, QString path, SharedStereoSource source) {
+        [this](ConfirmedCalibration result, QString path, SharedStereoSource source, double exposure_us) {
         if (cancelled_ || confirmed_) { if (source) source->stop(); return; }
         confirmed_ = std::move(result); saved_path_ = std::move(path); source_ = std::move(source);
+        camera_exposure_us_ = exposure_us;
         window_->setEnabled(false); calibration_.stop();
     });
     connect(&calibration_, &CalibrationController::stopped, this, [this] {
@@ -56,7 +57,7 @@ DesktopController::DesktopController() : window_(std::make_unique<CalibrationWin
         try {
             // The old worker has finished. Model initialization and inference now
             // share this one pipeline worker and its FS instance for the session.
-            pipeline_ = std::make_unique<PipelineController>(confirmed_, saved_path_, std::move(source_));
+            pipeline_ = std::make_unique<PipelineController>(confirmed_, saved_path_, std::move(source_), camera_exposure_us_);
             splash_ = std::make_unique<InferenceSplashWindow>();
             connect(splash_.get(), &InferenceSplashWindow::retryRequested, this, &DesktopController::initializeInference);
             connect(splash_.get(), &InferenceSplashWindow::closeRequested, this, [this] {

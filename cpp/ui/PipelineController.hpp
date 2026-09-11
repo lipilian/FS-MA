@@ -5,17 +5,19 @@
 class PipelineController : public QObject {
     Q_OBJECT
 public:
-    PipelineController(ConfirmedCalibration calibration, QString path, SharedStereoSource source, QObject* parent = nullptr);
+    PipelineController(ConfirmedCalibration calibration, QString path, SharedStereoSource source,
+                       double exposure_us = SentechStereoOptions{}.exposure_us, QObject* parent = nullptr);
     ~PipelineController() override;
     void submit(std::function<void(PipelineWorker&)> action);
     void initialize(const QString& engine_path);
     const PipelineState& state() const { return state_; }
+    void setPreviewRectified(bool enabled);
     void cancel();
     void stop();
 signals:
     void stateChanged(PipelineState state);
     void images(QImage raw_left, QImage raw_right, QImage rectified_left, QImage rectified_right);
-    void preview(QImage left, QImage right);
+    void preview(QImage left, QImage right, bool rectified);
     void log(QString message);
     void busyChanged(bool busy);
     void initializationFinished(bool success, QString message);

@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -17,9 +18,9 @@ QImage thumbnail(const cv::Mat& rgb) {
 }
 }
 PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, SharedStereoSource source,
-                               std::shared_ptr<std::atomic_bool> cancel)
+                               std::shared_ptr<std::atomic_bool> cancel, double exposure_us)
     : confirmed_(std::move(calibration)), confirmed_path_(std::move(path)), source_(std::move(source)),
-      cancel_(std::move(cancel)), timer_(new QTimer(this)) {
+      exposure_us_(exposure_us), cancel_(std::move(cancel)), timer_(new QTimer(this)) {
     state_.calibration = confirmed_path_;
     timer_->setInterval(100);
     connect(timer_, &QTimer::timeout, this, &PipelineWorker::poll);
@@ -60,7 +61,7 @@ void PipelineWorker::initialize(const QString& engine_path) {
         state_.status = "FoundationStereo is ready. Import a capture directory or preview the cameras.";
         if (source_ && source_->running()) {
             state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
-            state_.status = "FoundationStereo is ready. Camera session received; capture to freeze a stereo pair.";
+            state_.status = liveStatus();
         }
         emit log(QString("FoundationStereo initialized in %1 ms · engine, context, GPU I/O / XYZ, pinned host and CPU resize buffers ready.").arg(elapsed.elapsed()));
         emit log("Confirmed calibration: " + confirmed_path_);
@@ -111,11 +112,11 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     }
     checkpoint(); prepare(std::move(frame), dir.absolutePath(), description);
 }
-void PipelineWorker::connectCameras(double exposure_us) {
+void PipelineWorker::connectCameras() {
     if (state_.connected) { setLive(true); return; }
     if (source_) { source_->stop(); source_.reset(); }
     SentechStereoOptions options;
-    options.left = confirmed_->left_serial; options.right = confirmed_->right_serial; options.exposure_us = exposure_us;
+    options.left = confirmed_->left_serial; options.right = confirmed_->right_serial; options.exposure_us = exposure_us_;
     auto next = std::make_shared<SentechStereoSource>(options);
     state_.status = "Connecting stereo cameras…"; publish();
     next->start(); source_ = std::move(next); state_.connected = true; setLive(true); timer_->start();
@@ -129,8 +130,41 @@ void PipelineWorker::disconnectCameras() {
 void PipelineWorker::setLive(bool enabled) {
     if (enabled && (!source_ || !source_->running())) throw std::runtime_error("Cameras are not connected.");
     state_.live = enabled; latest_.reset();
-    if (enabled) { last_pair_.restart(); state_.status = "Live raw RGB · capture to freeze a stereo pair. Independent streams; hold the subject still."; }
+    if (enabled) { last_pair_.restart(); state_.status = liveStatus(); }
     else state_.status = "Preview paused. Showing the frozen input, if available.";
+}
+QString PipelineWorker::liveStatus() const {
+    return QString("Live %1 · capture to freeze a stereo pair. Independent streams; hold the subject still.")
+        .arg(preview_rectified_ ? "rectified RGB" : "raw RGB");
+}
+void PipelineWorker::setPreviewRectified(bool enabled) {
+    preview_rectified_ = enabled;
+    if (state_.live) { state_.status = liveStatus(); publish(); }
+}
+void PipelineWorker::emitPreview() {
+    if (!preview_rectified_) {
+        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb), false);
+        return;
+    }
+    if (preview_left_map_x_.empty()) {
+        // Confirmed calibration and camera dimensions are fixed for this worker.
+        // Match StereoFrame::rectify(), caching maps across frames and reconnects.
+        const auto& c = confirmed_->calibration;
+        cv::Mat r1, r2, p1, p2, q, lx, ly, rx, ry;
+        cv::stereoRectify(c.left_camera_matrix, c.left_distortion,
+                          c.right_camera_matrix, c.right_distortion, confirmed_->image_size,
+                          c.right_to_left_rotation, c.right_to_left_translation,
+                          r1, r2, p1, p2, q, cv::CALIB_ZERO_DISPARITY);
+        cv::initUndistortRectifyMap(c.left_camera_matrix, c.left_distortion, r1, p1,
+                                  confirmed_->image_size, CV_32FC1, lx, ly);
+        cv::initUndistortRectifyMap(c.right_camera_matrix, c.right_distortion, r2, p2,
+                                  confirmed_->image_size, CV_32FC1, rx, ry);
+        preview_left_map_x_ = std::move(lx); preview_left_map_y_ = std::move(ly);
+        preview_right_map_x_ = std::move(rx); preview_right_map_y_ = std::move(ry);
+    }
+    cv::remap(latest_->left.rgb, preview_left_, preview_left_map_x_, preview_left_map_y_, cv::INTER_LINEAR);
+    cv::remap(latest_->right.rgb, preview_right_, preview_right_map_x_, preview_right_map_y_, cv::INTER_LINEAR);
+    emit preview(thumbnail(preview_left_), thumbnail(preview_right_), true);
 }
 void PipelineWorker::poll() {
     if (!state_.live) return;
@@ -143,7 +177,7 @@ void PipelineWorker::poll() {
         if (pair->left.rgb.size() != confirmed_->image_size || pair->right.rgb.size() != confirmed_->image_size)
             throw std::runtime_error("Camera image dimensions do not match the confirmed calibration.");
         last_pair_.restart(); latest_ = std::move(pair);
-        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb));
+        emitPreview();
     } catch (const std::exception& e) {
         disconnectCameras(); state_.status = QString::fromUtf8(e.what()); publish(); emit log(state_.status);
     }

@@ -30,7 +30,7 @@ private:
     CalibrationState state_;
     bool awaiting_{false}, closing_{false}, allow_close_{false};
     QSpinBox *squares_x_, *squares_y_;
-    QDoubleSpinBox *square_mm_, *marker_mm_, *exposure_, *threshold_;
+    QDoubleSpinBox *square_mm_, *marker_mm_, *exposure_;
     QComboBox* dictionary_;
     QGroupBox* board_group_;
     QPushButton *connect_, *apply_, *capture_, *compute_, *check_, *save_, *load_, *finish_, *cancel_, *remove_, *live_, *reuse_;
