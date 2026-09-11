@@ -4,7 +4,7 @@
 #include <atomic>
 
 struct PipelineState {
-    bool connected{false}, live{false}, has_pair{false}, has_rectified{false}, gpu_ready{false}, engine_ready{false};
+    bool connected{false}, live{false}, has_pair{false}, has_rectified{false}, gpu_ready{false}, depth_ready{false}, engine_ready{false};
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
     QString engine{"Not initialized"}, engine_path;
     int stage{0};
@@ -31,6 +31,7 @@ signals:
     void stateChanged(PipelineState state);
     void images(QImage raw_left, QImage raw_right, QImage rectified_left, QImage rectified_right);
     void preview(QImage left, QImage right, bool rectified);
+    void depthImages(QImage rectified_left, QImage depth_rgb, float minimum, float maximum);
     void log(QString message);
     void actionFinished();
     void stopped();

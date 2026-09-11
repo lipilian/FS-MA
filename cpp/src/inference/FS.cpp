@@ -362,6 +362,17 @@ void FS::compute_xyz_map(float min_depth_m, float max_depth_m) {
     synchronize();
 }
 
+cv::Mat FS::download_xyz_map() {
+    if (!isEngineLoaded() || !xyz_map_device_) {
+        throw std::logic_error("loadEngine and compute_xyz_map must complete before downloading XYZ");
+    }
+    cv::Mat xyz(kTensorRtInputHeight, kTensorRtInputWidth, CV_32FC3);
+    check_cuda(cudaMemcpyAsync(xyz.data, xyz_map_device_.get(), xyz.total() * xyz.elemSize(),
+                               cudaMemcpyDeviceToHost, stream_), "failed to download XYZ map");
+    synchronize();
+    return xyz;
+}
+
 void FS::synchronize() {
     check_cuda(cudaStreamSynchronize(stream_), "failed to complete FS CUDA work");
 }

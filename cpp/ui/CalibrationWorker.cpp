@@ -86,7 +86,7 @@ void CalibrationWorker::invalidate() {
 }
 void CalibrationWorker::connectCameras(double exposure_us) {
     if (state_.connected) return;
-    state_.busy = true; state_.status = "Opening left 21LJ530 and right 21LJ548…"; publish();
+    state_.busy = true; state_.status = "Opening left 21LJ548 and right 21LJ530…"; publish();
     source_ = source_factory_(exposure_us);
     if (!source_) throw std::runtime_error("Camera source is unavailable");
     try { source_->start(); } catch (...) { source_->stop(); source_.reset(); throw; }
@@ -279,7 +279,7 @@ void CalibrationWorker::save(const QString& path) {
 }
 void CalibrationWorker::load(const QString& path) {
     auto loaded = cal::load(path.toStdString());
-    if (loaded.left_serial != "21LJ530" || loaded.right_serial != "21LJ548")
+    if (loaded.left_serial != "21LJ548" || loaded.right_serial != "21LJ530")
         throw std::runtime_error("Calibration camera identities do not match the configured left/right cameras");
     if (!cal::same_board(loaded.board, state_.board)) throw std::runtime_error("Calibration board differs from applied board parameters");
     if (state_.connected && image_size_.area() > 0 && image_size_ != loaded.image_size)

@@ -63,9 +63,14 @@ public:
      * and within [min_depth_m, max_depth_m], inclusive. Defaults to 0 < Z <= 1 m.
      * Always excludes pixels with u < disparity.
      * May be repeated with different thresholds without another inference.
-     * Selection-mask upload and CPU result access are not exposed yet.
+     * Selection-mask upload is not exposed yet.
      */
     void compute_xyz_map(float min_depth_m = 0.0F, float max_depth_m = 1.0F);
+
+    /** Download the last computed XYZ map as an owned CV_32FC3 matrix (800 rows × 960 columns, metres).
+     * Call compute_xyz_map first. Completes the transfer before returning.
+     */
+    cv::Mat download_xyz_map();
 
     /** Wait for queued GPU work and report asynchronous execution errors. */
     void synchronize();

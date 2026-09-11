@@ -39,7 +39,7 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
 }
 void PipelineWorker::initialize(const QString& engine_path) {
     // The same worker retains this instance for every subsequent reconstruction.
-    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false;
+    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false;
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
     fs_.reset();
     QElapsedTimer elapsed; elapsed.start();
@@ -75,7 +75,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     frame->rectify(); checkpoint();
     // Commit together only after validation and rectification succeed. Failed imports retain the previous input.
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
-    state_.has_pair = true; state_.has_rectified = true; state_.gpu_ready = false; state_.stage = 1;
+    state_.has_pair = true; state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; state_.stage = 1;
     state_.live = false; latest_.reset();
     emit images(image(frame_->left()), image(frame_->right()), image(frame_->rectified_left()), image(frame_->rectified_right()));
     state_.status = QString("Pair ready · %1 × %2 · rectified in %3 ms. Check epilines, then start reconstruction.")
@@ -197,7 +197,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum) {
     if (!frame_ || state_.live) throw std::runtime_error("Import or freeze a stereo pair before reconstruction.");
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum < 0 || maximum <= minimum)
         throw std::runtime_error("Depth range must satisfy 0 ≤ minimum < maximum (metres).");
-    state_.gpu_ready = false; state_.stage = 1; publish();
+    state_.gpu_ready = false; state_.depth_ready = false; state_.stage = 1; publish();
     checkpoint(); state_.status = "Running FoundationStereo inference…"; publish();
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
@@ -207,7 +207,24 @@ void PipelineWorker::reconstruct(float minimum, float maximum) {
     checkpoint(); state_.status = "Computing XYZ on GPU…"; publish(); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint(); state_.stage = 3; state_.gpu_ready = true;
     emit log(QString("GPU XYZ: %1 ms · depth %2–%3 m").arg(elapsed.elapsed()).arg(minimum).arg(maximum));
-    state_.status = "GPU XYZ complete. CPU download, depth map, VTK, mesh and area are pending; no 3D or area result is available yet.";
+    state_.status = "Preparing depth display…"; publish(); elapsed.restart();
+    const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();
+    cv::Mat depth, indices, depth_rgb, model_left;
+    cv::extractChannel(xyz, depth, 2);
+    // Fixed metric range from this run, never per-image min/max normalization.
+    depth.convertTo(indices, CV_8U, 255.0 / (maximum - minimum), -255.0 * minimum / (maximum - minimum));
+    cv::applyColorMap(indices, depth_rgb, cv::COLORMAP_JET);
+    const cv::Mat valid = (depth > 0.0F) & (depth >= minimum) & (depth <= maximum);
+    depth_rgb.setTo(cv::Scalar::all(0), ~valid);
+    cv::cvtColor(depth_rgb, depth_rgb, cv::COLOR_BGR2RGB);
+    // Same dimensions and interpolation as FS::prepare_stereo_images().
+    cv::resize(frame_->rectified_left(), model_left,
+               cv::Size(FS::kTensorRtInputWidth, FS::kTensorRtInputHeight), 0.0, 0.0, cv::INTER_LINEAR);
+    checkpoint();
+    state_.depth_ready = true; state_.stage = 4;
+    emit depthImages(image(model_left), image(depth_rgb), minimum, maximum);
+    emit log(QString("Depth display: %1 ms · Jet %2–%3 m").arg(elapsed.elapsed()).arg(minimum).arg(maximum));
+    state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
     emit log(state_.status);
 }
 void PipelineWorker::shutdown() {

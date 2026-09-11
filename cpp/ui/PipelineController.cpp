@@ -10,6 +10,7 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     });
     connect(worker_, &PipelineWorker::images, this, &PipelineController::images);
     connect(worker_, &PipelineWorker::preview, this, &PipelineController::preview);
+    connect(worker_, &PipelineWorker::depthImages, this, &PipelineController::depthImages);
     connect(worker_, &PipelineWorker::log, this, &PipelineController::log);
     connect(worker_, &PipelineWorker::actionFinished, this, [this] {
         const bool initialized = initializing_; initializing_ = false;
