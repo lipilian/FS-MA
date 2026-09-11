@@ -36,20 +36,17 @@ QString qualityMetrics(const fs::calibration::Quality& quality) {
     return value("Left", quality.left) + "<br>" + value("Right", quality.right) + "<br>" + value("Stereo", quality.stereo);
 }
 QString qualityText(const CalibrationState& state) {
-    const QString threshold = QString("<br><br>Stereo RMS gate: %1 px (fixed)")
+    const QString threshold = QString("<br><br>Solve stereo RMS gate: %1 px (fixed)")
         .arg(fs::calibration::kQualityThresholdPx, 0, 'f', 2);
     if (!state.solve_quality) return "No calibration yet.<br>Capture varied positions and tilts." + threshold;
-    QString text = QString("<b>SOLVE · %1 pairs</b><br>%2<br><br><b>INDEPENDENT CHECK</b><br>%3")
+    QString text = QString("<b>SOLVE · %1 pairs</b><br>%2<br><br><b>INDEPENDENT CHECK · OPTIONAL</b><br>%3")
         .arg(state.solve_quality->pairs).arg(qualityMetrics(*state.solve_quality))
-        .arg(state.check_quality ? qualityMetrics(*state.check_quality) : "Not checked in this connection.");
+        .arg(state.check_quality ? qualityMetrics(*state.check_quality) : "Not checked · optional.");
     text += threshold;
     if (state.can_reuse_saved) text += "<br>Saved result available for reuse.";
-    if (state.check_quality) {
-        const bool passed = state.solve_quality->stereo <= fs::calibration::kQualityThresholdPx &&
-                            state.check_quality->stereo <= fs::calibration::kQualityThresholdPx;
-        text += passed ? (state.saved_path.isEmpty() ? "<br>PASS · save to finish" : "<br>PASS · saved")
-                       : "<br>ABOVE THRESHOLD · collect better samples";
-    }
+    const bool passed = state.solve_quality->stereo <= fs::calibration::kQualityThresholdPx;
+    text += passed ? (state.saved_path.isEmpty() ? "<br>SOLVE PASS · save to finish" : "<br>SOLVE PASS · saved")
+                   : "<br>SOLVE ABOVE THRESHOLD · collect better samples";
     return text;
 }
 QDoubleSpinBox* decimal(double value, double maximum, const QString& suffix, int decimals = 2) {
@@ -130,6 +127,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     caption_ = label("No camera frames yet."); caption_->setMinimumHeight(45); center_layout->addWidget(caption_);
     auto* actions = new QHBoxLayout;
     capture_ = button("Capture sample", "capture"); compute_ = button("Compute", "compute"); check_ = button("Check · new pose", "check");
+    check_->setToolTip("Optional independent check. Finish uses solve stereo RMS and a saved result.");
     actions->addWidget(capture_); actions->addWidget(compute_); actions->addWidget(check_); center_layout->addLayout(actions);
     center_layout->addWidget(label("At least 3 valid pairs are needed to solve. Use more varied poses and cover the image; 3 pairs alone do not ensure a good calibration."));
     split->addWidget(center);

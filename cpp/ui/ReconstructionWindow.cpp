@@ -103,7 +103,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     layout->addWidget(label(QString("Confirmed camera calibration\nL %1 · R %2\n%3 × %4 · %5")
         .arg(QString::fromStdString(calibration->left_serial), QString::fromStdString(calibration->right_serial))
         .arg(calibration->image_size.width).arg(calibration->image_size.height)
-        .arg(calibration->checked ? "Fresh check passed" : "Saved calibration reused")));
+        .arg(calibration->checked ? "Independent check performed" : "No independent check (optional)")));
     settings_layout->addWidget(input_group);
     auto* depth = group("Depth range", layout); auto* form = new QFormLayout;
     minimum_ = decimal(0,0,1000," m"); maximum_ = decimal(1,0.001,1000," m"); minimum_->setObjectName("minimumDepth"); maximum_->setObjectName("maximumDepth");
@@ -119,7 +119,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     tabs_ = new QTabWidget; tabs_->setObjectName("workspaceTabs");
     auto* stereo = new QWidget; auto* stereo_layout = new QVBoxLayout(stereo);
     auto* view_controls = new QHBoxLayout; rectified_ = new QCheckBox("Rectified"); rectified_->setObjectName("rectified"); rectified_->setChecked(true);
-    epilines_ = new QCheckBox("Epipolar guides"); epilines_->setObjectName("epipolarGuides"); epilines_->setChecked(true);
+    epilines_ = new QCheckBox("Epipolar guides"); epilines_->setObjectName("epipolarGuides"); epilines_->setChecked(false);
     view_controls->addWidget(rectified_); view_controls->addWidget(epilines_); view_controls->addStretch(); stereo_layout->addLayout(view_controls);
     auto* views = new QSplitter; left_ = new StereoImageView("LEFT"); right_ = new StereoImageView("RIGHT");
     left_->setEmptyText("Import a capture directory\nor connect cameras and capture a pair"); right_->setEmptyText("The matching right image\nwill appear here");
