@@ -1,6 +1,6 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后融合有效视差筛选、深度阈值和 XYZ 计算的 CUDA kernel，以及 FS/CLI 接入；CPU 下载和深度 colormap 展示仍待实现。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 标定和 reconstruction window 已实现顺序切换；第二窗口已接入文件导入、相机预览/冻结、双目校正、真实 FS 推理和 GPU XYZ，以及校正左图多边形编辑和 mask 导出。CPU 下载、深度图、VTK、mesh、面积和 SAM 仍待接入，界面保留明确的 pending 入口。真实标定板精度验收待进行。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后融合有效视差筛选、深度阈值和 XYZ 计算的 CUDA kernel，以及 FS/CLI 接入；已接入独立持有的 XYZ CPU 下载和 Qt Jet 深度图展示。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 标定和 reconstruction window 已实现顺序切换；第二窗口已接入文件导入、相机预览/冻结、双目校正、真实 FS 推理和 GPU XYZ，以及校正左图多边形编辑和 mask 导出。VTK、mesh、面积和 SAM 仍待接入，界面保留明确的 pending 入口。真实标定板精度验收待进行。
 
 文档维护约定：后续统一维护 `docs/` 下的 HTML 和本 TODO；功能与操作记录放在 `docs/index.html`，构建、代码结构与接口说明放在 `docs/code_structure.html`。
 
@@ -10,7 +10,7 @@
 - 技术路线：Qt 6 Widgets + VTK + 现有 C++ FoundationStereo TensorRT engine。
 - Qt 应用由两个独立的主窗口顺序组成：窗口 1 专门完成 calibration，正常完成后才能创建并进入窗口 2；窗口 2 为下文的重建、3D 浏览和面积测量工作台。
 - 当前实现支持文件导入或 Sentech 双目相机采集，可从已有 JSON 读取标定；Qt 窗口 1 已新增 ChArUco 标定求解、独立检查和保存。
-- 相机输入：左 STC-MCS500U3V(21LJ530)、右 STC-MCS500U3V(21LJ548)；已连接并验证单次拍摄和关闭后重新连接。采用独立连续流，尚未实现硬件同步。
+- 相机输入：按用户纠正，左右绑定改为左 STC-MCS500U3V(21LJ548)、右 STC-MCS500U3V(21LJ530)。旧顺序标定文件不再通过桌面的身份校验，需按新顺序重新标定；新绑定的实体画面仍待现场确认。此前已验证单次拍摄和关闭后重新连接。采用独立连续流，尚未实现硬件同步。
 - 测量交互：在校正后的左图编辑 2D mask，联动 3D 点云、mesh 和曲面面积。
 - 第一版默认支持一个无孔多边形区域；包含专用标定窗口，计划加入 SAM 2.1 Hiera Base+ 提示式辅助选区；不包含无提示全自动分割、连续实时重建和多视角融合。
 - Python 保留作为算法实验和结果对照；实际应用以 C++ 为主。
@@ -228,11 +228,12 @@ FS_Engine/
 - [x] 将现有共用代码整理成 `fs_core`，保留 GWC 插件和 engine builder 的独立目标。
 - [x] 按职责迁移 FS、StereoFrame 等代码并更新 include 和 CMake。
 - [x] 增加图像及标定的内存输入接口。
-- [ ] 增加原始视差及 XYZ 的 CPU 读取接口，返回独立持有的 `CV_32FC1` / `CV_32FC3` 数据，并保证下载完成和数据生命周期。
-- [ ] 从 XYZ 提取 Z 通道，使用固定米制深度范围生成 colormap，无效点显示黑色；先在 CLI 保存 PNG，再接入 Qt 展示。原始 disparity 可另行生成伪彩图。
+- [x] 增加 XYZ 的 CPU 读取接口，返回独立持有的 `CV_32FC3` 数据，并保证下载完成和数据生命周期。
+- [ ] 增加原始视差的 CPU 读取接口，返回独立持有的 `CV_32FC1` 数据。
+- [x] 从 XYZ 提取 Z 通道，使用本次运行预设的米制深度范围生成 Jet colormap，无效点显示黑色；已直接接入 Qt 展示。CLI 深度 PNG 导出和原始 disparity 伪彩图仍未实现。
 - [x] 验证 CLI 普通及 `--measure` 十次推理后均可完成融合 XYZ 计算。
 
-**当前里程碑：有效视差筛选、深度阈值和 XYZ 计算已融合完成，FS/CLI 已接入。** 参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及 `postprocess_disparity_gpu()`，保留原始 disparity，不再就地清零视差。下一步是 CPU 下载与深度 colormap；邻域去噪、mesh 和面积仍在后续阶段，阶段 1 尚未全部完成。
+**当前里程碑：有效视差筛选、深度阈值和 XYZ 计算已融合完成，FS/CLI 已接入。** 参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及 `postprocess_disparity_gpu()`，保留原始 disparity，不再就地清零视差。XYZ CPU 下载与 Qt Jet 深度图已完成；原始视差下载、邻域去噪、mesh 和面积仍在后续阶段，阶段 1 尚未全部完成。
 
 - [x] 在 `PostProcessing.hpp` / `PostProcessing.cu` 中使用 `compute_xyz_map()` 替代原 `filter_disparity()`，一个 kernel 完成筛选、深度判断和 XYZ 计算。
 - [x] FS 分配并复用 `xyz_map_device_`：连续 FP32 `[800][960][3]`，按 X,Y,Z 交错排列，单位米，占 9,216,000 字节；原始视差不变，无额外筛选视差或有效掩码缓冲区。
@@ -318,8 +319,10 @@ cmake --build cpp/build --target fs_gui --parallel
 - Stereo inspection 支持原图/校正图与水平辅助线；Region measurement 提供单个无孔多边形，点击添加、Enter/首顶点/右键闭合、拖动顶点、Backspace 撤销、Escape 取消，拒绝自交和退化多边形。切换输入会清空旧选区。
 - 二值 mask 按完整校正左图坐标导出 PNG；缩放窗口不改变顶点坐标。尚未上传到推理网格，也不会修改 GPU XYZ、点云或面积。
 - Engine 由 splash 自动尝试默认路径，失败时可选择其他文件重试或退出。创建 FS、加载 engine/context 与缓冲区分配都在 `PipelineWorker` 的 QThread 完成；GPU 同步检查成功后，controller 交付就绪状态再创建工作台。无 engine/GPU 时停留在 splash，不打开未就绪的 reconstruction window。
-- 工作台移除 FoundationStereo engine 信息块，后续推理复用 splash 已准备的同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程到 GPU XYZ（米制深度范围）结束，后续几何功能仍标明待接入。
-- Depth map、3D browser、邻域过滤、mesh/线框、面积/点数/三角形、SAM 点/框提示、PLY/测量报告/结果包均保留位置和 pending 状态；不生成虚假数值。
+- 工作台移除 FoundationStereo engine 信息块，后续推理复用 splash 已准备的同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程包括 GPU XYZ、CPU 下载和固定米制范围的 Jet 深度图，后续几何功能仍标明待接入。
+- `Region measurement` 位于第二个 tab，`Depth map` 位于第三个。Start reconstruction 完成后自动显示校正左图和 Jet 深度图，均为 960×800（宽×高）；左图使用与模型输入一致的线性缩放。Jet 使用本次运行的 Minimum / Maximum（米），无效及超范围点为黑色，标签保留本次范围；修改设置在下次运行生效。重新计算或成功换图会清空旧深度结果，导入失败保留原结果。顶部移除 Stop，Capture pair 与 Start reconstruction 放在最右侧。
+- 深度图验证：Release 全目标构建通过；临时 Qt offscreen + 真实 `data/Volunteer2_lower/0` 推理验证两张图均为 960×800，左图与模型网格校正 RGB 逐像素一致，Jet 与独立 FP32 深度参考逐像素一致（0–1 m 内 430654 个有效点），0.2–0.3 m 的空范围全黑。覆盖计算完成自动切页、图例保留本次范围、重算/换图清空旧结果、失败导入保留结果、选区跳转及 CPU 下载独立持有。测试及界面截图保存在 `/tmp`。
+- 3D browser、邻域过滤、mesh/线框、面积/点数/三角形、SAM 点/框提示、PLY/测量报告/结果包均保留位置和 pending 状态；不生成虚假数值。
 - 验证：Release 全部目标构建通过；临时 Qt offscreen 检查实际 Desktop 的 Skip → 唯一重建窗口 → 关闭，以及普通关闭标定不跳转。真实 `data/Volunteer2_lower/0` 校正与 CLI 逐像素一致，engine 推理和 GPU XYZ 成功，事件循环保持响应；覆盖导入失败、engine 错误、深度输入、取消、换图失效、多边形坐标/自交回退/导出。临时回放源验证标定 worker 发出同一个运行中的相机源、线程结束后交接、pipeline 不重复 start、预览、拍摄冻结与断开；真实推理中取消和关闭均等待安全边界完成。测试保留在 `/tmp`，未新增仓库测试目标；真实设备交接及物理拔插仍需现场验收。
 
 - Splash 验证：Release 全部目标构建通过；实际 Qt 顺序切换、缺少/损坏 engine、无 GPU、失败后换路径重试、加载中取消、标定取消均通过临时 offscreen 检查。诊断确认 `loadEngine()` 返回前 GPU/pinned host/CPU resize 缓冲区存在，首次输入预处理复用地址；临时 engine 软链接在加载后移除，仍连续完成两次真实 FS/XYZ 推理，初始化日志只出现一次。回放相机保持同一源，预加载期间 GUI 事件循环响应正常；未新增仓库测试目标。

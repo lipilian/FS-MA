@@ -126,13 +126,22 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     views->addWidget(left_); views->addWidget(right_); stereo_layout->addWidget(views,1);
     stereo_layout->addWidget(label("Rectified applies to live preview and captured pairs. Enable Epipolar guides to compare horizontal alignment."));
     tabs_->addTab(stereo,"Stereo inspection");
-    depth_status_ = label("Depth map · pending\n\nGPU XYZ exists in the backend. CPU download and a fixed-range depth colormap still need to be connected.");
-    depth_status_->setObjectName("scene"); depth_status_->setAlignment(Qt::AlignCenter); tabs_->addTab(depth_status_,"Depth map");
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
     region_layout->addWidget(label("Full-resolution rectified-left coordinates. The current GPU run processes the full image; selection-to-geometry integration is pending."));
     tabs_->addTab(region,"Region measurement");
+    auto* depth_page = new QWidget; auto* depth_layout = new QVBoxLayout(depth_page);
+    auto* depth_views = new QSplitter;
+    depth_left_ = new StereoImageView("RECTIFIED LEFT · 960 × 800"); depth_left_->setObjectName("depthLeft");
+    depth_map_ = new StereoImageView("DEPTH · JET · 960 × 800"); depth_map_->setObjectName("depthMap");
+    for (auto* view : {depth_left_, depth_map_}) {
+        view->setEmptyText("Capture or import a pair, then\nclick Start reconstruction"); depth_views->addWidget(view);
+    }
+    depth_layout->addWidget(depth_views, 1);
+    depth_status_ = label("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
+    depth_status_->setObjectName("depthRange"); depth_layout->addWidget(depth_status_);
+    tabs_->addTab(depth_page,"Depth map");
     auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
     auto* render = new QComboBox; render->addItems({"Point cloud", "Mesh", "Wireframe"}); render->setEnabled(false);
     auto* color = new QComboBox; color->addItems({"RGB colour", "Depth colour"}); color->setEnabled(false);
@@ -163,7 +172,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     measurement_layout->addWidget(exports); measurement_layout->addStretch(); split->addWidget(scrollPanel(measurement,260));
     split->setSizes({290,890,280}); split->setStretchFactor(1,1); outer->addWidget(split,1);
     steps_ = label(""); outer->addWidget(steps_);
-    progress_ = new QProgressBar; progress_->setRange(0,3); progress_->setValue(0); progress_->setTextVisible(false); outer->addWidget(progress_);
+    progress_ = new QProgressBar; progress_->setRange(0,4); progress_->setValue(0); progress_->setTextVisible(false); outer->addWidget(progress_);
     auto* footer = new QHBoxLayout; status_ = label(""); status_->setObjectName("status"); footer->addWidget(status_,1);
     time_ = label("Idle"); footer->addWidget(time_); auto* show_log = button("Show log"); show_log->setCheckable(true); footer->addWidget(show_log); outer->addLayout(footer);
     log_ = new QPlainTextEdit; log_->setReadOnly(true); log_->setMaximumBlockCount(500); log_->setMaximumHeight(130); log_->hide(); outer->addWidget(log_);
@@ -175,6 +184,13 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::images,this,[this](QImage l,QImage r,QImage rl,QImage rr) {
         raw_left_ = std::move(l); raw_right_ = std::move(r); rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
         mask_->setImage(rectified_left_); tabs_->setCurrentIndex(0); showImages();
+    });
+    connect(&controller_,&PipelineController::depthImages,this,[this,depth_page](QImage left,QImage depth,float minimum,float maximum) {
+        if (closing_) return;
+        depth_left_->setImage(std::move(left)); depth_map_->setImage(std::move(depth));
+        depth_status_->setText(QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid or outside range")
+            .arg(minimum,0,'f',3).arg(maximum,0,'f',3));
+        tabs_->setCurrentWidget(depth_page);
     });
     connect(&controller_,&PipelineController::preview,this,[this](QImage l,QImage r,bool rectified) {
         // Ignore queued frames from the mode that was selected before a toggle.
@@ -219,7 +235,7 @@ void ReconstructionWindow::refresh() {
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     const bool depth_valid = minimum_->value() < maximum_->value();
     run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
-    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image inference and GPU XYZ; geometry and measurement stages are pending.");
+    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Runs full-image reconstruction and displays the rectified left image and Jet depth map.");
     rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
     epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
     draw_->setEnabled(idle && frozen); mask_->setEditingEnabled(idle && frozen);
@@ -230,10 +246,14 @@ void ReconstructionWindow::refresh() {
         .arg(mask_->vertexCount()).arg(mask_->hasSelection() ? "closed polygon" : "drawing").arg(mask_->imageSize().width()).arg(mask_->imageSize().height()));
     input_->setText(state_.input); calibration_->setText(state_.calibration);
     if (!closing_) status_->setText(state_.status);
-    steps_->setText(QString("%1 Rectification   →   %2 FS inference   →   %3 GPU XYZ   →   CPU / depth · pending   →   Mesh / area · pending")
-        .arg(state_.stage >= 1 ? "✓" : "○", state_.stage >= 2 ? "✓" : "○", state_.gpu_ready ? "✓" : "○"));
-    progress_->setRange(0,busy_ ? 0 : 3); if (!busy_) progress_->setValue(state_.stage);
-    scene_status_->setText((state_.gpu_ready ? "GPU XYZ is ready\n\n" : QString()) + "3D viewport · pending\n\nReserved for VTK point cloud, mesh and wireframe display.\nCPU result download and geometry are not connected yet.\n\nRotation · zoom · pan · reset view");
+    if (!state_.depth_ready) {
+        depth_left_->setImage({}); depth_map_->setImage({});
+        depth_status_->setText("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
+    }
+    steps_->setText(QString("%1 Rectification   →   %2 FS inference   →   %3 GPU XYZ   →   %4 Depth map   →   Mesh / area · pending")
+        .arg(state_.stage >= 1 ? "✓" : "○", state_.stage >= 2 ? "✓" : "○", state_.gpu_ready ? "✓" : "○", state_.depth_ready ? "✓" : "○"));
+    progress_->setRange(0,busy_ ? 0 : 4); if (!busy_) progress_->setValue(state_.stage);
+    scene_status_->setText((state_.gpu_ready ? "GPU XYZ is ready\n\n" : QString()) + "3D viewport · pending\n\nReserved for VTK point cloud, mesh and wireframe display.\n3D geometry and viewer are not connected yet.\n\nRotation · zoom · pan · reset view");
 }
 void ReconstructionWindow::showImages() {
     const bool corrected = rectified_->isChecked();

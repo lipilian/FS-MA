@@ -33,7 +33,7 @@ struct SessionResult {
     BoardConfig board;
     StereoCalibration calibration;
     cv::Size image_size;
-    std::string left_serial{"21LJ530"}, right_serial{"21LJ548"};
+    std::string left_serial{"21LJ548"}, right_serial{"21LJ530"};
     Quality solve, check;
     bool checked{false};
     double threshold_px{kQualityThresholdPx}; // Desktop uses the fixed 1 px limit; retained in saved metadata.

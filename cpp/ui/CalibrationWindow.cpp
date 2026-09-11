@@ -96,7 +96,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     auto* camera = new QGroupBox("Stereo cameras"); auto* camera_layout = new QVBoxLayout(camera);
-    camera_layout->addWidget(label("LEFT   ·   21LJ530\nRIGHT ·   21LJ548\nSentech STC-MCS500U3V"));
+    camera_layout->addWidget(label("LEFT   ·   21LJ548\nRIGHT ·   21LJ530\nSentech STC-MCS500U3V"));
     auto* exposure_form = new QFormLayout;
     exposure_ = decimal(SentechStereoOptions{}.exposure_us, 1000000, " µs", 0); exposure_->setMinimum(100);
     exposure_form->addRow("Exposure", exposure_); camera_layout->addLayout(exposure_form);
@@ -125,7 +125,7 @@ CalibrationWindow::CalibrationWindow(CalibrationController& controller) : contro
     view_controls->addWidget(overlay_); view_controls->addWidget(rectified_); view_controls->addStretch(); view_controls->addWidget(live_);
     center_layout->addLayout(view_controls);
     auto* images = new QSplitter;
-    left_ = new StereoImageView("LEFT  /  21LJ530"); right_ = new StereoImageView("RIGHT  /  21LJ548");
+    left_ = new StereoImageView("LEFT  /  21LJ548"); right_ = new StereoImageView("RIGHT  /  21LJ530");
     images->addWidget(left_); images->addWidget(right_); center_layout->addWidget(images, 1);
     caption_ = label("No camera frames yet."); caption_->setMinimumHeight(45); center_layout->addWidget(caption_);
     auto* actions = new QHBoxLayout;

@@ -37,6 +37,6 @@ private:
     QProgressBar* progress_;
     QPlainTextEdit* log_;
     QTabWidget* tabs_;
-    StereoImageView *left_, *right_;
+    StereoImageView *left_, *right_, *depth_left_, *depth_map_;
     MaskEditor* mask_;
 };
