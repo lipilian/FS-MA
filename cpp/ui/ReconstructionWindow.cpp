@@ -1,5 +1,6 @@
 #include "ReconstructionWindow.hpp"
 #include "widgets/MaskEditor.hpp"
+#include "widgets/MeshView.hpp"
 #include "widgets/StereoImageView.hpp"
 #include <QCheckBox>
 #include <QButtonGroup>
@@ -80,8 +81,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     import_ = button("Import capture…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     preview_ = button("Resume preview", "preview"); capture_ = button("Capture pair", "capturePair");
     run_ = button("Reconstruct", "run"); finish_draw_ = button("Finish draw", "finishDraw");
+    build_mesh_ = button("Generate mesh", "buildMesh");
+    next_ = button("Next", "nextStep");
+    next_->setToolTip("Complete reconstruction, then continue to 3D browser.");
     for (auto* b : {import_, camera_, preview_}) toolbar->addWidget(b);
-    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); outer->addLayout(toolbar);
+    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(next_); toolbar->addWidget(build_mesh_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -116,7 +120,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     denoise_ = new QCheckBox("3 × 3 neighbour filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
     neighbor_distance_ = decimal(0.01,0.001,1," m"); neighbor_distance_->setObjectName("neighborDistance"); neighbor_distance_->setSingleStep(0.001);
     auto* neighbor_form=new QFormLayout; neighbor_form->addRow("Neighbour distance",neighbor_distance_); layout->addLayout(neighbor_form);
-    layout->addWidget(label("Mesh generation is pending.")); settings_layout->addWidget(filters);
+    mesh_edge_=decimal(.02,.001,1," m"); mesh_jump_=decimal(.01,.001,1," m");
+    mesh_edge_->setObjectName("meshMaxEdge"); mesh_jump_->setObjectName("meshMaxDepthJump");
+    mesh_edge_->setSingleStep(.001); mesh_jump_->setSingleStep(.001);
+    auto* mesh_form=new QFormLayout; mesh_form->addRow("Max mesh edge",mesh_edge_); mesh_form->addRow("Max depth jump",mesh_jump_);
+    layout->addLayout(mesh_form); settings_layout->addWidget(filters);
     auto* settings_panel=scrollPanel(settings,260); settings_panel->setObjectName("stepTools");
     split->addWidget(settings_panel);
 
@@ -147,14 +155,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     depth_status_->setObjectName("depthRange"); depth_layout->addWidget(depth_status_);
     tabs_->addTab(depth_page,"Depth map");
     auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
-    auto* render = new QComboBox; render->addItems({"Point cloud", "Mesh", "Wireframe"}); render->setEnabled(false);
-    auto* color = new QComboBox; color->addItems({"RGB colour", "Depth colour"}); color->setEnabled(false);
-    auto* point_size = new QSpinBox; point_size->setRange(1,10); point_size->setValue(2); point_size->setSuffix(" px"); point_size->setEnabled(false);
-    auto* reset = button("Reset view"); reset->setEnabled(false);
-    for (QWidget* w : std::initializer_list<QWidget*>{render, color, point_size, reset}) { w->setToolTip("Requires CPU geometry and VTK integration."); scene_controls->addWidget(w); }
+    mesh_mode_=new QComboBox; mesh_mode_->addItems({"Point cloud","Mesh","Wireframe"}); mesh_mode_->setCurrentIndex(1); mesh_mode_->setObjectName("meshMode");
+    auto* reset=button("Reset view","resetMeshView"); scene_controls->addWidget(mesh_mode_); scene_controls->addWidget(reset); scene_controls->addStretch();
     scene_layout->addLayout(scene_controls);
-    scene_status_ = label("3D viewport · pending\n\nReserved for the VTK point cloud, mesh and wireframe viewer.\n\nRotation · zoom · pan · reset view");
-    scene_status_->setObjectName("scene"); scene_status_->setAlignment(Qt::AlignCenter); scene_layout->addWidget(scene_status_,1); tabs_->addTab(scene,"3D browser");
+    mesh_view_=new MeshView; mesh_view_->setObjectName("meshView"); scene_layout->addWidget(mesh_view_,1);
+    scene_status_=label("Reconstruct depth, then click Generate mesh."); scene_status_->setObjectName("meshStatus"); scene_layout->addWidget(scene_status_);
+    scene_layout->addWidget(label("Left drag: rotate · Right drag: pan · Wheel: zoom")); tabs_->addTab(scene,"3D browser");
+    connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); });
+    connect(reset,&QPushButton::clicked,this,[this] { mesh_view_->resetView(); });
     for (int i=0;i<tabs_->count();++i) {
         tab_status_[i]=new QLabel; tab_status_[i]->setFixedSize(20,20); tab_status_[i]->setAlignment(Qt::AlignCenter);
         tab_status_[i]->setObjectName(QString("stepStatus%1").arg(i));
@@ -212,6 +220,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (closing_ || image_id!=state_.image_id || request_id!=mask_request_id_) return;
         mask_->setPrediction(std::move(mask)); status_->setText(message);
     });
+    connect(&controller_,&PipelineController::meshReady,this,[this](SharedMesh mesh) {
+        if (closing_ || !reconstruction_valid_) return;
+        mesh_result_=std::move(mesh); mesh_valid_=true; mesh_view_->setMesh(mesh_result_); refresh(); tabs_->setCurrentIndex(3);
+    });
     connect(&controller_,&PipelineController::depthImages,this,[this,depth_page](QImage left,QImage depth,float minimum,float maximum) {
         if (closing_) return;
         reconstruction_valid_=mask_->hasSelection();
@@ -245,6 +257,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         const bool denoise=denoise_->isChecked(); const float distance=neighbor_distance_->value();
         controller_.submit([=](auto& w) { w.reconstruct(low,high,selected,denoise,distance); });
     });
+    connect(next_,&QPushButton::clicked,this,[this] { tabs_->setCurrentIndex(3); });
+    connect(build_mesh_,&QPushButton::clicked,this,[this] {
+        mesh_valid_=false; refresh();
+        const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
+        controller_.submit([=](auto& worker) { worker.buildMesh(edge,jump); });
+    });
+    const auto mesh_settings_changed=[this] { mesh_valid_=false; refresh(); };
+    connect(mesh_edge_,&QDoubleSpinBox::valueChanged,this,mesh_settings_changed);
+    connect(mesh_jump_,&QDoubleSpinBox::valueChanged,this,mesh_settings_changed);
     const auto depth_settings_changed = [this] {
         // Changing parameters invalidates derived results even if the old values are restored later.
         reconstruction_valid_=false;
@@ -286,11 +307,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     refresh();
 }
 void ReconstructionWindow::refresh() {
+    if (!reconstruction_valid_ || !state_.depth_ready) mesh_valid_=false;
     const bool idle = !busy_ && !closing_, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
+    mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
+    build_mesh_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && mask_->hasSelection());
+    next_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && mask_->hasSelection());
     denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
     const bool depth_valid = minimum_->value() < maximum_->value();
     run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid && mask_->hasSelection());
@@ -312,17 +337,21 @@ void ReconstructionWindow::refresh() {
         depth_status_->setText("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
     }
     const bool result_current=reconstruction_valid_ && state_.depth_ready && mask_->hasSelection();
-    steps_->setText(QString("%1 Rectification   →   %2 FS inference   →   %3 GPU XYZ   →   %4 Depth map   →   Mesh / area · pending")
-        .arg(state_.has_rectified ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○"));
+    steps_->setText(QString("%1 Rectification   →   %2 FS inference   →   %3 GPU XYZ   →   %4 Depth map   →   %5 Mesh / area")
+        .arg(state_.has_rectified ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", mesh_valid_ ? "✓" : "○"));
     refreshWorkflow();
     progress_->setRange(0,busy_ ? 0 : 4); if (!busy_) progress_->setValue(result_current ? 4 : state_.has_rectified ? 1 : 0);
-    scene_status_->setText((result_current ? "GPU XYZ is ready\n\n" : QString()) + "3D viewport · pending\n\nReserved for VTK point cloud, mesh and wireframe display.\n3D geometry and viewer are not connected yet.\n\nRotation · zoom · pan · reset view");
+    if (!mesh_valid_ && mesh_result_) { mesh_result_.reset(); mesh_view_->setMesh({}); }
+    mesh_mode_->setEnabled(mesh_valid_);
+    scene_status_->setText(mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")
+        .arg(mesh_result_->vertices.size()).arg(mesh_result_->triangles.size()).arg(mesh_result_->area_m2*1e4,0,'f',2)
+        : result_current ? "Depth ready. Click Generate mesh." : "Reconstruct depth before generating a mesh.");
 }
 void ReconstructionWindow::refreshWorkflow() {
     const bool pair_done=state_.has_rectified && !state_.live;
     const bool region_done=pair_done && mask_->hasSelection();
     const bool depth_done=region_done && state_.depth_ready && reconstruction_valid_;
-    const bool completed[]={pair_done,region_done,depth_done,false}; // 3D rendering is still pending.
+    const bool completed[]={pair_done,region_done,depth_done,depth_done && mesh_valid_};
     const int last_available=depth_done ? 3 : region_done ? 2 : pair_done ? 1 : 0;
     if (tabs_->currentIndex()>last_available) tabs_->setCurrentIndex(last_available);
     tabs_->setTabEnabled(1,pair_done);
@@ -338,10 +367,12 @@ void ReconstructionWindow::refreshWorkflow() {
     }
     tabs_->setTabToolTip(1,pair_done ? "Draw and confirm a mask." : "Capture or import a stereo pair first.");
     tabs_->setTabToolTip(2,depth_done ? "Depth map ready." : region_done ? "Set the depth range and click Reconstruct." : "Click Finish draw in Region measurement first.");
-    tabs_->setTabToolTip(3,depth_done ? "3D rendering is pending implementation." : "Complete depth reconstruction first.");
+    tabs_->setTabToolTip(3,depth_done ? "Generate or inspect the constrained Delaunay mesh." : "Complete depth reconstruction first.");
     capture_->setVisible(tabs_->currentIndex()==0);
     finish_draw_->setVisible(tabs_->currentIndex()==1);
     run_->setVisible(tabs_->currentIndex()==2);
+    next_->setVisible(tabs_->currentIndex()==2);
+    build_mesh_->setVisible(tabs_->currentIndex()==3);
     for (auto* b : {import_,camera_,preview_}) b->setVisible(tabs_->currentIndex()==0);
 }
 void ReconstructionWindow::showImages() {

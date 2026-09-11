@@ -40,7 +40,7 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
 }
 void PipelineWorker::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
     // The same worker retains this instance for every subsequent reconstruction.
-    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false;
+    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
     fs_.reset(); sam_.reset(); state_.sam_ready = false;
     QElapsedTimer elapsed; elapsed.start();
@@ -93,7 +93,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     frame->rectify(); checkpoint();
     // Commit together only after validation and rectification succeed. Failed imports retain the previous input.
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
-    state_.has_pair = true; state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; state_.stage = 1;
+    state_.has_pair = true; state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); state_.stage = 1;
     state_.live = false; latest_.reset();
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
     emit images(image(frame_->left()), image(frame_->right()), image(frame_->rectified_left()), image(frame_->rectified_right()));
@@ -222,7 +222,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         throw std::runtime_error("Confirm a mask aligned with the current rectified left image first.");
     if (!std::isfinite(max_neighbor_distance_m) || max_neighbor_distance_m<=0)
         throw std::runtime_error("Neighbour distance must be positive and finite.");
-    state_.gpu_ready = false; state_.depth_ready = false; state_.stage = 1; publish();
+    state_.gpu_ready = false; state_.depth_ready = false; mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); state_.stage = 1; publish();
     checkpoint(); state_.status = "Running FoundationStereo inference…"; publish();
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
@@ -230,19 +230,24 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     const QImage grayscale=selection_mask.convertToFormat(QImage::Format_Grayscale8);
     const cv::Mat mask(grayscale.height(),grayscale.width(),CV_8UC1,
                        const_cast<uchar*>(grayscale.constBits()),grayscale.bytesPerLine());
-    fs_->set_selection_mask(mask);
+    fs_->set_selection_mask(mask); // Also completes the queued input uploads.
+    emit log(QString("Input preparation: %1 ms").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
+    // Synchronized wall time: measure this inference only, excluding preparation.
+    elapsed.restart();
     fs_->inference(); fs_->synchronize();
-    state_.stage = 2; emit log(QString("Inference + input preparation: %1 ms").arg(elapsed.elapsed()));
+    const double inference_ms=elapsed.nsecsElapsed()/1e6;
+    state_.stage = 2; emit log(QString("Inference: %1 ms").arg(inference_ms,0,'f',3));
     checkpoint(); state_.status = "Computing XYZ on GPU…"; publish(); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint();
     if (denoise) {
         state_.status = "Denoising selected XYZ on GPU…"; publish();
         fs_->denoise_xyz_map(max_neighbor_distance_m,3,2); checkpoint();
     }
+    // Both XYZ and denoising APIs synchronize before returning.
+    const double xyz_ms=elapsed.nsecsElapsed()/1e6;
     state_.stage = 3; state_.gpu_ready = true;
     emit log(denoise ? QString("Full-image XYZ + selected-region 3 × 3 denoising · %1 m · interior 3 / boundary up to 2 neighbours").arg(max_neighbor_distance_m)
                     : "Full-image XYZ · neighbourhood denoising disabled.");
-    emit log(QString("GPU XYZ: %1 ms · depth %2–%3 m").arg(elapsed.elapsed()).arg(minimum).arg(maximum));
     state_.status = "Preparing depth display…"; publish(); elapsed.restart();
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();
     cv::Mat depth, indices, depth_rgb, model_left;
@@ -257,13 +262,35 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     cv::resize(frame_->rectified_left(), model_left,
                cv::Size(FS::kTensorRtInputWidth, FS::kTensorRtInputHeight), 0.0, 0.0, cv::INTER_LINEAR);
     checkpoint();
+    mesh_xyz_ = xyz; // cv::Mat retains the owned download with no additional copy.
+    mesh_rgb_ = model_left;
+    cv::resize(mask, mesh_mask_, xyz.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    const QImage left_image=image(model_left), depth_image=image(depth_rgb);
+    const double display_ms=elapsed.nsecsElapsed()/1e6;
+    emit log(QString("Post processing: %1 ms (XYZ + denoising: %2 ms; XYZ download + depth display: %3 ms)")
+        .arg(xyz_ms+display_ms,0,'f',3).arg(xyz_ms,0,'f',3).arg(display_ms,0,'f',3));
     state_.depth_ready = true; state_.stage = 4;
     state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
     publish(); // Unlock the depth step before delivering its images.
-    emit depthImages(image(model_left), image(depth_rgb), minimum, maximum);
-    emit log(QString("Depth display: %1 ms · Jet %2–%3 m").arg(elapsed.elapsed()).arg(minimum).arg(maximum));
+    emit depthImages(left_image, depth_image, minimum, maximum);
+    emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
     state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
     emit log(state_.status);
+}
+void PipelineWorker::buildMesh(double max_edge_m, double max_depth_jump_m) {
+    if (!state_.depth_ready || state_.live || mesh_xyz_.empty() || mesh_mask_.empty())
+        throw std::runtime_error("Reconstruct depth before generating a mesh.");
+    checkpoint(); state_.status = "Building constrained Delaunay mesh on CPU…"; publish();
+    QElapsedTimer elapsed; elapsed.start();
+    auto mesh = std::make_shared<fs::MeshResult>(fs::build_constrained_mesh(
+        mesh_xyz_, mesh_mask_, mesh_rgb_, max_edge_m, max_depth_jump_m, [this] { checkpoint(); }));
+    checkpoint();
+    const double mesh_ms=elapsed.nsecsElapsed()/1e6;
+    emit log(QString("Mesh build: %1 ms (CPU)").arg(mesh_ms,0,'f',3));
+    state_.status = QString("Mesh ready · %1 vertices · %2 triangles · %3 cm²")
+        .arg(mesh->vertices.size()).arg(mesh->triangles.size()).arg(mesh->area_m2 * 1e4, 0, 'f', 2);
+    if (mesh->skipped_components) emit log(QString("Skipped %1 mask components with insufficient points or degenerate boundaries.").arg(mesh->skipped_components));
+    publish(); emit meshReady(mesh); emit log(state_.status);
 }
 void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
                              const std::shared_ptr<std::atomic_uint64_t>& current_request) {

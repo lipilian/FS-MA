@@ -12,6 +12,8 @@ class QPlainTextEdit;
 class QTabWidget;
 class StereoImageView;
 class MaskEditor;
+class MeshView;
+class QComboBox;
 
 class ReconstructionWindow : public QMainWindow {
     Q_OBJECT
@@ -29,15 +31,16 @@ private:
     PipelineController& controller_;
     PipelineState state_;
     quint64 mask_request_id_{0};
-    bool reconstruction_valid_{false};
+    bool reconstruction_valid_{false}, mesh_valid_{false};
+    SharedMesh mesh_result_;
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
     QImage raw_left_, raw_right_, rectified_left_, rectified_right_, live_left_, live_right_;
-    QPushButton *import_, *camera_, *preview_, *capture_, *run_, *finish_draw_, *clear_;
+    QPushButton *import_, *camera_, *preview_, *capture_, *run_, *finish_draw_, *clear_, *build_mesh_, *next_;
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *rectified_, *epilines_, *denoise_;
-    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_;
+    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_, *mesh_edge_, *mesh_jump_;
     QLabel *input_, *calibration_, *status_, *time_, *scene_status_, *depth_status_, *steps_;
     QProgressBar* progress_;
     QPlainTextEdit* log_;
@@ -45,4 +48,6 @@ private:
     QLabel* tab_status_[4]{};
     StereoImageView *left_, *right_, *depth_left_, *depth_map_;
     MaskEditor* mask_;
+    MeshView* mesh_view_;
+    QComboBox* mesh_mode_;
 };

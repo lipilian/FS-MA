@@ -1,13 +1,13 @@
 # FS 桌面工作台 TODO
 
-本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后融合有效视差筛选、深度阈值和 XYZ 计算的 CUDA kernel，以及 FS/CLI 接入；已接入独立持有的 XYZ CPU 下载和 Qt Jet 深度图展示。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 标定和 reconstruction window 已实现顺序切换；第二窗口已接入文件导入、相机预览/冻结、双目校正、真实 FS 推理和 GPU XYZ，以及校正左图 mask 编辑。已接入 SAM 2.1 Hiera Large 框/点交互选区；VTK、mesh、面积仍待接入，界面保留明确的 pending 入口。真实标定板精度验收待进行。
+本文件保存已讨论的 UI 与 C++ 架构方案。按阶段逐步推进，完成并验证一项后再勾选；当前已完成阶段 1 的核心库构建拆分、代码目录整理、内存输入接口，以及 inference 后融合有效视差筛选、深度阈值和 XYZ 计算的 CUDA kernel，以及 FS/CLI 接入；已接入独立持有的 XYZ CPU 下载和 Qt Jet 深度图展示。已接入 Sentech 双目采集，独立预览工具已按用户要求移除，Qt 6 标定和 reconstruction window 已实现顺序切换；第二窗口已接入文件导入、相机预览/冻结、双目校正、真实 FS 推理和 GPU XYZ，以及校正左图 mask 编辑。已接入 SAM 2.1 Hiera Large 框/点交互选区；CPU Triangle mesh、面积和 Qt OpenGL 三维显示已接入。真实标定板精度验收待进行。
 
 文档维护约定：后续统一维护 `docs/` 下的 HTML 和本 TODO；功能与操作记录放在 `docs/index.html`，构建、代码结构与接口说明放在 `docs/code_structure.html`。
 
 ## 已确定的方向
 
 - 平台：仅 Linux 本地桌面应用。
-- 技术路线：Qt 6 Widgets + VTK + 现有 C++ FoundationStereo TensorRT engine。
+- 技术路线：Qt 6 Widgets + Qt OpenGLWidgets + 现有 C++ FoundationStereo TensorRT engine。
 - Qt 应用由两个独立的主窗口顺序组成：窗口 1 专门完成 calibration，正常完成后才能创建并进入窗口 2；窗口 2 为下文的重建、3D 浏览和面积测量工作台。
 - 当前实现支持文件导入或 Sentech 双目相机采集，可从已有 JSON 读取标定；Qt 窗口 1 已新增 ChArUco 标定求解、独立检查和保存。
 - 相机输入：按用户纠正，左右绑定改为左 STC-MCS500U3V(21LJ548)、右 STC-MCS500U3V(21LJ530)。旧顺序标定文件不再通过桌面的身份校验，需按新顺序重新标定；新绑定的实体画面仍待现场确认。此前已验证单次拍摄和关闭后重新连接。采用独立连续流，尚未实现硬件同步。
@@ -169,7 +169,7 @@ FS_Engine/
 
 - FS 放入 inference，StereoFrame 放入 stereo，Logger 放入 core；GWC 插件及 CUDA kernel 放入 inference/plugins，保持独立编译。
 - 新增 `fs_core` 库，供 CLI 和桌面应用共同链接。
-- 桌面目标命名为 `fs_gui`，默认构建，通过 `FS_BUILD_DESKTOP` 开关控制（默认 `ON`，可设为 `OFF` 关闭）；先搭建 Qt 标定阶段，VTK 随窗口 2 的三维视图接入。Qt/VTK 依赖不进入 `fs_core`，标定模块按需增加 OpenCV aruco 依赖。
+- 桌面目标命名为 `fs_gui`，默认构建，通过 `FS_BUILD_DESKTOP` 开关控制（默认 `ON`，可设为 `OFF` 关闭）；先搭建 Qt 标定阶段，窗口 2 使用 Qt OpenGLWidgets 显示三维结果。Qt/OpenGL 依赖不进入 `fs_core`，标定模块按需增加 OpenCV aruco 依赖。
 - `DesktopController` 管理唯一的相机会话和当前已确认标定，启动时只显示 `CalibrationWindow`，收到成功完成信号后先显示 `InferenceSplashWindow`，后台完成 FS 初始化后才启动 `ReconstructionWindow`。
 - 第一窗口由 `CalibrationController` / `CalibrationWorker` 组织检测、采样、求解和检查；第二窗口继续使用 `PipelineController` / `PipelineWorker`。两窗口只组织控件和显示状态。
 - 切换时停止并等待标定专用后台任务，交接独立持有的标定结果；两个窗口不得同时打开同一组相机或重复创建采集线程。
@@ -206,8 +206,8 @@ FS_Engine/
 | `ResultWriter` | 导出图像、标定、mask、PLY 和测量参数 |
 
 - 第一版为 FS 增加同步后读取自有 CPU 视差副本的接口，明确结果生命周期；后台线程完成读取，UI 不接触 CUDA 指针。后续可在核心库内部继续优化 GPU 数据流。
-- 标定检测/求解及重建计算分别放入后台 worker，通过 Qt queued signals 将结果交回主线程；Qt 控件和 VTK 场景更新统一在主线程执行。两个阶段之间不得继续使用已关闭窗口的回调。
-- 使用 `QVTKOpenGLNativeWidget` 嵌入三维视图，并配合 `vtkGenericOpenGLRenderWindow`。
+- 标定检测/求解及重建计算分别放入后台 worker，通过 Qt queued signals 将结果交回主线程；Qt 控件和 OpenGL 场景更新统一在主线程执行。两个阶段之间不得继续使用已关闭窗口的回调。
+- 当前使用 `QOpenGLWidget` 嵌入三维视图，不依赖 VTK。
 
 ## 测量与更新规则
 
@@ -218,7 +218,7 @@ FS_Engine/
 - 面积为有效三角形的三维曲面面积，内部保存 m²，界面显示 cm²；仅代表当前可见重建区域，不推算遮挡面。
 - 点云显示可以抽稀，面积始终来自测量 mesh。
 - 缺少标定、engine 加载失败、空选区或没有有效三角形时显示原因；没有有效 mesh 时不显示误导性的 `0 cm²`。
-- C++ 几何模块以现有 Python 为基准，保留受约束三角化、边长和深度跳变过滤的语义；VTK 负责显示。
+- C++ 几何模块以现有 Python 为基准，保留受约束三角化、边长和深度跳变过滤的语义；Qt OpenGLWidgets 负责显示。
 - 停止请求在安全阶段边界生效，不强行中断运行中的 GPU 操作。
 
 ## 分阶段实施清单
@@ -233,7 +233,7 @@ FS_Engine/
 - [x] 从 XYZ 提取 Z 通道，使用本次运行预设的米制深度范围生成 Jet colormap，无效点显示黑色；已直接接入 Qt 展示。CLI 深度 PNG 导出和原始 disparity 伪彩图仍未实现。
 - [x] 验证 CLI 普通及 `--measure` 十次推理后均可完成融合 XYZ 计算。
 
-**当前里程碑：有效视差筛选、深度阈值和 XYZ 计算已融合完成，FS/CLI 已接入。** 参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及 `postprocess_disparity_gpu()`，保留原始 disparity，不再就地清零视差。XYZ CPU 下载、Qt Jet 深度图、选区 mask 上传与 CUDA 邻域去噪已完成；原始视差下载、mesh 和面积仍在后续阶段，阶段 1 尚未全部完成。
+**当前里程碑：有效视差筛选、深度阈值和 XYZ 计算已融合完成，FS/CLI 已接入。** 参考 `python/fs_tensorrt800x960_gwc_plugin.ipynb` 及 `postprocess_disparity_gpu()`，保留原始 disparity，不再就地清零视差。XYZ CPU 下载、Qt Jet 深度图、选区 mask 上传与 CUDA 邻域去噪已完成；CPU Triangle mesh 和面积也已完成；原始视差下载仍待实现，阶段 1 尚未全部完成。
 
 - [x] 在 `PostProcessing.hpp` / `PostProcessing.cu` 中使用 `compute_xyz_map()` 替代原 `filter_disparity()`，一个 kernel 完成筛选、深度判断和 XYZ 计算。
 - [x] FS 分配并复用 `xyz_map_device_`：连续 FP32 `[800][960][3]`，按 X,Y,Z 交错排列，单位米，占 9,216,000 字节；原始视差不变，无额外筛选视差或有效掩码缓冲区。
@@ -304,11 +304,13 @@ cmake --build cpp/build --target fs_gui --parallel
 - [x] 建立 `PipelineController` / `PipelineWorker`，串联现有校正、FS、GPU XYZ，显示阶段、耗时、日志及错误。
 - [ ] 将后续完整几何流程提取为核心库 `ReconstructionPipeline`；目前 Qt worker 仅编排现有核心接口。
 - [x] 接入真实 FS engine 推理，保证界面保持响应。
-- [ ] 复用阶段 1 的基础深度/XYZ 后处理，补齐 Python 对应的 3×3 邻域三维距离去噪、受约束 mesh 生成和面积计算模块。
-- [ ] 接入 VTK 点云、mesh、线框显示和基本视角操作。
-- [ ] 对照 Python 验证固定输入的几何结果。
+- [x] 复用阶段 1 的基础深度/XYZ 后处理，接入 Python 对应的 3×3 邻域三维距离去噪、CPU Triangle 受约束 mesh 和面积计算。
+- [x] 使用 Qt OpenGLWidgets 接入 mesh 顶点、彩色三角面、线框及旋转/缩放/平移/重置。
+- [x] 固定真实 XYZ/mask：CPU Triangle 与 Python 的顶点和三角面连接完全一致，面积为 0.0786497924673 m²。
 
 当前窗口 2 操作与边界（2026-09-11）：
+
+- [x] 第三步 Reconstruct 旁新增 Next：重建成功且结果仍有效时启用，进入第四步；修改上游输入/参数或任务运行时禁用。日志分别记录 input preparation、inference、post processing（XYZ/去噪及下载/深度图准备分项）和第四步 CPU mesh build，同步后的墙钟耗时以毫秒保留三位小数，不包含主线程渲染。
 
 - 由标定的 Finish / Skip 进入；先停止标定检测/求解线程，再交接同一个运行中的相机源，不重复打开设备。退出重建窗口时在安全阶段边界停止，等待后台任务并释放 GPU / SDK。
 - `Rectified` 同时控制实时预览和冻结图像：勾选时后台按确认标定做全分辨率 stereo rectification，再缩小显示；取消时显示 raw RGB。校正映射跨帧缓存，实时校正视图也支持 `Epipolar guides`；切换时清空旧预览并过滤旧模式帧，捕获仍保留原图供重建使用。
@@ -323,7 +325,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - 工作台移除 FoundationStereo engine 信息块，后续推理复用 splash 已准备的同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程包括 GPU XYZ、CPU 下载和固定米制范围的 Jet 深度图，后续几何功能仍标明待接入。
 - `Region measurement` 位于第二个 tab，`Depth map` 位于第三个。Start reconstruction 完成后自动显示校正左图和 Jet 深度图，均为 960×800（宽×高）；左图使用与模型输入一致的线性缩放。Jet 使用本次运行的 Minimum / Maximum（米），无效及超范围点为黑色，标签保留本次范围；修改设置在下次运行生效。重新计算或成功换图会清空旧深度结果，导入失败保留原结果。顶部移除 Stop；右上角仅 Stereo inspection 显示 Capture pair，Region measurement 显示 Finish draw，Depth map 显示 Reconstruct。四个 tab 按输入 → 确认 mask → 重建深度 → 3D 顺序解锁，标题右侧绿勾表示完成、黄点表示待完成。成功拍摄/导入自动进入 Region measurement；Finish draw 确认 mask 后进入第三步，设置深度范围并点击 Reconstruct。编辑 mask 会清除后续 UI 完成状态；Minimum / Maximum 修改也会使深度及后续步骤失效、清空旧结果，改回原值仍需重算；只切换 tab 不会重置完成状态；3D 后端未接入，暂不标完成。
 - 深度图验证：Release 全目标构建通过；临时 Qt offscreen + 真实 `data/Volunteer2_lower/0` 推理验证两张图均为 960×800，左图与模型网格校正 RGB 逐像素一致，Jet 与独立 FP32 深度参考逐像素一致（0–1 m 内 430654 个有效点），0.2–0.3 m 的空范围全黑。覆盖计算完成自动切页、图例保留本次范围、重算/换图清空旧结果、失败导入保留结果、选区跳转及 CPU 下载独立持有。测试及界面截图保存在 `/tmp`。
-- 3D browser、邻域过滤、mesh/线框、面积/点数/三角形、PLY/测量报告/结果包均保留位置和 pending 状态；不生成虚假数值。
+- 3D browser 已接入 CPU mesh、线框、顶点及面积/点数/三角形显示；邻域过滤已启用。PLY/测量报告/结果包未实现，Export 面板保持移除。
 - 验证：Release 全部目标构建通过；临时 Qt offscreen 检查实际 Desktop 的 Skip → 唯一重建窗口 → 关闭，以及普通关闭标定不跳转。真实 `data/Volunteer2_lower/0` 校正与 CLI 逐像素一致，engine 推理和 GPU XYZ 成功，事件循环保持响应；覆盖导入失败、engine 错误、深度输入、取消、换图失效、mask 坐标/导出。临时回放源验证标定 worker 发出同一个运行中的相机源、线程结束后交接、pipeline 不重复 start、预览、拍摄冻结与断开；真实推理中取消和关闭均等待安全边界完成。测试保留在 `/tmp`，未新增仓库测试目标；真实设备交接及物理拔插仍需现场验收。
 
 - Splash 验证：Release 全部目标构建通过；实际 Qt 顺序切换、缺少/损坏 engine、无 GPU、失败后换路径重试、加载中取消、标定取消均通过临时 offscreen 检查。诊断确认 `loadEngine()` 返回前 GPU/pinned host/CPU resize 缓冲区存在，首次输入预处理复用地址；临时 engine 软链接在加载后移除，仍连续完成两次真实 FS/XYZ 推理，初始化日志只出现一次。回放相机保持同一源，预加载期间 GUI 事件循环响应正常；未新增仓库测试目标。
@@ -355,7 +357,9 @@ cmake --build cpp/build --target fs_gui --parallel
 - [x] 确认后的 mask 最近邻缩放到 FS 宽 960 × 高 800 网格，disparity → XYZ 对全图计算；随后仅在 mask 内调用 FS 的 3×3 CUDA 邻域去噪，mask 外 XYZ 原样复制到最终缓冲区。默认 0.01 m / 内部 3 邻居 / 边缘最多 2 邻居，与 Python 一致。新增 GPU mask、pinned staging、CPU resize 和独立 XYZ scratch 均在 splash 分配，使用 FS stream。
 - [x] 第三步 Geometry 启用去噪开关（默认开）和邻居距离设置；改动会重置后续完成状态。Jet 使用最终 Z；mask 外保留原深度，仅无效、超范围或被去噪剔除的点为黑色。
 - [x] 验证：75 组 CUDA 去噪与 Python 逐像素一致；真实样例 mask 内有效点 110596 → 110362，keep mask 完全一致。真实 FS/Qt 覆盖空/全 mask、最近邻缩放、缓冲复用、重复计算、去噪开关和距离、mask 外 XYZ 完全不变及状态失效，临时测试保留在 /tmp。
-- [ ] 将选区及去噪后的 XYZ 接入 mesh 和面积计算。
+- [x] 将选区及去噪后的 XYZ 接入原生 CPU Triangle：复用第三步已有下载，不增加 CUDA stream 或 mesh 显存缓冲；第四步 Generate mesh 后显示真实面积和数量。
+- [x] 与 800×960 notebook 一致：全部有效选中点、外轮廓最近点吸附和硬约束、重心在 mask 内、最大边长 2 cm / 深度跳变 1 cm；内部孔洞不设约束，过滤掉的面不再次补洞。等距离最近点的选择可能与 SciPy 不同。
+- [x] 实测 110359 顶点 / 218294 三角面，CPU 约 0.13 秒；逐顶点和逐面连接与 Python 一致。临时测试覆盖多区域、凹区、洞、空结果、取消、原始 XYZ 不变及 OpenGL 显示。
 - [ ] 根据实际使用评估分割质量、长期显存稳定性，以及是否需要轮廓简化或单连通区域约束。
 
 临时诊断文件位于 `/tmp/fs_sam_*`，未新增仓库测试目标。单次实测 encoder 包含输入处理约 86 ms；Qt 工作流首次 encoder+decoder 约 98–103 ms，同图缓存后的 decoder 和输出处理约 5–10 ms；这些是当前样例观测值，不是性能保证。无需引入视频记忆模块。
