@@ -1400,6 +1400,7 @@
             <a href="#qt-calibration-window-heading">Qt 6 Calibration Window</a>
             <a href="#qt-splash-window-heading">Qt 6 Splash Window · Inference Initialization</a>
             <a href="#qt-reconstruction-window-heading">Qt 6 Reconstruction Window</a>
+            <a href="#sam21-hiera-large-heading">SAM 2.1 Hiera Large Integration</a>
           </div>
         </details>
       </div>
@@ -2437,6 +2438,44 @@ cmake --build cpp/build --target fs_gui --parallel
         <p><strong>Live rectification validation:</strong> the updated desktop target builds. A temporary Qt replay at 2448×2048 matched both live rectified previews pixel-for-pixel against downscaled StereoFrame output and passed mode switching, guides, old-mode frame rejection, map reuse, capture, resume and shutdown checks. Physical-camera preview frame rate remains to be checked on device.</p>
         <p><strong>Validation:</strong> all Release targets built. Temporary Qt offscreen checks passed the actual calibration-skip/window-switch/close flow and ordinary cancellation, pixel-identical file rectification against the CLI, real FS inference and GPU XYZ on <code>data/Volunteer2_lower/0</code>, responsive UI during work, engine/import error recovery, stop, polygon coordinate mapping/self-intersection rollback/export, and complete calibration-worker → pipeline replay-camera handoff/preview/freeze/disconnect, including cancellation and close during active inference. Physical camera handoff and unplug recovery remain for on-device acceptance. No repository test files or CTest target were added.</p>
         <p><a href="code_structure.html#qt-reconstruction">Reconstruction code structure and remaining interfaces →</a></p>
+      </article>
+      <article class="engine-build-step" aria-labelledby="sam21-hiera-large-heading">
+        <h3 id="sam21-hiera-large-heading">5. SAM 2.1 Hiera Large Integration</h3>
+        <p><strong style="color: #dc2626;">Urgent task:</strong> integrate SAM 2.1 Hiera Large into Region measurement in the Reconstruction Window so users can generate and refine selection masks with foreground points, background points and bounding boxes. Build separate encoder and decoder TensorRT engines, then validate inference results and Qt interaction.</p>
+        <p><strong>Local compatibility check:</strong> both Large ONNX models passed the TensorRT <code>11.2.1.2</code> parser with zero errors. An optimization profile for one target with a dynamic number of prompt points also passed configuration checks. Engine building and inference still require separate validation.</p>
+
+        <h4>Model Location and Working Directory</h4>
+        <p>Both ONNX files are located in the workspace’s <code>onnx/SAM2/</code> directory. From the project root, run the two conversion commands below in order. The engines are saved in the project’s <code>onnx/</code> directory.</p>
+        <pre><code>cd /home/liu4000/Desktop/FS_Engine</code></pre>
+
+        <h4>1. Convert the Encoder</h4>
+        <p>The encoder has a fixed FP32 input, <code>image: [1, 3, 1024, 1024]</code>, so it does not need a dynamic shape profile.</p>
+        <pre><code>trtexec \
+  --onnx="onnx/SAM2/sam2.1_hiera_large.encoder.onnx" \
+  --saveEngine="onnx/sam2.1_hiera_large.encoder.engine" \
+  --memPoolSize=workspace:4096 \
+  --skipInference</code></pre>
+
+        <h4>2. Convert the Decoder</h4>
+        <p>Process one target at a time with 1–64 prompt points, optimized for 8 points. Each foreground or background point uses one prompt slot; the two corners of a bounding box use two slots. The three encoder feature inputs have fixed dimensions and do not need shape overrides in the command.</p>
+        <pre><code>trtexec \
+  --onnx="onnx/SAM2/sam2.1_hiera_large.decoder.onnx" \
+  --saveEngine="onnx/sam2.1_hiera_large.decoder.engine" \
+  --minShapes=point_coords:1x1x2,point_labels:1x1,mask_input:1x1x256x256,has_mask_input:1 \
+  --optShapes=point_coords:1x8x2,point_labels:1x8,mask_input:1x1x256x256,has_mask_input:1 \
+  --maxShapes=point_coords:1x64x2,point_labels:1x64,mask_input:1x1x256x256,has_mask_input:1 \
+  --memPoolSize=workspace:4096 \
+  --skipInference</code></pre>
+        <ul>
+          <li><code>minShapes / optShapes / maxShapes</code> define the minimum, optimization and maximum shapes. At runtime, set the actual shape of each dynamic input; coordinates and labels must use the same number of prompt points.</li>
+          <li><code>--memPoolSize=workspace:4096</code> limits the build workspace to 4096 MiB. Total process and GPU memory usage can exceed this limit.</li>
+          <li><code>--skipInference</code> builds and saves the engine, then skips inference benchmarking. Optimization and tactic timing still run during the build.</li>
+          <li>The installed TensorRT 11 uses the data types encoded in ONNX. These commands retain the existing FP32 ONNX types; omit the <code>--fp16</code> flag found in older tutorials. TF32 is allowed by default; add <code>--noTF32</code> for a strict FP32 numerical comparison.</li>
+        </ul>
+
+        <h4>Integration and Validation</h4>
+        <p>Load the two engines separately. Run the encoder once for the frozen rectified left image and retain its three feature maps on the GPU. Changes to points or boxes on the same image only update the prompts and rerun the decoder. Select the highest-scoring mask, resize the floating-point output to the rectified left image dimensions, then apply the threshold. After user confirmation, resize the binary mask with nearest-neighbour interpolation to the FS grid: 960 pixels wide × 800 pixels high.</p>
+        <p><strong>Pending validation:</strong> building and loading both engines; numerical and mask comparisons against ONNX Runtime; initial encoder and cached-feature decoder latency; GPU memory usage with SAM and FS loaded together; feature invalidation when switching images; and Qt background interaction. Use consistent RGB channel ordering and floating-point prompt coordinates for the comparisons.</p>
       </article>
     </section>
 
