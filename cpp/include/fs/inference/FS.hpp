@@ -34,7 +34,7 @@ public:
     FS(const FS&) = delete;
     FS& operator=(const FS&) = delete;
 
-    /** Register the GWC plugin and deserialize a fixed 800 × 960 TensorRT engine. */
+    /** Register the GWC plugin, load the fixed 800 × 960 engine/context and allocate GPU I/O/XYZ, pinned host and CPU resize buffers. */
     void loadEngine(const std::filesystem::path& engine_path);
     bool isEngineLoaded() const noexcept { return engine_ != nullptr && execution_context_ != nullptr; }
 

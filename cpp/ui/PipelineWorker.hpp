@@ -4,9 +4,9 @@
 #include <atomic>
 
 struct PipelineState {
-    bool connected{false}, live{false}, has_pair{false}, has_rectified{false}, gpu_ready{false};
+    bool connected{false}, live{false}, has_pair{false}, has_rectified{false}, gpu_ready{false}, engine_ready{false};
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
-    QString engine{"Not loaded · selected engine loads when reconstruction starts"};
+    QString engine{"Not initialized"}, engine_path;
     int stage{0};
 };
 Q_DECLARE_METATYPE(PipelineState)
@@ -18,13 +18,13 @@ public:
     PipelineWorker(ConfirmedCalibration calibration, QString path, SharedStereoSource source,
                    std::shared_ptr<std::atomic_bool> cancel);
     void execute(const std::function<void(PipelineWorker&)>& action);
-    void initialize();
+    void initialize(const QString& engine_path);
     void importCapture(const QString& directory, bool use_capture_calibration);
     void connectCameras(double exposure_us);
     void disconnectCameras();
     void setLive(bool enabled);
     void freeze();
-    void reconstruct(const QString& engine_path, float minimum, float maximum);
+    void reconstruct(float minimum, float maximum);
     void shutdown();
 signals:
     void stateChanged(PipelineState state);
@@ -39,7 +39,7 @@ private:
     void checkpoint() const;
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration);
     ConfirmedCalibration confirmed_;
-    QString confirmed_path_, loaded_engine_;
+    QString confirmed_path_;
     SharedStereoSource source_;
     std::shared_ptr<std::atomic_bool> cancel_;
     QTimer* timer_;

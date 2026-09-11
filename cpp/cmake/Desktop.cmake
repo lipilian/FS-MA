@@ -11,6 +11,7 @@ add_library(fs_calibration_ui STATIC
     ui/CalibrationController.cpp ui/CalibrationController.hpp
     ui/CalibrationWindow.cpp ui/CalibrationWindow.hpp
     ui/DesktopController.cpp ui/DesktopController.hpp
+    ui/InferenceSplashWindow.cpp ui/InferenceSplashWindow.hpp
     ui/ReconstructionWindow.cpp ui/ReconstructionWindow.hpp
     ui/PipelineController.cpp ui/PipelineController.hpp
     ui/PipelineWorker.cpp ui/PipelineWorker.hpp

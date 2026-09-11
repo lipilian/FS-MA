@@ -36,11 +36,13 @@
        ↓ 用户选择复用已有标定，或新标定完成条件满足
 结束标定窗口及其检测/求解任务，交接已确认的标定和相机会话
        ↓
+InferenceSplashWindow：后台创建 FS → 加载 engine/context → 分配推理缓冲区
+       ↓ 初始化成功（失败留在 splash，可换 engine 重试或退出）
 窗口 2：ReconstructionWindow（原计划工作台）
 导入／拍摄 → 校正 → FS inference → 点云／mesh → 选区与面积
 ```
 
-- 第二个窗口只在第一个窗口正常完成后创建并启动，不能通过启动参数或普通关闭操作跳过标定流程。
+- 第二个窗口只在第一个窗口正常完成且 splash 初始化 FS 成功后创建并启动，不能通过启动参数或普通关闭操作跳过标定流程。
 - 标定窗口点击关闭或取消代表取消流程，不自动打开第二个窗口；释放后台任务和相机资源后退出。
 - “计算标定”用于求解参数，“完成标定并进入工作台”用于窗口切换，避免把求解成功和完成整个标定流程混为一谈。
 - 新做标定的完成条件：有效标定已保存、当前相机身份与图像尺寸已确认、质量检查通过且没有正在进行的采样/求解任务。误差阈值先参考旧工程，正式门限仍待确认。复用已有文件使用下面的独立跳过入口。
@@ -145,6 +147,7 @@ FS_Engine/
 │       ├── CalibrationWindow.hpp/.cpp      # 窗口 1：标定
 │       ├── CalibrationController.hpp/.cpp
 │       ├── CalibrationWorker.hpp/.cpp
+│       ├── InferenceSplashWindow.hpp/.cpp  # 两窗口之间的模型准备与失败重试
 │       ├── ReconstructionWindow.hpp/.cpp   # 窗口 2：重建与测量
 │       ├── PipelineController.hpp/.cpp
 │       ├── PipelineWorker.hpp/.cpp
@@ -166,7 +169,7 @@ FS_Engine/
 - FS 放入 inference，StereoFrame 放入 stereo，Logger 放入 core；GWC 插件及 CUDA kernel 放入 inference/plugins，保持独立编译。
 - 新增 `fs_core` 库，供 CLI 和桌面应用共同链接。
 - 桌面目标命名为 `fs_gui`，默认构建，通过 `FS_BUILD_DESKTOP` 开关控制（默认 `ON`，可设为 `OFF` 关闭）；先搭建 Qt 标定阶段，VTK 随窗口 2 的三维视图接入。Qt/VTK 依赖不进入 `fs_core`，标定模块按需增加 OpenCV aruco 依赖。
-- `DesktopController` 管理唯一的相机会话和当前已确认标定，启动时只显示 `CalibrationWindow`，收到成功完成信号后才启动 `ReconstructionWindow`。
+- `DesktopController` 管理唯一的相机会话和当前已确认标定，启动时只显示 `CalibrationWindow`，收到成功完成信号后先显示 `InferenceSplashWindow`，后台完成 FS 初始化后才启动 `ReconstructionWindow`。
 - 第一窗口由 `CalibrationController` / `CalibrationWorker` 组织检测、采样、求解和检查；第二窗口继续使用 `PipelineController` / `PipelineWorker`。两窗口只组织控件和显示状态。
 - 切换时停止并等待标定专用后台任务，交接独立持有的标定结果；两个窗口不得同时打开同一组相机或重复创建采集线程。
 - 推理、几何处理和流程编排放入核心库，避免窗口类承担计算逻辑。
@@ -281,7 +284,7 @@ cmake --build cpp/build --target fs_gui --parallel
 ```
 
 - 本机使用 Qt 6.4.2 + OpenCV 4.6.0；Qt 6 是明确依赖，桌面目标不链接 highgui/Qt 5。
-- 当前提供两条完成路径：“Finish calibration”要求新标定求解/检查通过并保存；“Skip calibration · Continue”允许显式复用已加载的有效标定。两者都发出独立持有的标定结果，并转移当前相机源；标定 worker 完全停止后，`DesktopController` 才创建第二窗口。普通关闭仍释放相机并退出。
+- 当前提供两条完成路径：“Finish calibration”要求新标定求解/检查通过并保存；“Skip calibration · Continue”允许显式复用已加载的有效标定。两者都发出独立持有的标定结果，并转移当前相机源；标定 worker 完全停止后，`DesktopController` 先显示 splash；FS 初始化成功后才创建第二窗口。普通关闭仍释放相机并退出。
 - RMS 门限暂用可编辑的 1.0 px，正式质量门限仍待确认。当前仅允许加载带完整身份/尺寸元数据且板参数匹配的标定；加载后可选择跳过复用，也可重新检查；新检查开始后会撤销当前复用资格，避免失败检查沿用旧状态。旧矩阵文件仍可用于 CLI。样本只保存在本次进程内存中。
 - 验证记录：Release 全部目标构建成功；临时合成数据检查检出 63 个角点，求解及独立重投影检查通过，0.12 m 合成基线尺度/方向正确，JSON 与旧读取接口兼容，交接矩阵独立持有。
 - 临时回放源已验证完整窗口操作链：8 组样本采集 → 求解 → 独立检查 → 保存 → 完成（合成图像 stereo RMS 约 0.213 px，检查约 0.075 px）；提前完成被拒绝、保存失败不退出。
@@ -292,6 +295,7 @@ cmake --build cpp/build --target fs_gui --parallel
 ### 阶段 2B：窗口 2 重建与三维浏览
 
 - [x] 新建 `ReconstructionWindow`，仅由窗口 1 正常完成后启动，接收确认标定和共享相机会话。
+- [x] 在两窗口之间增加 `InferenceSplashWindow`，后台创建 FS、加载 TensorRT engine/context，并分配 GPU 输入/视差/XYZ、pinned host 和模型尺寸 CPU RGB 缓冲区；初始化成功后才打开重建窗口。
 - [x] 完成 capture 目录导入、左右图预览、标定状态及双目校正检查。
 - [x] 建立 `PipelineController` / `PipelineWorker`，串联现有校正、FS、GPU XYZ，显示阶段、耗时、日志及错误。
 - [ ] 将后续完整几何流程提取为核心库 `ReconstructionPipeline`；目前 Qt worker 仅编排现有核心接口。
@@ -307,9 +311,12 @@ cmake --build cpp/build --target fs_gui --parallel
 - 相机输入始终使用窗口 1 的确认标定。预览为原始 RGB；Capture pair 冻结并校正一组。预览不会覆盖已冻结输入；缺少新帧、掉线或尺寸不符会显示原因。文件导入失败保留上一组有效输入。
 - Stereo inspection 支持原图/校正图与水平辅助线；Region measurement 提供单个无孔多边形，点击添加、Enter/首顶点/右键闭合、拖动顶点、Backspace 撤销、Escape 取消，拒绝自交和退化多边形。切换输入会清空旧选区。
 - 二值 mask 按完整校正左图坐标导出 PNG；缩放窗口不改变顶点坐标。尚未上传到推理网格，也不会修改 GPU XYZ、点云或面积。
-- Engine 路径可配置，点击重建时才加载。无 engine/GPU 时仍可导入和检查输入；当前执行校正 → FS inference → GPU XYZ（米制深度范围），结束时明确说明后续未接入。
+- Engine 由 splash 自动尝试默认路径，失败时可选择其他文件重试或退出。创建 FS、加载 engine/context 与缓冲区分配都在 `PipelineWorker` 的 QThread 完成；GPU 同步检查成功后，controller 交付就绪状态再创建工作台。无 engine/GPU 时停留在 splash，不打开未就绪的 reconstruction window。
+- 工作台只读显示已加载 engine，后续推理复用同一个 FS、context 和缓冲区，不再加载模型。图像校正、每组输入的相机参数、缩放/打包/上传仍随实际图像执行；新增 CPU 模型尺寸缓冲区预分配不执行虚拟推理。当前流程到 GPU XYZ（米制深度范围）结束，后续几何功能仍标明待接入。
 - Depth map、3D browser、邻域过滤、mesh/线框、面积/点数/三角形、SAM 点/框提示、PLY/测量报告/结果包均保留位置和 pending 状态；不生成虚假数值。
 - 验证：Release 全部目标构建通过；临时 Qt offscreen 检查实际 Desktop 的 Skip → 唯一重建窗口 → 关闭，以及普通关闭标定不跳转。真实 `data/Volunteer2_lower/0` 校正与 CLI 逐像素一致，engine 推理和 GPU XYZ 成功，事件循环保持响应；覆盖导入失败、engine 错误、深度输入、取消、换图失效、多边形坐标/自交回退/导出。临时回放源验证标定 worker 发出同一个运行中的相机源、线程结束后交接、pipeline 不重复 start、预览、拍摄冻结与断开；真实推理中取消和关闭均等待安全边界完成。测试保留在 `/tmp`，未新增仓库测试目标；真实设备交接及物理拔插仍需现场验收。
+
+- Splash 验证：Release 全部目标构建通过；实际 Qt 顺序切换、缺少/损坏 engine、无 GPU、失败后换路径重试、加载中取消、标定取消均通过临时 offscreen 检查。诊断确认 `loadEngine()` 返回前 GPU/pinned host/CPU resize 缓冲区存在，首次输入预处理复用地址；临时 engine 软链接在加载后移除，仍连续完成两次真实 FS/XYZ 推理，初始化日志只出现一次。回放相机保持同一源，预加载期间 GUI 事件循环响应正常；未新增仓库测试目标。
 
 ### 阶段 3：加入选区测量与导出
 
@@ -373,7 +380,7 @@ cmake --build cpp/build --target fs_gui --parallel
 - [ ] 修改 mask 不触发 FS 推理，连续编辑不被旧任务结果覆盖。
 - [ ] 推理过程中界面可操作，停止在安全阶段边界生效。
 - [ ] 缺少标定、左右尺寸不匹配、engine 加载失败和无有效 mesh 时显示清楚的错误信息。
-- [ ] 无 GPU 或无 engine 时仍可打开界面并检查输入，明确显示重建不可用原因。
+- [x] 无 GPU、缺少/损坏 engine 时停留在 splash 显示失败原因，支持换文件重试或退出；不会创建未就绪的重建窗口。
 
 ## 参考
 

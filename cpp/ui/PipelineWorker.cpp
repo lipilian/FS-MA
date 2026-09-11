@@ -36,12 +36,38 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
     }
     publish(); emit actionFinished();
 }
-void PipelineWorker::initialize() {
-    if (source_ && source_->running()) {
-        state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
-        state_.status = "Camera session received from calibration. Previewing raw RGB; capture to freeze a pair.";
+void PipelineWorker::initialize(const QString& engine_path) {
+    // The same worker retains this instance for every subsequent reconstruction.
+    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false;
+    state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
+    fs_.reset();
+    QElapsedTimer elapsed; elapsed.start();
+    try {
+        state_.engine = "Initializing…";
+        state_.status = "Creating FS and the CUDA stream…"; publish(); checkpoint();
+        if (engine_path.trimmed().isEmpty() || !QFileInfo(state_.engine_path).isFile())
+            throw std::runtime_error("Select an existing TensorRT engine file.");
+        auto next = std::make_unique<FS>();
+        checkpoint();
+        state_.status = "Loading FoundationStereo, creating the TensorRT context and allocating inference buffers…"; publish();
+        next->loadEngine(state_.engine_path.toStdString());
+        checkpoint();
+        state_.status = "Checking that GPU initialization has completed…"; publish();
+        next->synchronize(); checkpoint();
+        fs_ = std::move(next);
+        state_.engine_ready = true;
+        state_.engine = "Ready · 960 × 800 · " + QFileInfo(state_.engine_path).fileName();
+        state_.status = "FoundationStereo is ready. Import a capture directory or preview the cameras.";
+        if (source_ && source_->running()) {
+            state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
+            state_.status = "FoundationStereo is ready. Camera session received; capture to freeze a stereo pair.";
+        }
+        emit log(QString("FoundationStereo initialized in %1 ms · engine, context, GPU I/O / XYZ, pinned host and CPU resize buffers ready.").arg(elapsed.elapsed()));
+        emit log("Confirmed calibration: " + confirmed_path_);
+    } catch (...) {
+        state_.engine = "Initialization failed · check the engine, GPU and TensorRT compatibility";
+        throw;
     }
-    emit log("Confirmed calibration: " + confirmed_path_);
 }
 void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration) {
     QElapsedTimer elapsed; elapsed.start();
@@ -131,23 +157,13 @@ void PipelineWorker::freeze() {
         .arg(fs::calibration::arrival_skew(*latest_) / 1e6, 0, 'f', 1);
     prepare(std::move(frame), input, confirmed_path_);
 }
-void PipelineWorker::reconstruct(const QString& engine_path, float minimum, float maximum) {
+void PipelineWorker::reconstruct(float minimum, float maximum) {
+    if (!state_.engine_ready || !fs_ || !fs_->isEngineLoaded())
+        throw std::runtime_error("FoundationStereo must finish splash initialization before reconstruction.");
     if (!frame_ || state_.live) throw std::runtime_error("Import or freeze a stereo pair before reconstruction.");
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum < 0 || maximum <= minimum)
         throw std::runtime_error("Depth range must satisfy 0 ≤ minimum < maximum (metres).");
     state_.gpu_ready = false; state_.stage = 1; publish();
-    checkpoint();
-    if (!fs_ || loaded_engine_ != engine_path) {
-        state_.engine = "Loading TensorRT engine…"; state_.status = state_.engine; publish();
-        QElapsedTimer elapsed; elapsed.start();
-        try {
-            auto next = std::make_unique<FS>(); next->loadEngine(engine_path.toStdString());
-            fs_ = std::move(next); loaded_engine_ = engine_path;
-        } catch (...) { state_.engine = "Engine unavailable · check the file, GPU and TensorRT compatibility"; throw; }
-        state_.engine = "Loaded · 960 × 800 · " + QFileInfo(engine_path).fileName();
-        emit log(QString("Engine loaded in %1 ms").arg(elapsed.elapsed()));
-    }
-    state_.engine = "Loaded · 960 × 800 · " + QFileInfo(loaded_engine_).fileName();
     checkpoint(); state_.status = "Running FoundationStereo inference…"; publish();
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
@@ -161,5 +177,5 @@ void PipelineWorker::reconstruct(const QString& engine_path, float minimum, floa
     emit log(state_.status);
 }
 void PipelineWorker::shutdown() {
-    disconnectCameras(); fs_.reset(); frame_.reset(); emit stopped();
+    disconnectCameras(); fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }
