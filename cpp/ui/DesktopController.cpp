@@ -1,6 +1,43 @@
 #include "DesktopController.hpp"
 #include <QApplication>
 #include <QMessageBox>
+#include <QEvent>
+#include <QTimer>
+#include <QWindow>
+
+namespace {
+// Request maximization after the native window is mapped. On GNOME/X11 an
+// initial showMaximized() can be lost while the first window size is negotiated.
+// This is a one-time startup action; later user restores/resizes are untouched.
+class MaximizeOnFirstExpose final : public QObject {
+public:
+    explicit MaximizeOnFirstExpose(QWidget* window)
+        : QObject(window), window_(window), handle_(window->windowHandle()) {
+        if (!handle_ || handle_->isExposed()) request();
+        else handle_->installEventFilter(this);
+    }
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == handle_ && event->type() == QEvent::Expose && handle_->isExposed()) request();
+        return false;
+    }
+private:
+    void request() {
+        if (handle_) handle_->removeEventFilter(this);
+        QTimer::singleShot(0, window_, [window = window_] {
+            if (window->isVisible() && !window->isMinimized()) window->showMaximized();
+        });
+        deleteLater();
+    }
+    QWidget* window_;
+    QWindow* handle_;
+};
+void showMainWindow(QWidget* window) {
+    window->show();
+    new MaximizeOnFirstExpose(window);
+}
+} // namespace
+
 DesktopController::DesktopController() : window_(std::make_unique<CalibrationWindow>(calibration_)) {
     connect(window_.get(), &CalibrationWindow::closeRequested, this, [this] {
         cancelled_ = true; calibration_.stop();
@@ -60,9 +97,9 @@ void DesktopController::openReconstruction() {
     try {
         reconstruction_ = std::make_unique<ReconstructionWindow>(*pipeline_, confirmed_, saved_path_);
         connect(reconstruction_.get(), &ReconstructionWindow::closeRequested, pipeline_.get(), &PipelineController::stop);
-        reconstruction_->show(); splash_->allowClose(); splash_.reset();
+        showMainWindow(reconstruction_.get()); splash_->allowClose(); splash_.reset();
     } catch (const std::exception& e) {
         if (splash_) splash_->showFailure(QString::fromUtf8(e.what()));
     }
 }
-void DesktopController::show() { window_->show(); }
+void DesktopController::show() { showMainWindow(window_.get()); }

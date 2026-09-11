@@ -2375,6 +2375,7 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
         <p><strong>Implemented · First-window workflow.</strong> The new <code>fs_gui</code> application opens a dedicated Qt 6 Widgets calibration window. Camera acquisition, ChArUco detection and calibration run on a background worker; the window remains responsive during computation.</p>
 
         <h4>Window layout and implemented controls</h4>
+        <p>Calibration and reconstruction open maximized. On GNOME/X11, the request is issued once after the native window is exposed so the initial size negotiation does not discard it. The loading splash remains compact.</p>
         <ul>
           <li><strong>Left panel:</strong> connect/disconnect cameras, set exposure before connecting (default 100,000 µs / 100 ms), edit and apply ChArUco board parameters, and adjust the provisional quality threshold.</li>
           <li><strong>Centre panel:</strong> left/right RGB preview, detection overlays showing ArUco marker outlines/IDs and ChArUco corners/IDs in the raw view, raw or rectified images with horizontal epilines, capture, compute and independent-check controls.</li>
