@@ -186,7 +186,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     clear_=button("Clear mask","clearMask");
     brush_size_=new QSpinBox; brush_size_->setObjectName("maskBrushSize");
     brush_size_->setRange(1,100); brush_size_->setValue(mask_->brushSize()); brush_size_->setSuffix(" px");
-    brush_size_->setToolTip("Brush width in full-resolution rectified-left pixels.");
+    brush_size_->setToolTip("Brush width in full-resolution rectified-left pixels. Shift+wheel over the image adjusts the size.");
     auto* sam_tools = new QButtonGroup(this); sam_tools->setExclusive(true);
     for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_,brush_,eraser_}) { b->setCheckable(true); sam_tools->addButton(b); }
     sam_box_->setChecked(true);
@@ -199,6 +199,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* brushes=new QHBoxLayout; brushes->addWidget(brush_); brushes->addWidget(eraser_); layout->addLayout(brushes);
     auto* brush_form=new QFormLayout; brush_form->addRow("Brush size",brush_size_); layout->addLayout(brush_form);
     layout->addWidget(clear_);
+    layout->addWidget(label("Wheel: zoom at cursor (1–5×)\nShift+wheel: brush size"));
     sam->setObjectName("maskDrawPanel"); depth->setObjectName("depthSettings"); filters->setObjectName("geometrySettings");
     settings_layout->addWidget(sam);
     auto* save_panel=group("Save results",layout); save_panel->setObjectName("saveResultsPanel");

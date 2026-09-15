@@ -44,6 +44,7 @@ protected:
     void leaveEvent(QEvent*) override;
     void wheelEvent(QWheelEvent*) override;
 private:
+    QRectF imageViewport() const;
     QRectF imageRect() const;
     QPointF toImage(QPointF position) const;
     QPointF toWidget(QPointF position) const;
@@ -65,4 +66,6 @@ private:
     std::optional<QPointF> cursor_;
     bool overlay_{true}, editing_{true}, brushing_{false}, accepted_before_stroke_{false};
     int brush_size_{50}, wheel_delta_{0};
+    qreal zoom_{1.0};
+    QPointF view_center_{0.5, 0.5}; // Normalized image coordinates at the viewport center.
 };
