@@ -1410,6 +1410,7 @@
             <a href="#capture-validation-heading">Capture Folder Validation and Calibration Naming</a>
           </div>
         </details>
+        <a href="#urgent-lens-e-vignette-validation-heading" style="color: #dc2626;">Urgent Task Lens E vignetting problem validation 2026/09/15</a>
       </div>
     </nav>
 
@@ -2567,6 +2568,17 @@ cmake --build cpp/build --target fs_gui --parallel
         <p>A failed load preserves the previous valid frozen pair. A successful load resets downstream progress. Loading does not restore <code>mask.png</code> or <code>mesh.ply</code>; mask drawing starts again for the new input. The CLI still expects the fixed name <code>calibration.json</code>.</p>
         <p><strong>Verified:</strong> every missing-file combination in both calibration modes, alternate calibration naming, empty-file and directory rejection, and retention of the previous input on error. <a href="code_structure.html#result-io">Load/save implementation →</a></p>
       </article>
+    </section>
+
+    <section class="card" aria-labelledby="urgent-lens-e-vignette-validation-heading" style="border-left: 5px solid #d97706; background: linear-gradient(135deg, #ffffff, #fff7ed);">
+      <p class="bottleneck-kicker" style="color: #b45309; font-weight: 900; letter-spacing: 0.12em;">LENS E · PRIORITY TASKS</p>
+      <h2 id="urgent-lens-e-vignette-validation-heading" style="color: #dc2626; font-size: clamp(1.8rem, 3.5vw, 3rem);">Urgent Task Lens E vignetting problem validation 2026/09/15</h2>
+      <p>Capture the small burn four times and the large burn four times, for eight captures in total. Reconstruct each capture separately and calculate its surface area to validate the Lens E vignetting problem.</p>
+      <ol>
+        <li><strong>Small burn:</strong> save the four captures in <code>data/small_burn1</code>, <code>data/small_burn2</code>, <code>data/small_burn3</code> and <code>data/small_burn4</code>.</li>
+        <li><strong>Large burn:</strong> save the four captures in <code>data/large_burn1</code>, <code>data/large_burn2</code>, <code>data/large_burn3</code> and <code>data/large_burn4</code>.</li>
+        <li><strong>Reconstruction and area:</strong> reconstruct each of the eight captures, generate its mesh and record the burn surface area in cm² for comparison across the four captures of each burn size.</li>
+      </ol>
     </section>
 
   </main>
