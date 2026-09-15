@@ -4,3 +4,4 @@ weight/
 onnx/
 cpp/build/
 Fast-FoundationStereo/
+/calibration/
