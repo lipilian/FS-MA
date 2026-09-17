@@ -339,18 +339,16 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
                        const_cast<uchar*>(grayscale.constBits()), grayscale.bytesPerLine());
     const auto inputs = fs_->prepare_gpu_mesh_inputs(mask);
     checkpoint();
-    emit log(QString("GPU mesh input preparation: %1 ms · reuse FS GPU XYZ and stream; upload current mask (%2 × %3).")
+    emit log(QString("GPU mesh input preparation: %1 ms · reuse FS GPU XYZ, RGB and stream; upload current mask (%2 × %3).")
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(inputs.width).arg(inputs.height));
-    auto mesh = fs::build_mesh_gpu(inputs, mesh_rgb_, max_edge_m, max_depth_jump_m);
+    const auto status = fs::build_mesh_gpu(inputs, max_edge_m, max_depth_jump_m);
     fs_->synchronize(); checkpoint();
-    if (!mesh) {
+    if (status == fs::MeshGPUStatus::NotImplemented) {
         // Preserve a previously generated CPU mesh; the scaffold produces no result.
         state_.status = "GPU mesh generation is not implemented yet. Use CPU mesh to generate a mesh.";
         publish(); emit log(state_.status);
         return;
     }
-    if (mesh->triangles.empty()) throw std::runtime_error("GPU mesh returned no triangles.");
-    publishMesh(std::make_shared<fs::MeshResult>(std::move(*mesh)));
 }
 void PipelineWorker::publishMesh(std::shared_ptr<fs::MeshResult> mesh) {
     const auto camera=frame_->rectified_camera_parameters();

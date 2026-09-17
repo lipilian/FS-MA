@@ -91,7 +91,7 @@ public:
     cv::Mat download_xyz_map();
 
     /** Upload the current nonempty rectified-left mask on the FS stream and
-     * borrow the latest GPU XYZ (including the denoising buffer swap). Requires
+     * borrow GPU RGB and the latest XYZ (including the denoising buffer swap). Requires
      * completed XYZ for the current inputs. No inference or XYZ transfer occurs.
      * The mask upload completes before return; consume this view immediately in
      * the same serialized action, before any further FS mutation or destruction.

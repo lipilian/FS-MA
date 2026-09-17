@@ -426,12 +426,12 @@ cv::Mat FS::download_xyz_map() {
 }
 
 fs::MeshGPUInputs FS::prepare_gpu_mesh_inputs(const cv::Mat& rectified_mask) {
-    if (!isEngineLoaded() || !xyz_ready_ || !xyz_map_device_ || !stream_)
+    if (!isEngineLoaded() || !xyz_ready_ || !xyz_map_device_ || !left_input_device_ || !stream_)
         throw std::logic_error("Reconstruct XYZ before preparing GPU mesh inputs");
     if (rectified_mask.empty() || rectified_mask.type() != CV_8UC1)
         throw std::invalid_argument("GPU mesh requires a nonempty CV_8UC1 selection mask");
     set_selection_mask(rectified_mask);
-    return {xyz_map_device_.get(), selection_mask_device_.get(),
+    return {xyz_map_device_.get(), left_input_device_.get(), selection_mask_device_.get(),
             kTensorRtInputWidth, kTensorRtInputHeight, stream_};
 }
 
