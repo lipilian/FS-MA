@@ -1395,7 +1395,7 @@
           </div>
         </details>
         <details class="toc-group">
-          <summary style="color: #dc2626;">Urgent Task with Lens E · 2026/09/09</summary>
+          <summary style="color: #15803d;">Urgent Task with Lens E · 2026/09/09 · Completed</summary>
           <div class="toc-links">
             <a href="#urgent-lens-e-heading">Overview</a>
             <a href="#sentech-lens-e-sdk-heading">Integrate the Sentech Lens E SDK</a>
@@ -1410,7 +1410,7 @@
             <a href="#capture-validation-heading">Capture Folder Validation and Calibration Naming</a>
           </div>
         </details>
-        <a href="#urgent-lens-e-vignette-validation-heading" style="color: #dc2626;">Urgent Task Lens E vignetting problem validation 2026/09/15</a>
+        <a href="#urgent-lens-e-vignette-validation-heading" style="color: #15803d;">Urgent Task Lens E vignetting problem validation 2026/09/15 · Completed</a>
       </div>
     </nav>
 
@@ -2372,9 +2372,9 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
       </article>
     </section>
 
-    <section class="card" aria-labelledby="urgent-lens-e-heading" style="border-left: 5px solid #d97706; background: linear-gradient(135deg, #ffffff, #fff7ed);">
-      <p class="bottleneck-kicker" style="color: #b45309; font-weight: 900; letter-spacing: 0.12em;">LENS E · PRIORITY TASKS</p>
-      <h2 id="urgent-lens-e-heading" style="color: #dc2626; font-size: clamp(1.8rem, 3.5vw, 3rem);">Urgent Task with Lens E · 2026/09/09</h2>
+    <section class="card" aria-labelledby="urgent-lens-e-heading" style="border-left: 5px solid #15803d; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
+      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">LENS E · COMPLETED</p>
+      <h2 id="urgent-lens-e-heading" style="color: #15803d; font-size: clamp(1.8rem, 3.5vw, 3rem);">Urgent Task with Lens E · 2026/09/09 · Completed</h2>
       <p><strong>Implementation update · 2026-09-11:</strong> the desktop now covers interactive masks, GPU depth/denoising, CPU mesh inspection, result export and strict capture-folder validation. Sections 6–10 document these additions. Hardware accuracy and long-session acceptance remain open; see the <a href="code_structure.html">updated code structure guide</a>.</p>
 
       <article class="engine-build-step" aria-labelledby="sentech-lens-e-sdk-heading">
@@ -2570,15 +2570,51 @@ cmake --build cpp/build --target fs_gui --parallel
       </article>
     </section>
 
-    <section class="card" aria-labelledby="urgent-lens-e-vignette-validation-heading" style="border-left: 5px solid #d97706; background: linear-gradient(135deg, #ffffff, #fff7ed);">
-      <p class="bottleneck-kicker" style="color: #b45309; font-weight: 900; letter-spacing: 0.12em;">LENS E · PRIORITY TASKS</p>
-      <h2 id="urgent-lens-e-vignette-validation-heading" style="color: #dc2626; font-size: clamp(1.8rem, 3.5vw, 3rem);">Urgent Task Lens E vignetting problem validation 2026/09/15</h2>
+    <section class="card" aria-labelledby="urgent-lens-e-vignette-validation-heading" style="border-left: 5px solid #15803d; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
+      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">LENS E · COMPLETED</p>
+      <h2 id="urgent-lens-e-vignette-validation-heading" style="color: #15803d; font-size: clamp(1.8rem, 3.5vw, 3rem);">Urgent Task Lens E vignetting problem validation 2026/09/15 · Completed</h2>
       <p>Capture the small burn four times and the large burn four times, for eight captures in total. Reconstruct each capture separately and calculate its surface area to validate the Lens E vignetting problem.</p>
       <ol>
         <li><strong>Small burn:</strong> save the four captures in <code>data/small_burn1</code>, <code>data/small_burn2</code>, <code>data/small_burn3</code> and <code>data/small_burn4</code>.</li>
         <li><strong>Large burn:</strong> save the four captures in <code>data/large_burn1</code>, <code>data/large_burn2</code>, <code>data/large_burn3</code> and <code>data/large_burn4</code>.</li>
         <li><strong>Reconstruction and area:</strong> reconstruct each of the eight captures, generate its mesh and record the burn surface area in cm² for comparison across the four captures of each burn size.</li>
       </ol>
+      <h3 id="lens-e-vignette-results-heading">Result <span style="font-size: 0.85em; font-weight: 400; color: var(--muted);">· thanks to sunny Ma</span></h3>
+      <p>Surface area (cm²).</p>
+      <div class="table-wrap" tabindex="0" role="region" aria-labelledby="lens-e-vignette-results-heading">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">No.</th>
+              <th scope="col" style="text-align: right;">Small</th>
+              <th scope="col" style="text-align: right;">Large</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td style="text-align: right;"><strong>189.54</strong></td><td style="text-align: right;">864.54</td></tr>
+            <tr><td>2</td><td style="text-align: right;"><strong>192.24</strong></td><td style="text-align: right;">869.86</td></tr>
+            <tr><td>3</td><td style="text-align: right;"><strong>188.02</strong></td><td style="text-align: right;">863.76</td></tr>
+            <tr><td>4</td><td style="text-align: right;"><strong>192.88</strong></td><td style="text-align: right;">871.30</td></tr>
+            <tr><th scope="row">Ground truth</th><td style="text-align: right;"><strong>880.75</strong></td><td style="text-align: right;"><strong>195.63</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3 id="lens-e-f-stereo-results-heading">Lens E / Lens F Stereo Results</h3>
+      <div class="table-wrap" tabindex="0" role="region" aria-labelledby="lens-e-f-stereo-results-heading">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Metric</th>
+              <th scope="col" style="text-align: right;">Lens E</th>
+              <th scope="col" style="text-align: right;">Lens F</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Absolute relative error</th><td style="text-align: right;">2.0267%</td><td style="text-align: right;">2.0523%</td></tr>
+            <tr><th scope="row">Signed relative error</th><td style="text-align: right;">-2.0267%</td><td style="text-align: right;">-0.2036%</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
   </main>
