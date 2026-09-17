@@ -119,7 +119,7 @@
 
     .timeline {
       --tooltip-space: 320px;
-      min-width: 1460px;
+      min-width: 1600px;
       position: relative;
       padding: 28px 28px calc(30px + var(--tooltip-space));
     }
@@ -241,7 +241,7 @@
 
     .track {
       display: grid;
-      grid-template-columns: repeat(126, minmax(0, 1fr));
+      grid-template-columns: repeat(140, minmax(0, 1fr));
       grid-template-rows: 33px 26px;
       position: relative;
       min-height: 59px;
@@ -249,9 +249,9 @@
       background-image: repeating-linear-gradient(
         90deg,
         transparent 0,
-        transparent calc(5.555556% - 1px),
-        #edf0f5 calc(5.555556% - 1px),
-        #edf0f5 5.555556%
+        transparent calc(5% - 1px),
+        #edf0f5 calc(5% - 1px),
+        #edf0f5 5%
       );
     }
 
@@ -516,8 +516,8 @@
     </div>
     <section class="summary" aria-label="Plan summary">
       <div class="summary-item">
-        <span>Schedule basis</span>
-        <strong>Task duration, not calendar dates</strong>
+        <span>2026 calendar schedule · task durations in weeks</span>
+        <strong>Lens E FS validation ends 2026/09/20</strong>
       </div>
       <div class="summary-item">
         <span>Team</span>
@@ -535,23 +535,25 @@
           <div class="prerequisite-marker" role="img" aria-label="Prerequisites must be complete before work begins"></div>
           <div class="axis">
             <div class="axis-label">Workstream</div>
-            <div class="months" aria-label="Weekly timeline">
-              <span style="left: 0%">Week 1</span>
-              <span style="left: 5.56%">Week 2</span>
-              <span style="left: 11.11%">Week 3</span>
-              <span style="left: 16.67%">Week 4</span>
-              <span style="left: 22.22%">Week 5</span>
-              <span style="left: 27.78%">Week 6</span>
-              <span style="left: 33.33%">Week 7</span>
-              <span style="left: 38.89%">Week 8</span>
-              <span style="left: 44.44%">Week 9</span>
-              <span style="left: 50%">Week 10</span>
-              <span style="left: 55.56%">Week 11</span>
-              <span style="left: 61.11%">Week 12</span>
-              <span style="left: 66.67%">Week 13</span>
-              <span style="left: 72.22%">Week 14</span>
-              <span style="left: 77.78%">Week 15</span>
-              <span style="left: 83.33%">Week 16</span>
+            <div class="months" aria-label="2026 calendar timeline, weekly ticks">
+              <span style="left: 0%">07/27</span>
+              <span style="left: 5%">08/03</span>
+              <span style="left: 10%">08/10</span>
+              <span style="left: 15%">08/17</span>
+              <span style="left: 20%">08/24</span>
+              <span style="left: 25%">08/31</span>
+              <span style="left: 30%">09/07</span>
+              <span style="left: 35%">09/14</span>
+              <span style="left: 40%">09/21</span>
+              <span style="left: 45%">09/28</span>
+              <span style="left: 50%">10/05</span>
+              <span style="left: 55%">10/12</span>
+              <span style="left: 60%">10/19</span>
+              <span style="left: 65%">10/26</span>
+              <span style="left: 70%">11/02</span>
+              <span style="left: 75%">11/09</span>
+              <span style="left: 80%">11/16</span>
+              <span style="left: 85%">11/23</span>
             </div>
           </div>
 
@@ -564,7 +566,7 @@
               </div>
             </div>
             <div class="track liu-track">
-              <span class="task-duration" style="grid-column: 1 / 15">2 weeks</span>
+              <span class="task-duration" style="grid-column: 1 / 15" title="Schedule: 2026/07/27 – 2026/08/09">2 weeks</span>
               <button class="bar liu coarse-build task-button" type="button" style="grid-column: 1 / 15" data-task="liu-coarse-build" aria-controls="task-details">
                 <small>1024 × 1244 coarse engine build</small>
                 <span class="task-tooltip" role="tooltip">
@@ -577,7 +579,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 15 / 43">4 weeks</span>
+              <span class="task-duration" style="grid-column: 15 / 43" title="Schedule: 2026/08/10 – 2026/09/06">4 weeks</span>
               <button class="bar liu repo-debug task-button" type="button" style="grid-column: 15 / 43" data-task="liu-fs-repo-debug" aria-controls="task-details">
                 <small>FS official repo debugging</small>
                 <span class="task-tooltip" role="tooltip">
@@ -592,8 +594,19 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 43 / 57">2 weeks</span>
-              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 43 / 57" data-task="liu-cuda" aria-controls="task-details">
+              <span class="task-duration" style="grid-column: 43 / 57" title="Schedule: 2026/09/07 – 2026/09/20">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 43 / 57" data-task="liu-lens-e-validation" aria-controls="task-details">
+                <small>Lens E FS validation</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Vignetting influence test.</li>
+                    <li>Single snapshot coverage test.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 57 / 71" title="Schedule: 2026/09/21 – 2026/10/04">2 weeks</span>
+              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 57 / 71" data-task="liu-cuda" aria-controls="task-details">
                 <small>CUDA pre-processing</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -604,8 +617,8 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 57 / 71">2 weeks</span>
-              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 57 / 71" data-task="liu-cpp-inferencing" aria-controls="task-details">
+              <span class="task-duration" style="grid-column: 71 / 85" title="Schedule: 2026/10/05 – 2026/10/18">2 weeks</span>
+              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 71 / 85" data-task="liu-cpp-inferencing" aria-controls="task-details">
                 <small>C++ inferencing script example</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -616,8 +629,8 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 71 / 85">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 71 / 85" data-task="liu-cuda-tensorrt-environment" aria-controls="task-details">
+              <span class="task-duration" style="grid-column: 85 / 99" title="Schedule: 2026/10/19 – 2026/11/01">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 85 / 99" data-task="liu-cuda-tensorrt-environment" aria-controls="task-details">
                 <small>CUDA 12.9 TensorRT 10.16 environment test</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -626,8 +639,8 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 85 / 99">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 85 / 99" data-task="liu-post" aria-controls="task-details">
+              <span class="task-duration" style="grid-column: 99 / 113" title="Schedule: 2026/11/02 – 2026/11/15">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 99 / 113" data-task="liu-post" aria-controls="task-details">
                 <small>CUDA post-processing</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -639,8 +652,8 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 99 / 113">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 99 / 113" data-task="liu-evaluation" aria-controls="task-details">
+              <span class="task-duration" style="grid-column: 113 / 127" title="Schedule: 2026/11/16 – 2026/11/29">2 weeks</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 113 / 127" data-task="liu-evaluation" aria-controls="task-details">
                 <small>End-to-end evaluation</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -651,8 +664,8 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration tbd" style="grid-column: 113 / 127">TBD</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 113 / 127" data-task="liu-deployment" aria-controls="task-details">
+              <span class="task-duration tbd" style="grid-column: 127 / 141" title="Schedule: from 2026/11/30; completion TBD">TBD</span>
+              <button class="bar liu task-button" type="button" style="grid-column: 127 / 141" data-task="liu-deployment" aria-controls="task-details">
                 <small>FFS model deployment</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -674,7 +687,7 @@
               </div>
             </div>
             <div class="track etienne-track">
-              <span class="task-duration etienne-duration" style="grid-column: 1 / 8">1 week</span>
+              <span class="task-duration etienne-duration" style="grid-column: 1 / 8" title="Schedule: 2026/07/27 – 2026/08/02">1 week</span>
               <button class="bar etienne task-button compact-label" type="button" style="grid-column: 1 / 8" data-task="etienne-pipeline-review" aria-controls="task-details">
                 <small>Python pipeline review</small>
                 <span class="task-tooltip" role="tooltip">
@@ -684,7 +697,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration etienne-duration" style="grid-column: 8 / 50">6 weeks</span>
+              <span class="task-duration etienne-duration" style="grid-column: 8 / 50" title="Schedule: 2026/08/03 – 2026/09/13">6 weeks</span>
               <button class="bar etienne task-button" type="button" style="grid-column: 8 / 50" data-task="etienne-point-cloud" aria-controls="task-details">
                 <small>3D point-cloud processing</small>
                 <span class="task-tooltip" role="tooltip">
@@ -699,7 +712,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration etienne-duration" style="grid-column: 50 / 106">8 weeks</span>
+              <span class="task-duration etienne-duration" style="grid-column: 50 / 106" title="Schedule: 2026/09/14 – 2026/11/08">8 weeks</span>
               <button class="bar etienne task-button" type="button" style="grid-column: 50 / 106" data-task="etienne-windows" aria-controls="task-details">
                 <small>Windows SW deployment</small>
                 <span class="task-tooltip" role="tooltip">
@@ -714,7 +727,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration etienne-duration" style="grid-column: 106 / 113">1 week</span>
+              <span class="task-duration etienne-duration" style="grid-column: 106 / 113" title="Schedule: 2026/11/09 – 2026/11/15">1 week</span>
               <button class="bar etienne task-button compact-label" type="button" style="grid-column: 106 / 113" data-task="etienne-merge-liu" aria-controls="task-details">
                 <small>Merge Liu’s pipeline</small>
                 <span class="task-tooltip" role="tooltip">
@@ -736,7 +749,7 @@
               </div>
             </div>
             <div class="track leo-track">
-              <span class="task-duration leo-duration" style="grid-column: 1 / 8">1 week</span>
+              <span class="task-duration leo-duration" style="grid-column: 1 / 8" title="Schedule: 2026/07/27 – 2026/08/02">1 week</span>
               <button class="bar leo task-button compact-label" type="button" style="grid-column: 1 / 8" data-task="leo-pipeline-review" aria-controls="task-details">
                 <small>Python pipeline review</small>
                 <span class="task-tooltip" role="tooltip">
@@ -746,7 +759,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration leo-duration" style="grid-column: 8 / 50">6 weeks</span>
+              <span class="task-duration leo-duration" style="grid-column: 8 / 50" title="Schedule: 2026/08/03 – 2026/09/13">6 weeks</span>
               <button class="bar leo task-button" type="button" style="grid-column: 8 / 50" data-task="leo-capture" aria-controls="task-details">
                 <small>Capture development &amp; camera coordination</small>
                 <span class="task-tooltip" role="tooltip">
@@ -761,7 +774,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration leo-duration" style="grid-column: 50 / 106">8 weeks</span>
+              <span class="task-duration leo-duration" style="grid-column: 50 / 106" title="Schedule: 2026/09/14 – 2026/11/08">8 weeks</span>
               <button class="bar leo task-button" type="button" style="grid-column: 50 / 106" data-task="leo-mvs" aria-controls="task-details">
                 <small>MVS replacement evaluation &amp; stability testing</small>
                 <span class="task-tooltip" role="tooltip">
@@ -773,7 +786,7 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration leo-duration" style="grid-column: 106 / 113">1 week</span>
+              <span class="task-duration leo-duration" style="grid-column: 106 / 113" title="Schedule: 2026/11/09 – 2026/11/15">1 week</span>
               <button class="bar leo task-button compact-label" type="button" style="grid-column: 106 / 113" data-task="leo-test-etienne" aria-controls="task-details">
                 <small>Test Etienne’s pipeline</small>
                 <span class="task-tooltip" role="tooltip">
@@ -790,7 +803,7 @@
 
       <section class="task-details" id="task-details" hidden aria-live="polite">
         <h2 id="task-title">Liu Hong — CUDA pre-processing</h2>
-        <p id="task-period">Duration: 2 weeks</p>
+        <p id="task-period">Schedule: 2026/09/21 – 2026/10/04</p>
         <ul id="task-list">
           <li>GPU memory holding for the second model.</li>
           <li>Resolution padding for DINO dimension fitting.</li>
@@ -809,7 +822,7 @@
     const taskData = {
       "liu-coarse-build": {
         title: "Liu Hong — 1024 × 1244 coarse engine build",
-        duration: "Duration: 2 weeks",
+        duration: "Schedule: 2026/07/27 – 2026/08/09",
         items: [
           "Myelin static operation fails for GRU iterations, so auto-tuning cannot start.",
           "Inference time is abnormally high—far higher than Python performance.",
@@ -819,7 +832,7 @@
       },
       "liu-fs-repo-debug": {
         title: "Liu Hong — FS official repo debugging",
-        duration: "Duration: 4 weeks",
+        duration: "Schedule: 2026/08/10 – 2026/09/06",
         items: [
           "Check whether the original FS repo hits the same error during ONNX build. (Completed)",
           "Validate the deployable model on NGC; similar errors persist. (Completed)",
@@ -829,9 +842,17 @@
           "Implement a GWC-only TensorRT plugin to replace gwc_volume = build_gwc_volume(features_left[0], features_right[0], self.args.max_disp // 4, self.cv_group); keep the concat-volume path in TensorRT."
         ]
       },
+      "liu-lens-e-validation": {
+        title: "Liu Hong — Lens E FS validation",
+        duration: "Schedule: 2026/09/07 – 2026/09/20",
+        items: [
+          "Vignetting influence test.",
+          "Single snapshot coverage test."
+        ]
+      },
       "liu-cuda": {
         title: "Liu Hong — CUDA pre-processing",
-        duration: "Duration: 2 weeks",
+        duration: "Schedule: 2026/09/21 – 2026/10/04",
         items: [
           "GPU memory holding for the second model.",
           "Resolution padding for DINO dimension fitting.",
@@ -840,7 +861,7 @@
       },
       "liu-cpp-inferencing": {
         title: "Liu Hong — C++ inferencing script example",
-        duration: "Duration: 2 weeks",
+        duration: "Schedule: 2026/10/05 – 2026/10/18",
         items: [
           "Load a TensorRT Engine with the GWC Plugin.",
           "Stereo Preprocessing · 800 × 960 with Intrinsic Rescale.",
@@ -849,14 +870,14 @@
       },
       "liu-cuda-tensorrt-environment": {
         title: "Liu Hong — CUDA 12.9 TensorRT 10.16 environment test",
-        duration: "Duration: 2 weeks",
+        duration: "Schedule: 2026/10/19 – 2026/11/01",
         items: [
           "Test the CUDA 12.9 and TensorRT 10.16 environment."
         ]
       },
       "liu-post": {
         title: "Liu Hong — CUDA post-processing",
-        duration: "Duration: 2 weeks",
+        duration: "Schedule: 2026/11/02 – 2026/11/15",
         items: [
           "Disparity unpadding.",
           "3D point-cloud projection.",
@@ -866,7 +887,7 @@
       },
       "liu-evaluation": {
         title: "Liu Hong — End-to-end evaluation",
-        duration: "Duration: 2 weeks",
+        duration: "Schedule: 2026/11/16 – 2026/11/29",
         items: [
           "Profile GPU performance: latency, peak memory, and stability.",
           "Test deviation from Python/PyTorch FP32 inference.",
@@ -875,7 +896,7 @@
       },
       "liu-deployment": {
         title: "Liu Hong — FFS model deployment",
-        duration: "Duration: TBD",
+        duration: "Schedule: from 2026/11/30; completion TBD",
         items: [
           "Provide a live disparity preview so users can capture higher-quality stereo images.",
           "Preserve a future path for scanning and SLAM reconstruction integrated with an IMU."
@@ -883,7 +904,7 @@
       },
       "etienne-point-cloud": {
         title: "Etienne Dor — 3D point-cloud processing",
-        duration: "Duration: 6 weeks",
+        duration: "Schedule: 2026/08/03 – 2026/09/13",
         items: [
           "Project valid disparity to a point cloud and hand it to Software for visualization; coordinate closely with the Software team.",
           "Apply CUDA point-cloud denoising using a volume-hash algorithm.",
@@ -895,14 +916,14 @@
       },
       "etienne-pipeline-review": {
         title: "Etienne Dor — Python pipeline review",
-        duration: "Duration: 1 week",
+        duration: "Schedule: 2026/07/27 – 2026/08/02",
         items: [
           "Read the existing Python code and understand the current end-to-end pipeline."
         ]
       },
       "etienne-windows": {
         title: "Etienne Dor — Windows SW deployment",
-        duration: "Duration: 8 weeks",
+        duration: "Schedule: 2026/09/14 – 2026/11/08",
         items: [
           "Coordinate with Software to establish visualization, input, and output requirements.",
           "Design the pipeline permitted and supported in Windows.",
@@ -914,21 +935,21 @@
       },
       "etienne-merge-liu": {
         title: "Etienne Dor — Merge Liu’s pipeline",
-        duration: "Duration: 1 week",
+        duration: "Schedule: 2026/11/09 – 2026/11/15",
         items: [
           "Merge Liu’s pipeline into the Windows software deployment pipeline."
         ]
       },
       "leo-pipeline-review": {
         title: "Leo — Python pipeline review",
-        duration: "Duration: 1 week",
+        duration: "Schedule: 2026/07/27 – 2026/08/02",
         items: [
           "Read the existing Python code and understand the current end-to-end pipeline."
         ]
       },
       "leo-capture": {
         title: "Leo — Capture development & camera coordination",
-        duration: "Duration: 4 weeks",
+        duration: "Schedule: 2026/08/03 – 2026/09/13",
         items: [
           "Coordinate with Optics and Hardware on required camera parameters, and minimize imaging-head LED impact on RGB stereo images so illumination does not cause left/right feature inconsistency.",
           "Participate in camera and LED calibration; assess simultaneous MSI and stereo capture so neither image quality is adversely affected.",
@@ -940,7 +961,7 @@
       },
       "leo-mvs": {
         title: "Leo — MVS replacement evaluation & stability testing",
-        duration: "Duration: 8 weeks",
+        duration: "Schedule: 2026/09/14 – 2026/11/08",
         items: [
           "Evaluate replacing MVS with a 3D-projection algorithm; conduct Python tests and assess the impact on MSI segmentation.",
           "Evaluate an alternative that performs disparity matching between the two MSI cameras to replace MVS.",
@@ -949,7 +970,7 @@
       },
       "leo-test-etienne": {
         title: "Leo — Test Etienne’s pipeline",
-        duration: "Duration: 1 week",
+        duration: "Schedule: 2026/11/09 – 2026/11/15",
         items: [
           "Test Etienne’s pipeline."
         ]
