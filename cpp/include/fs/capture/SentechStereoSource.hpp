@@ -13,9 +13,9 @@ struct SentechDeviceInfo {
 
 struct SentechStereoOptions {
     // Match exact display name, user-defined name, or serial; never discovery order.
-    std::string left{"STC-MCS500U3V(21LJ530)"};
-    std::string right{"STC-MCS500U3V(21LJ548)"};
-    double exposure_us{50000.0};
+    std::string left{"STC-MCS500U3V(21LJ548)"};
+    std::string right{"STC-MCS500U3V(21LJ530)"};
+    double exposure_us{100000.0};
     std::chrono::milliseconds max_arrival_skew{100};
 };
 

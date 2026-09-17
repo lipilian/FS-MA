@@ -46,7 +46,9 @@ int main(int argc, char* argv[]) {
             fs.inference();
         }
 
-        // Continue processing FS's GPU-resident disparity here.
+        Logger::log("Computing XYZ map (0 < depth <= 1 m).");
+        fs.compute_xyz_map();
+        Logger::log("XYZ reconstruction completed on GPU.");
         return 0;
     } catch (const std::exception& error) {
         Logger::error(std::string("stereo_rectify: ") + error.what());

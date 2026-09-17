@@ -32,7 +32,7 @@
       "problemMatcher": "$gcc"
     },
     {
-      "label": "Configure Sentech (Release)",
+      "label": "Configure FS GUI (Release)",
       "type": "shell",
       "command": "cmake",
       "args": [
@@ -40,23 +40,22 @@
         "${workspaceFolder}/cpp",
         "-B",
         "${workspaceFolder}/cpp/build",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DFS_BUILD_SENTECH=ON"
+        "-DCMAKE_BUILD_TYPE=Release"
       ],
       "problemMatcher": []
     },
     {
-      "label": "Build Sentech",
+      "label": "Build FS GUI",
       "type": "shell",
       "command": "cmake",
       "args": [
         "--build",
         "${workspaceFolder}/cpp/build",
         "--target",
-        "fs_sentech",
+        "fs_gui",
         "--parallel"
       ],
-      "dependsOn": "Configure Sentech (Release)",
+      "dependsOn": "Configure FS GUI (Release)",
       "dependsOrder": "sequence",
       "problemMatcher": "$gcc"
     }

@@ -1,10 +1,13 @@
 #include "fs/inference/FS.hpp"
 
 #include "fs/inference/plugins/GWCVolumePlugin.hpp"
+#include "fs/inference/PostProcessing.hpp"
 
 #include <cuda_runtime_api.h>
 #include <opencv2/imgproc.hpp>
 
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -68,8 +71,10 @@ FS::FS() {
                "failed to create CUDA stream");
 }
 FS::~FS() {
-    // The stream waits for outstanding work before its buffers are released.
+    // Explicitly wait before releasing buffers and TensorRT resources. Destruction
+    // cannot report errors; callers use synchronize() to check completion.
     if (stream_ != nullptr) {
+        cudaStreamSynchronize(stream_);
         cudaStreamDestroy(stream_);
     }
 }
@@ -96,6 +101,13 @@ void FS::CudaHostBufferDeleter::operator()(float* pointer) const noexcept {
     if (pointer != nullptr) {
         cudaFreeHost(pointer);
     }
+}
+
+void FS::CudaDeviceBufferDeleter::operator()(unsigned char* pointer) const noexcept {
+    if (pointer != nullptr) cudaFree(pointer);
+}
+void FS::CudaHostBufferDeleter::operator()(unsigned char* pointer) const noexcept {
+    if (pointer != nullptr) cudaFreeHost(pointer);
 }
 
 void FS::check_cuda(cudaError_t status, const char* operation) {
@@ -188,10 +200,18 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
               << " MiB)"
               << std::endl;
 
+    // Previous work must finish before replacing its context or buffers.
+    synchronize();
     execution_context_ = std::move(execution_context);
     engine_ = std::move(engine);
     runtime_ = std::move(runtime);
-    allocate_input_buffers();
+    try {
+        allocate_input_buffers();
+    } catch (...) {
+        // A partially allocated/bound engine must not appear ready to callers.
+        execution_context_.reset();
+        throw;
+    }
 }
 
 void FS::allocate_input_buffers() {
@@ -223,6 +243,11 @@ void FS::allocate_input_buffers() {
                                              kTensorRtInputHeight * kTensorRtInputWidth;
     const std::size_t output_byte_count = output_element_count * sizeof(float);
 
+    model_left_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC3);
+    model_right_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC3);
+    model_mask_.create(kTensorRtInputHeight, kTensorRtInputWidth, CV_8UC1);
+    selection_mask_ready_=false;
+
     void* left_device = nullptr;
     check_cuda(cudaMalloc(&left_device, input_byte_count), "failed to allocate left TensorRT input buffer");
     left_input_device_.reset(static_cast<float*>(left_device));
@@ -235,6 +260,21 @@ void FS::allocate_input_buffers() {
     check_cuda(cudaMalloc(&disparity_device, output_byte_count),
                "failed to allocate TensorRT disparity output buffer");
     disparity_output_device_.reset(static_cast<float*>(disparity_device));
+
+    void* xyz_device = nullptr;
+    check_cuda(cudaMalloc(&xyz_device, output_element_count * 3 * sizeof(float)),
+               "failed to allocate XYZ map buffer");
+    xyz_map_device_.reset(static_cast<float*>(xyz_device));
+
+    void* xyz_scratch = nullptr;
+    check_cuda(cudaMalloc(&xyz_scratch, output_element_count * 3 * sizeof(float)), "failed to allocate XYZ denoising scratch");
+    xyz_scratch_device_.reset(static_cast<float*>(xyz_scratch));
+    void* mask_device = nullptr;
+    check_cuda(cudaMalloc(&mask_device, output_element_count), "failed to allocate GPU selection mask");
+    selection_mask_device_.reset(static_cast<unsigned char*>(mask_device));
+    void* mask_host = nullptr;
+    check_cuda(cudaMallocHost(&mask_host, output_element_count), "failed to allocate pinned selection mask");
+    selection_mask_host_.reset(static_cast<unsigned char*>(mask_host));
 
     void* left_host = nullptr;
     check_cuda(cudaMallocHost(&left_host, input_byte_count), "failed to allocate pinned left input buffer");
@@ -253,6 +293,14 @@ void FS::allocate_input_buffers() {
 
 void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
                                      const cv::Size& rectified_image_size) {
+    if (rectified_image_size.width <= 0 || rectified_image_size.height <= 0 ||
+        !std::isfinite(rectified_camera_parameters.fx) || rectified_camera_parameters.fx <= 0.0 ||
+        !std::isfinite(rectified_camera_parameters.fy) || rectified_camera_parameters.fy <= 0.0 ||
+        !std::isfinite(rectified_camera_parameters.cx) || !std::isfinite(rectified_camera_parameters.cy) ||
+        !std::isfinite(rectified_camera_parameters.baseline_meters) ||
+        rectified_camera_parameters.baseline_meters <= 0.0F) {
+        throw std::invalid_argument("XYZ reconstruction requires valid camera parameters and image size");
+    }
     const double scale_x = static_cast<double>(rectified_image_size.width) / kTensorRtInputWidth;
     const double scale_y = static_cast<double>(rectified_image_size.height) / kTensorRtInputHeight;
     model_camera_parameters_ = rectified_camera_parameters;
@@ -263,6 +311,7 @@ void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_cam
 }
 
 void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
+    selection_mask_ready_=false;
     if (!isEngineLoaded() || stream_ == nullptr || !left_input_device_ || !right_input_device_) {
         throw std::logic_error("loadEngine must complete before preparing TensorRT inputs");
     }
@@ -319,6 +368,59 @@ void FS::inference() {
     }
 }
 
+void FS::compute_xyz_map(float min_depth_m, float max_depth_m) {
+    if (!isEngineLoaded() || !disparity_output_device_ || !xyz_map_device_) {
+        throw std::logic_error("loadEngine must complete before XYZ reconstruction");
+    }
+    const auto& camera = model_camera_parameters_;
+    check_cuda(fs::postprocessing::compute_xyz_map(
+                   disparity_output_device_.get(), xyz_map_device_.get(), nullptr,
+                   kTensorRtInputWidth, kTensorRtInputHeight,
+                   static_cast<float>(camera.fx), static_cast<float>(camera.fy),
+                   static_cast<float>(camera.cx), static_cast<float>(camera.cy), camera.baseline_meters,
+                   min_depth_m, max_depth_m, stream_),
+               "failed to launch XYZ reconstruction");
+    synchronize();
+}
+
+void FS::set_selection_mask(const cv::Mat& rectified_mask) {
+    if (!isEngineLoaded() || !selection_mask_device_ || !selection_mask_host_)
+        throw std::logic_error("loadEngine must complete before uploading a mask");
+    if (rectified_mask.empty()) { selection_mask_ready_=false; return; }
+    if (rectified_mask.type()!=CV_8UC1) throw std::invalid_argument("Selection mask must be CV_8UC1");
+    selection_mask_ready_=false;
+    cv::resize(rectified_mask, model_mask_, cv::Size(kTensorRtInputWidth,kTensorRtInputHeight), 0,0,cv::INTER_NEAREST);
+    const size_t bytes=size_t(kTensorRtInputWidth)*kTensorRtInputHeight;
+    std::memcpy(selection_mask_host_.get(),model_mask_.data,bytes);
+    check_cuda(cudaMemcpyAsync(selection_mask_device_.get(),selection_mask_host_.get(),bytes,
+                              cudaMemcpyHostToDevice,stream_),"failed to upload selection mask");
+    synchronize(); selection_mask_ready_=true;
+}
+void FS::denoise_xyz_map(float max_neighbor_distance_m, int min_neighbors, int edge_min_neighbors) {
+    if (!isEngineLoaded() || !xyz_map_device_ || !xyz_scratch_device_)
+        throw std::logic_error("loadEngine and compute_xyz_map must complete before denoising");
+    check_cuda(fs::postprocessing::denoise_xyz_map(
+        xyz_map_device_.get(),xyz_scratch_device_.get(),selection_mask_ready_ ? selection_mask_device_.get() : nullptr,
+        kTensorRtInputWidth,kTensorRtInputHeight,max_neighbor_distance_m,min_neighbors,edge_min_neighbors,stream_),
+        "failed to launch XYZ denoising");
+    synchronize(); xyz_map_device_.swap(xyz_scratch_device_);
+}
+
+cv::Mat FS::download_xyz_map() {
+    if (!isEngineLoaded() || !xyz_map_device_) {
+        throw std::logic_error("loadEngine and compute_xyz_map must complete before downloading XYZ");
+    }
+    cv::Mat xyz(kTensorRtInputHeight, kTensorRtInputWidth, CV_32FC3);
+    check_cuda(cudaMemcpyAsync(xyz.data, xyz_map_device_.get(), xyz.total() * xyz.elemSize(),
+                               cudaMemcpyDeviceToHost, stream_), "failed to download XYZ map");
+    synchronize();
+    return xyz;
+}
+
+void FS::synchronize() {
+    check_cuda(cudaStreamSynchronize(stream_), "failed to complete FS CUDA work");
+}
+
 float FS::inference_time_measure() {
     if (!isEngineLoaded() || stream_ == nullptr || !disparity_output_device_) {
         throw std::logic_error("loadEngine must complete before TensorRT inference");
@@ -335,9 +437,7 @@ float FS::inference_time_measure() {
         for (int iteration = 0; iteration < kInferenceIterations; ++iteration) {
             check_cuda(cudaEventRecord(start, stream_), "failed to record TensorRT inference start event");
 
-            if (!execution_context_->enqueueV3(stream_)) {
-                throw std::runtime_error("failed to enqueue TensorRT inference");
-            }
+            inference();
 
             check_cuda(cudaEventRecord(stop, stream_), "failed to record TensorRT inference stop event");
             check_cuda(cudaEventSynchronize(stop), "failed to synchronize TensorRT inference stop event");
