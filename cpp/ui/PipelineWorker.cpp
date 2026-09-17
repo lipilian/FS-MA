@@ -16,6 +16,12 @@ namespace {
 QImage image(const cv::Mat& rgb) {
     return QImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888).copy();
 }
+fs::MeshCamera meshCamera(const StereoFrame& frame, cv::Size mesh_size) {
+    const auto camera=frame.rectified_camera_parameters();
+    const double sx=double(mesh_size.width)/frame.rectified_left().cols;
+    const double sy=double(mesh_size.height)/frame.rectified_left().rows;
+    return {cv::Matx33d(camera.fx*sx,0,camera.cx*sx,0,camera.fy*sy,camera.cy*sy,0,0,1),mesh_size};
+}
 QImage thumbnail(const cv::Mat& rgb) {
     cv::Mat small;
     cv::resize(rgb, small, {}, std::min(1.0, 960.0 / rgb.cols), std::min(1.0, 960.0 / rgb.cols));
@@ -55,7 +61,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
         state_.status = "Creating FS and the CUDA stream…"; publish(); checkpoint();
         if (engine_path.trimmed().isEmpty() || !QFileInfo(state_.engine_path).isFile())
             throw std::runtime_error("Select an existing TensorRT engine file.");
-        auto next = std::make_unique<FS>();
+        auto next = std::make_shared<FS>();
         checkpoint();
         state_.status = "Loading FoundationStereo, creating the TensorRT context and allocating inference buffers…"; publish();
         next->loadEngine(state_.engine_path.toStdString());
@@ -323,7 +329,12 @@ void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {
     checkpoint();
     const double mesh_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Mesh build: %1 ms (CPU)").arg(mesh_ms,0,'f',3));
-    publishMesh(std::move(mesh));
+    mesh->camera=meshCamera(*frame_,mesh_xyz_.size());
+    state_.status = QString("Mesh ready · %1 vertices · %2 triangles · %3 cm²")
+        .arg(mesh->vertices.size()).arg(mesh->triangles.size()).arg(mesh->area_m2 * 1e4, 0, 'f', 2);
+    if (mesh->skipped_components) emit log(QString("Skipped %1 mask components with insufficient points or degenerate boundaries.").arg(mesh->skipped_components));
+    latest_mesh_=mesh;
+    publish(); emit meshReady(mesh); emit log(state_.status);
 }
 void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m, double max_depth_jump_m) {
     if (!state_.depth_ready || !state_.gpu_ready || state_.live || !frame_ || !fs_ || !fs_->isEngineLoaded())
@@ -341,26 +352,22 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
     checkpoint();
     emit log(QString("GPU mesh input preparation: %1 ms · reuse FS GPU XYZ, RGB and stream; upload current mask (%2 × %3).")
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(inputs.width).arg(inputs.height));
-    const auto status = fs::build_mesh_gpu(inputs, max_edge_m, max_depth_jump_m);
-    fs_->synchronize(); checkpoint();
-    if (status == fs::MeshGPUStatus::NotImplemented) {
-        // Preserve a previously generated CPU mesh; the scaffold produces no result.
-        state_.status = "GPU mesh generation is not implemented yet. Use CPU mesh to generate a mesh.";
-        publish(); emit log(state_.status);
-        return;
-    }
-}
-void PipelineWorker::publishMesh(std::shared_ptr<fs::MeshResult> mesh) {
-    const auto camera=frame_->rectified_camera_parameters();
-    const double sx=double(mesh_xyz_.cols)/frame_->rectified_left().cols;
-    const double sy=double(mesh_xyz_.rows)/frame_->rectified_left().rows;
-    mesh->camera=fs::MeshCamera{cv::Matx33d(camera.fx*sx,0,camera.cx*sx,
-                                          0,camera.fy*sy,camera.cy*sy,0,0,1),mesh_xyz_.size()};
-    state_.status = QString("Mesh ready · %1 vertices · %2 triangles · %3 cm²")
-        .arg(mesh->vertices.size()).arg(mesh->triangles.size()).arg(mesh->area_m2 * 1e4, 0, 'f', 2);
-    if (mesh->skipped_components) emit log(QString("Skipped %1 mask components with insufficient points or degenerate boundaries.").arg(mesh->skipped_components));
-    latest_mesh_=mesh;
-    publish(); emit meshReady(mesh); emit log(state_.status);
+    elapsed.restart();
+    if (!gpu_mesh_ || !gpu_mesh_.unique()) gpu_mesh_=std::make_shared<fs::MeshGPUBuffer>();
+    const auto stats = fs::build_mesh_gpu(inputs, *gpu_mesh_, max_edge_m, max_depth_jump_m);
+    checkpoint();
+    emit log(QString("GPU mesh build + reduction: %1 ms · %2 triangles · %3 cm²")
+        .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(stats.triangle_count).arg(stats.area_m2*1e4,0,'f',2));
+    if (!stats.triangle_count) throw std::runtime_error("GPU mesh has no triangles after filtering.");
+    auto mesh=std::make_shared<GPUMeshFrame>();
+    mesh->buffer=gpu_mesh_; mesh->stats=stats; mesh->stream=inputs.stream; mesh->stream_owner=fs_;
+    const auto error=cudaGetDevice(&mesh->device);
+    if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    mesh->camera=meshCamera(*frame_,{inputs.width,inputs.height});
+    latest_mesh_.reset();
+    state_.status = QString("GPU mesh ready · %1 triangles · %2 cm²")
+        .arg(stats.triangle_count).arg(stats.area_m2*1e4,0,'f',2);
+    publish(); emit log(state_.status); emit gpuMeshReady(std::move(mesh));
 }
 void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOptions options,
                                  const QImage& selection, SharedMesh mesh, bool overwrite) {
@@ -464,5 +471,5 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
     }
 }
 void PipelineWorker::shutdown() {
-    disconnectCameras(); sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
+    disconnectCameras(); gpu_mesh_.reset(); sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }

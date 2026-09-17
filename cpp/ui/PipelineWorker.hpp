@@ -4,6 +4,7 @@
 #include "fs/inference/SamSegmenter.hpp"
 #include "fs/geometry/MeshBuilder.hpp"
 #include <atomic>
+#include "GPUMeshFrame.hpp"
 
 using SharedMesh = std::shared_ptr<const fs::MeshResult>;
 Q_DECLARE_METATYPE(SharedMesh)
@@ -23,7 +24,7 @@ struct PipelineState {
 };
 Q_DECLARE_METATYPE(PipelineState)
 
-// Serialized source, CPU and GPU work. Qt widgets only receive owned QImage snapshots.
+// Serialized source, CPU and GPU work. The GUI receives owned images and immutable mesh results.
 class PipelineWorker : public QObject {
     Q_OBJECT
 public:
@@ -53,6 +54,7 @@ signals:
     void preview(QImage left, QImage right, bool rectified);
     void depthImages(QImage rectified_left, QImage depth_rgb, float minimum, float maximum);
     void meshReady(SharedMesh mesh);
+    void gpuMeshReady(SharedGPUMesh mesh);
     void maskReady(quint64 image_id, quint64 request_id, QImage mask, QString message);
     void log(QString message);
     void actionFinished();
@@ -60,7 +62,6 @@ signals:
 private:
     void poll();
     void publish();
-    void publishMesh(std::shared_ptr<fs::MeshResult> mesh);
     QString liveStatus() const;
     void emitPreview();
     void checkpoint() const;
@@ -78,11 +79,12 @@ private:
     cv::Mat preview_left_map_x_, preview_left_map_y_, preview_right_map_x_, preview_right_map_y_;
     cv::Mat preview_left_, preview_right_;
     std::unique_ptr<StereoFrame> frame_;
-    std::unique_ptr<FS> fs_;
+    std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
     // Owned snapshots from the depth display download; meshing never downloads XYZ again.
     cv::Mat mesh_xyz_, mesh_mask_, mesh_rgb_;
     QByteArray calibration_json_;
     SharedMesh latest_mesh_;
+    std::shared_ptr<fs::MeshGPUBuffer> gpu_mesh_;
     PipelineState state_;
 };

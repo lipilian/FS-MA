@@ -1393,6 +1393,7 @@
             <a href="#inference-memory-heading">Inference Memory Reduction</a>
             <a href="#disparity-filter-heading">Disparity Filter + XYZ · Fused CUDA Processing</a>
             <a href="#cpu-cdt-heading">CPU Constrained Delaunay Triangulation (CDT)</a>
+            <a href="#gpu-dt-heading">GPU Delaunay Triangulation (DT)</a>
           </div>
         </details>
         <details class="toc-group">
@@ -2400,6 +2401,39 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
         </ol>
         <p><strong style="color: #b42318;">Disadvantage — slow CPU mesh generation:</strong> Triangle alone takes about 335 ms, roughly two-thirds of the total mesh-build time for this fixture, making triangulation the main performance bottleneck.</p>
       </article>
+
+      <article class="engine-build-step" aria-labelledby="gpu-dt-heading">
+        <h3 id="gpu-dt-heading">7. GPU Delaunay Triangulation (DT)</h3>
+        <p class="note"><strong>Current algorithm:</strong> local pixel-grid triangulation with a fixed diagonal. It does not perform Delaunay edge selection or constrained Delaunay triangulation.</p>
+        <h4>GPU mesh build · Implemented</h4>
+        <p>The <strong>GPU mesh</strong> button calls <code>fs::build_mesh_gpu()</code> in <code>MeshBuilderGPU.cu</code>. It borrows the current FS GPU XYZ and left RGB tensor (FP32 NCHW, 0–255), uploads the current confirmed mask and runs on the existing FS CUDA stream. The XYZ pointer follows the latest denoising buffer swap. No new inference or XYZ/RGB transfer is required for mesh construction.</p>
+        <ol>
+          <li><strong>Thread layout:</strong> 16 × 16 threads per block, with a 60 × 50 block grid covering the 960-pixel-wide × 800-pixel-high image. Each thread handles one 2 × 2 pixel cell; the final row and column produce no triangles.</li>
+          <li><strong>Corner validity:</strong> mask is nonzero, all XYZ components are finite and Z is positive. Four valid corners produce two triangles along the top-left / bottom-right diagonal; three valid corners produce one; fewer produce none.</li>
+          <li><strong>Depth-discontinuity filtering:</strong> reject each triangle independently if any 3D edge exceeds the configured maximum (default 0.02 m), its Z range exceeds the configured depth jump (default 0.01 m), or its area is zero. There is no hole filling or connection of sparse points beyond the cell.</li>
+          <li><strong>Area reduction:</strong> compute 3D triangle areas from the original metric XYZ, sum within each block and then reduce all block totals on the GPU. The reductions also find the bounds of emitted vertices for view fitting. Only the final area, triangle count and six bounding-box coordinates return to the CPU; geometry stays on the GPU.</li>
+          <li><strong>Device output:</strong> reusable GPU storage reserves six vertices per cell. Unused triangle slots are zeroed. Each vertex contains six FP32 values: XYZ in metres and RGB normalized to 0–1.</li>
+        </ol>
+        <h4>Measured performance · data/mask_bug</h4>
+        <p>Two local button runs with bounds reduction and the default denoising and mesh thresholds produced <strong>878,844 triangles</strong> and <strong>3821.64 cm²</strong>. These are observed wall-clock timings, not a general benchmark; they exclude inference, depth preparation and GUI rendering.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="GPU grid mesh build timing">
+          <table>
+            <thead><tr><th scope="col">Stage</th><th scope="col">Observed time</th></tr></thead>
+            <tbody>
+              <tr><td>Prepare GPU inputs and upload the current mask</td><td>0.62–0.63 ms</td></tr>
+              <tr><td>GPU mesh build, area/count/bounds reduction and statistics download</td><td><strong>1.75–2.89 ms</strong></td></tr>
+              <tr><td>CUDA/OpenGL VBO setup and handoff (separate renderer test)</td><td>3.82 ms on first upload; 0.49 ms with the registered VBO reused</td></tr>
+              <tr><td>OpenGL drawing / frame presentation</td><td>Verified visually; frame time not benchmarked</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Validation:</strong> the build passed, 41 cases matched an independent CPU reference for corner validity, depth/edge filtering, partial blocks, output reuse, RGB, area and bounds, and CUDA memory checking reported zero errors. The real-capture button flow passed with hardware OpenGL on NVIDIA RTX PRO 4000 Blackwell, including completion, CPU/GPU switching, parameter invalidation and export gating.</p>
+        <h4>GPU render · Implemented</h4>
+        <p>The fourth-tab viewer receives an immutable, completed GPU mesh. With its OpenGL context current, it registers a VBO with CUDA, maps it, copies vertices <strong>device-to-device</strong> on the existing FS stream, then unmaps and waits before drawing. Mesh vertices never pass through CPU memory. This path uses one GPU-to-GPU copy; the meshing kernel currently writes its own device buffer rather than writing directly into the VBO.</p>
+        <p>The shader centres and scales metric XYZ for display, flips Y/Z to match the viewer, and applies triangle shading. Point cloud, coloured mesh, black wireframe, camera-frustum visibility, rotation, pan, zoom and reset are supported. Invalid zeroed triangle slots are clipped out. Mode and view changes reuse the VBO without another mesh transfer.</p>
+        <p><strong>Ownership and workflow:</strong> delivered frames retain their device output and FS stream lifetime; a later build cannot overwrite an output still referenced by the viewer. CUDA registration is released before VBO replacement or OpenGL context destruction. A successful GPU draw completes the fourth step; new inputs or mesh parameters clear stale results. Context recreation, CPU/GPU switching, repeated upload and shutdown passed hardware-rendering checks.</p>
+        <p><strong>Export:</strong> GPU rendering replaces the displayed CPU result. PLY export still requires CPU mesh; the GUI prevents saving an old CPU mesh as the displayed GPU result. Raw-image, calibration and mask export remain available when selected without mesh.</p>
+      </article>
     </section>
 
     <section class="card" aria-labelledby="urgent-lens-e-heading" style="border-left: 5px solid #15803d; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
@@ -2568,7 +2602,6 @@ cmake --build cpp/build --target fs_gui --parallel
           <li>Triangulate image-plane UV vertices with exterior segments using Triangle <code>pzQ</code>, then verify constraints.</li>
           <li>Keep triangles whose rounded centroid is in the same component, maximum 3D edge is at most 0.02 m, and Z spread is at most 0.01 m. Compact referenced vertices, retain RGB and sum area.</li>
         </ol>
-        <p><strong>GPU mesh framework:</strong> the fourth tab also has a GPU mesh button. <code>PipelineWorker::buildMeshGPU()</code> uploads the current confirmed mask to the existing FS mask buffer and borrows the current GPU XYZ, left RGB input tensor (FP32 NCHW, 0–255) and FS CUDA stream, including the latest denoising buffer swap. It does not rerun inference or transfer XYZ. The planned output stays on the GPU for OpenGL rendering; CUDA/OpenGL buffer sharing is not implemented yet. <code>MeshBuilderGPU.cu</code> is an unimplemented backend: the action reports that GPU meshing is not yet implemented, produces no mesh and preserves any existing CPU result.</p>
         <p><strong>Gaps and holes:</strong> internal holes are not explicit constraints. Triangles may bridge denoising gaps or portions of mask holes if centroid/edge/depth tests allow them. Triangles rejected by those tests are not filled afterwards. Equal-distance boundary snapping can differ from SciPy's choice of tied neighbours.</p>
         <p><strong>Viewer:</strong> Qt OpenGL displays coloured triangles, vertices or <strong>black wireframe</strong>. Drag/zoom/pan and reset operate around the mesh bounding-box centre. Show camera is checked by default and displays an amber rectified-left camera frustum at the optical origin, facing +Z. It can be hidden without rebuilding the mesh or changing completion; the frustum's short drawn length is illustrative. Vertex count, triangle count and area in cm² accompany the result.</p>
         <p><strong>Build and ownership:</strong> C++ MeshBuilder calls the bundled Triangle C implementation through <code>fs_triangle</code>; its native source and notices remain under <code>cpp/third_party/triangle/</code>. Meshing runs on PipelineWorker's QThread, with serialized Triangle calls. The GUI uploads a separate display buffer through OpenGL. Neither Python nor VTK is required by the desktop.</p>

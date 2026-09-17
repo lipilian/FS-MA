@@ -34,6 +34,8 @@ private:
     quint64 mask_request_id_{0};
     bool reconstruction_valid_{false}, mesh_valid_{false};
     SharedMesh mesh_result_;
+    SharedGPUMesh gpu_mesh_result_;
+    bool gpu_upload_pending_{false};
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
     QImage raw_left_, raw_right_, rectified_left_, rectified_right_, live_left_, live_right_;
