@@ -4,6 +4,7 @@
 #include "fs/inference/SamSegmenter.hpp"
 #include "fs/geometry/MeshBuilder.hpp"
 #include <atomic>
+#include "GPUMeshFrame.hpp"
 
 using SharedMesh = std::shared_ptr<const fs::MeshResult>;
 Q_DECLARE_METATYPE(SharedMesh)
@@ -23,7 +24,7 @@ struct PipelineState {
 };
 Q_DECLARE_METATYPE(PipelineState)
 
-// Serialized source, CPU and GPU work. Qt widgets only receive owned QImage snapshots.
+// Serialized source, CPU and GPU work. The GUI receives owned images and immutable mesh results.
 class PipelineWorker : public QObject {
     Q_OBJECT
 public:
@@ -41,9 +42,12 @@ public:
                      bool denoise = true, float max_neighbor_distance_m = 0.01F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
                  const std::shared_ptr<std::atomic_uint64_t>& current_request);
-    void buildMesh(double max_edge_m = .02, double max_depth_jump_m = .01);
+    void buildMeshCPU(double max_edge_m = .02, double max_depth_jump_m = .01);
+    void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .02,
+                      double max_depth_jump_m = .01);
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
-                     const QImage& selection, SharedMesh mesh, bool overwrite = false);
+                     const QImage& selection, SharedMesh mesh, bool overwrite = false,
+                     SharedGPUMesh gpu_mesh = {});
     void shutdown();
 signals:
     void stateChanged(PipelineState state);
@@ -51,6 +55,7 @@ signals:
     void preview(QImage left, QImage right, bool rectified);
     void depthImages(QImage rectified_left, QImage depth_rgb, float minimum, float maximum);
     void meshReady(SharedMesh mesh);
+    void gpuMeshReady(SharedGPUMesh mesh);
     void maskReady(quint64 image_id, quint64 request_id, QImage mask, QString message);
     void log(QString message);
     void actionFinished();
@@ -75,11 +80,13 @@ private:
     cv::Mat preview_left_map_x_, preview_left_map_y_, preview_right_map_x_, preview_right_map_y_;
     cv::Mat preview_left_, preview_right_;
     std::unique_ptr<StereoFrame> frame_;
-    std::unique_ptr<FS> fs_;
+    std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
     // Owned snapshots from the depth display download; meshing never downloads XYZ again.
     cv::Mat mesh_xyz_, mesh_mask_, mesh_rgb_;
     QByteArray calibration_json_;
     SharedMesh latest_mesh_;
+    std::weak_ptr<const GPUMeshFrame> latest_gpu_mesh_;
+    std::shared_ptr<fs::MeshGPUBuffer> gpu_mesh_;
     PipelineState state_;
 };

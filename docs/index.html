@@ -1392,6 +1392,8 @@
             <a href="#gpu-io-preparation-heading">GPU Tensor I/O Preparation</a>
             <a href="#inference-memory-heading">Inference Memory Reduction</a>
             <a href="#disparity-filter-heading">Disparity Filter + XYZ · Fused CUDA Processing</a>
+            <a href="#cpu-cdt-heading">CPU Constrained Delaunay Triangulation (CDT)</a>
+            <a href="#gpu-dt-heading">GPU Delaunay Triangulation (DT)</a>
           </div>
         </details>
         <details class="toc-group">
@@ -2370,6 +2372,71 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
         <p><strong>Validation:</strong> the Qt-free Release build and normal/measured CLI paths passed. 24 GPU cases matched the notebook's postprocessing with denoising disabled and the near-depth limit applied; 23 invalid-parameter cases were rejected. Real-capture checks confirmed CPU-reference agreement, unchanged disparity, XYZ buffer reuse and threshold recomputation (430654 valid points at 0–1 m).</p>
         <p><strong>Implemented:</strong> selection-mask upload, full-image XYZ, selected-region neighbourhood denoising, XYZ download, Jet display and CPU Triangle mesh generation. Raw disparity download remains pending. See <a href="code_structure.html#postprocessing">the postprocessing module</a> for the API contract.</p>
       </article>
+
+      <article class="engine-build-step" aria-labelledby="cpu-cdt-heading">
+        <h3 id="cpu-cdt-heading">6. CPU Constrained Delaunay Triangulation (CDT)</h3>
+        <p><code>fs::build_constrained_mesh()</code> uses Triangle on the CPU to connect valid image-plane UV samples while preserving the supplied exterior boundary segments. The resulting triangle indices map back to XYZ for 3D filtering and surface-area calculation.</p>
+        <h4>Performance estimates</h4>
+        <p>CPU mesh generation for <code>data/mask_bug</code> takes approximately <strong>500 ms</strong> on the profiled system, producing <strong>442,033 vertices</strong> and <strong>879,050 triangles</strong> with the default denoising and mesh thresholds. These rounded stage estimates exclude inference, XYZ download and GUI rendering; timing varies with the input and hardware.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="CPU CDT mesh generation performance estimates">
+          <table>
+            <thead>
+              <tr><th scope="col">Stage</th><th scope="col">Estimated time</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Build the nearest-point tree for boundary matching</td><td>67 ms</td></tr>
+              <tr><td>Handle repeated boundary vertices</td><td><strong>0.5 ms</strong></td></tr>
+              <tr><td>Triangle triangulation</td><td><strong>335 ms</strong></td></tr>
+              <tr><td>Triangle filtering</td><td>58–66 ms</td></tr>
+              <tr><td>Vertex compaction, area calculation and other work</td><td>About 25 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h4>Advantages</h4>
+        <ol>
+          <li><strong>Preserves small boundary concavities:</strong> exterior constraints retain fine inward boundary details represented at the working resolution and preserved by boundary snapping.</li>
+          <li><strong>Handles irregular valid-point distributions:</strong> triangulates the samples remaining after depth filtering and denoising without requiring a complete pixel grid.</li>
+          <li><strong>Bridges small internal gaps:</strong> connects existing valid samples across gaps when centroid, 3D edge-length and depth-jump checks allow it. The current implementation does not constrain internal holes or reconstruct missing XYZ values.</li>
+          <li><strong>Improves 2D triangle shapes:</strong> the Delaunay criterion helps avoid unnecessarily thin triangles where the boundary constraints and sample distribution permit.</li>
+        </ol>
+        <p><strong style="color: #b42318;">Disadvantage — slow CPU mesh generation:</strong> Triangle alone takes about 335 ms, roughly two-thirds of the total mesh-build time for this fixture, making triangulation the main performance bottleneck.</p>
+      </article>
+
+      <article class="engine-build-step" aria-labelledby="gpu-dt-heading">
+        <h3 id="gpu-dt-heading">7. GPU Delaunay Triangulation (DT)</h3>
+        <p class="note"><strong>Current algorithm:</strong> local pixel-grid triangulation with a fixed diagonal. It does not perform Delaunay edge selection or constrained Delaunay triangulation.</p>
+        <h4>GPU mesh build · Implemented</h4>
+        <p>The <strong>GPU mesh</strong> button calls <code>fs::build_mesh_gpu()</code> in <code>MeshBuilderGPU.cu</code>. It borrows the current FS GPU XYZ and left RGB tensor (FP32 NCHW, 0–255), uploads the current confirmed mask and runs on the existing FS CUDA stream. The XYZ pointer follows the latest denoising buffer swap. No new inference or XYZ/RGB transfer is required for mesh construction.</p>
+        <ol>
+          <li><strong>Thread layout:</strong> 16 × 16 threads per block, with a 60 × 50 block grid covering the 960-pixel-wide × 800-pixel-high image. Each thread handles one 2 × 2 pixel cell; the final row and column produce no triangles.</li>
+          <li><strong>Corner validity:</strong> mask is nonzero, all XYZ components are finite and Z is positive. Four valid corners produce two triangles along the top-left / bottom-right diagonal; three valid corners produce one; fewer produce none.</li>
+          <li><strong>Depth-discontinuity filtering:</strong> reject each triangle independently if any 3D edge exceeds the configured maximum (default 0.02 m), its Z range exceeds the configured depth jump (default 0.01 m), or its area is zero. There is no hole filling or connection of sparse points beyond the cell.</li>
+          <li><strong>Area reduction:</strong> compute 3D triangle areas from the original metric XYZ, sum within each block and then reduce all block totals on the GPU. The reductions also find the bounds of emitted vertices for view fitting. Only the final area, triangle count and six bounding-box coordinates return to the CPU; geometry stays on the GPU.</li>
+          <li><strong>Device output:</strong> reusable GPU storage reserves six vertices per cell. Unused triangle slots are zeroed. Each vertex contains six FP32 values: XYZ in metres and RGB normalized to 0–1.</li>
+        </ol>
+        <h4>Measured performance · data/mask_bug</h4>
+        <p>Two local button runs with bounds reduction and the default denoising and mesh thresholds produced <strong>878,844 triangles</strong> and <strong>3821.64 cm²</strong>. These are observed wall-clock timings, not a general benchmark; they exclude inference, depth preparation and GUI rendering.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="GPU grid mesh build timing">
+          <table>
+            <thead><tr><th scope="col">Stage</th><th scope="col">Observed time</th></tr></thead>
+            <tbody>
+              <tr><td>Prepare GPU inputs and upload the current mask</td><td>0.62–0.63 ms</td></tr>
+              <tr><td>GPU mesh build, area/count/bounds reduction and statistics download</td><td><strong>1.75–2.89 ms</strong></td></tr>
+              <tr><td>CUDA/OpenGL VBO setup and handoff (separate renderer test)</td><td>3.82 ms on first upload; 0.49 ms with the registered VBO reused</td></tr>
+              <tr><td>OpenGL drawing / frame presentation</td><td>Verified visually; frame time not benchmarked</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Validation:</strong> the build passed, 41 cases matched an independent CPU reference for corner validity, depth/edge filtering, partial blocks, output reuse, RGB, area and bounds, and CUDA memory checking reported zero errors. The real-capture button flow passed with hardware OpenGL on NVIDIA RTX PRO 4000 Blackwell, including completion, CPU/GPU switching, parameter invalidation and export gating.</p>
+        <h4>GPU render · Implemented</h4>
+        <p>The fourth-tab viewer receives an immutable, completed GPU mesh. With its OpenGL context current, it registers a VBO with CUDA, maps it, copies vertices <strong>device-to-device</strong> on the existing FS stream, then unmaps and waits before drawing. Rendering does not copy mesh vertices through CPU memory. This path uses one GPU-to-GPU copy; the meshing kernel currently writes its own device buffer rather than writing directly into the VBO.</p>
+        <p>The shader centres and scales metric XYZ for display, flips Y/Z to match the viewer, and applies triangle shading. Point cloud, coloured mesh, black wireframe, camera-frustum visibility, rotation, pan, zoom and reset are supported. Invalid zeroed triangle slots are clipped out. Mode and view changes reuse the VBO without another mesh transfer.</p>
+        <p><strong>Ownership and workflow:</strong> delivered frames retain their device output and FS stream lifetime; a later build cannot overwrite an output still referenced by the viewer. CUDA registration is released before VBO replacement or OpenGL context destruction. A successful GPU draw completes the fourth step; new inputs or mesh parameters clear stale results. Context recreation, CPU/GPU switching, repeated upload and shutdown passed hardware-rendering checks.</p>
+        <h4>GPU PLY export · Implemented</h4>
+        <p>Save selected and Save all export the mesh currently displayed, whether CPU or GPU. For GPU mesh, the pipeline worker downloads the immutable device vertex array only when mesh export is requested, removes zeroed/invalid or zero-area triangles, and merges vertices with exactly matching XYZ and exported RGB values. Remaining triangles reference the shared vertex table; their geometry, order and winding are preserved. Nearby but distinct coordinates and vertices with different colors remain separate. RGB is clamped to 0–1, multiplied by 255 and rounded to uint8, matching the CPU PLY color range.</p>
+        <p><strong>Export size check · data/mask_bug:</strong> a local export produced 441,931 unique vertices and 878,618 triangles in <strong>18,051,289 bytes (18.05 MB)</strong>, down from approximately 51 MB with three separately stored vertices per triangle. Every exported triangle matched the GPU output in coordinates, RGB, order and winding, and the reconstructed area matched the GPU summary. This compaction runs only during saving.</p>
+        <p>The existing binary little-endian PLY writer preserves original float32 XYZ in metres and RGB bytes (0–255). Camera markers, viewer transforms, shading and black wireframe colors are excluded. Saving does not rebuild the mesh or change its display/completion state. Image-, calibration- or mask-only saves do not download mesh geometry. Stale CPU/GPU results and unapproved overwrites are rejected before downloading or writing files.</p>
+      </article>
     </section>
 
     <section class="card" aria-labelledby="urgent-lens-e-heading" style="border-left: 5px solid #15803d; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
@@ -2496,11 +2563,11 @@ cmake --build cpp/build --target fs_gui --parallel
               <tr><td>1 · Stereo inspection</td><td>Input and calibration</td><td>Capture pair</td></tr>
               <tr><td>2 · Region measurement</td><td>Mask draw</td><td>Finish draw</td></tr>
               <tr><td>3 · Depth map</td><td>Depth range + Geometry</td><td>Reconstruct + Next</td></tr>
-              <tr><td>4 · 3D browser</td><td>Save results</td><td>Generate mesh</td></tr>
+              <tr><td>4 · 3D browser</td><td>Save results</td><td>CPU mesh</td></tr>
             </tbody>
           </table>
         </div>
-        <p>Capture/import completes step one. Finish draw confirms the full-resolution mask and opens step three. Reconstruct completes the depth result; Next becomes enabled and opens the fourth tab. Generate mesh completes the last step. There is no separate Export step, Use mask button, Surface measurement panel or reconstruction Stop button.</p>
+        <p>Capture/import completes step one. Finish draw confirms the full-resolution mask and opens step three. Reconstruct completes the depth result; Next becomes enabled and opens the fourth tab. CPU mesh completes the last step. There is no separate Export step, Use mask button, Surface measurement panel or reconstruction Stop button.</p>
         <p><strong>Mask draw:</strong> SAM 2.1 auto draw provides a rectangle and foreground/background points, with prompt editing/removal/undo. Manual draw contains Brush and Eraser. Both share a default width of <strong>50 pixels</strong> on the full-resolution rectified left image. Scroll over the image to zoom around the cursor, up to 5×. Shift + scroll changes brush size from 1 to 100 pixels; the size field and cursor outline stay synchronized. Manual corrections persist over later SAM predictions and do not request model inference. Clear mask removes prompts, predictions and corrections. Finish draw confirms the resulting raster, including its holes.</p>
         <p><strong>Invalidation:</strong> a new input resets steps 2–4; editing the mask requires Finish draw again and invalidates depth/mesh. Depth-range or denoising changes reset steps 3–4. Mesh edge/depth-jump changes reset only step four and reuse cached CPU inputs. Restoring old values does not restore green checks. Navigating tabs, changing display mode, toggling the camera or saving does not invalidate results.</p>
         <p><strong>Code:</strong> <code>ReconstructionWindow.cpp</code> and <code>widgets/MaskEditor.cpp</code>. <a href="code_structure.html#qt-reconstruction">Workflow and UI ownership →</a></p>
@@ -2531,10 +2598,10 @@ cmake --build cpp/build --target fs_gui --parallel
 
       <article class="engine-build-step" aria-labelledby="cpu-mesh-viewer-heading">
         <h3 id="cpu-mesh-viewer-heading">8. CPU Triangle Mesh and OpenGL Inspection</h3>
-        <p><strong>Implemented.</strong> Generate mesh follows <code>python/fs_tensorrt800x960_gwc_plugin.ipynb</code> and its helper using native Triangle 1.6 on the CPU. <code>fs::build_constrained_mesh()</code> reads the XYZ, nearest-neighbour mask and RGB already cached after step three. It does not rerun inference or download XYZ again.</p>
+        <p><strong>Implemented.</strong> CPU mesh follows <code>python/fs_tensorrt800x960_gwc_plugin.ipynb</code> and its helper using native Triangle 1.6 on the CPU. <code>fs::build_constrained_mesh()</code> reads the XYZ, nearest-neighbour mask and RGB already cached after step three. It does not rerun inference or download XYZ again.</p>
         <ol>
           <li>Separate 8-connected mask components and retain finite, positive-Z points inside the selection, without interior downsampling.</li>
-          <li>Extract the largest exterior contour of each component, snap its boundary to retained UV samples, and reject degenerate boundary loops.</li>
+          <li>Extract the largest exterior contour of each component, snap its boundary to retained UV samples, and split repeated-vertex walks into nonzero-area cycles. Discard zero-area spurs without dropping the entire component.</li>
           <li>Triangulate image-plane UV vertices with exterior segments using Triangle <code>pzQ</code>, then verify constraints.</li>
           <li>Keep triangles whose rounded centroid is in the same component, maximum 3D edge is at most 0.02 m, and Z spread is at most 0.01 m. Compact referenced vertices, retain RGB and sum area.</li>
         </ol>

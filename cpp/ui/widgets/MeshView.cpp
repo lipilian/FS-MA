@@ -5,7 +5,11 @@
 #include <QMouseEvent>
 #include <QOpenGLBuffer>
 #include <QOpenGLContext>
-#include <QOpenGLFunctions>
+#include <QOpenGLFunctions_2_1>
+#include <QElapsedTimer>
+#include <cuda_gl_interop.h>
+#include <limits>
+#include <stdexcept>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
 #include <QVBoxLayout>
@@ -13,10 +17,10 @@
 #include <algorithm>
 #include <cmath>
 
-class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
+class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions_2_1 {
   public:
-    explicit MeshCanvas(QWidget *parent)
-        : QOpenGLWidget(parent), buffer_(QOpenGLBuffer::VertexBuffer) {
+    explicit MeshCanvas(MeshView *parent)
+        : QOpenGLWidget(parent), owner_(parent), buffer_(QOpenGLBuffer::VertexBuffer) {
         setMinimumSize(260, 240);
         QSurfaceFormat requested;
         requested.setVersion(2, 1);
@@ -25,13 +29,20 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
     }
     ~MeshCanvas() override { cleanup(); }
     void setMesh(std::shared_ptr<const fs::MeshResult> mesh) {
+        gpu_mesh_.reset();
         mesh_ = std::move(mesh);
+        failed_=false; announce_gpu_=false;
         dirty_ = true;
+        resetView();
+    }
+    void setGPUMesh(SharedGPUMesh mesh) {
+        mesh_.reset(); gpu_mesh_=std::move(mesh);
+        dirty_=true; failed_=false; announce_gpu_=true;
         resetView();
     }
     void setMode(int mode) {
         mode_ = mode;
-        dirty_ = true;
+        if (!gpu_mesh_) dirty_ = true;
         update();
     }
     void setCameraVisible(bool visible) {
@@ -53,13 +64,36 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
             context(), &QOpenGLContext::aboutToBeDestroyed, this,
             [this] { cleanup(); }, Qt::DirectConnection);
         program_ = std::make_unique<QOpenGLShaderProgram>();
-        const char *vertex =
-            "attribute vec3 position; attribute vec3 color; uniform mat4 "
-            "matrix; varying vec3 tint; void main(){ "
-            "gl_Position=matrix*vec4(position,1.0); tint=color;}";
-        const char *fragment =
-            "#ifdef GL_ES\nprecision mediump float;\n#endif\nvarying vec3 "
-            "tint; void main(){gl_FragColor=vec4(tint,1.0);}";
+        const char *vertex = R"(
+#version 120
+attribute vec3 position;
+attribute vec3 color;
+uniform mat4 matrix;
+uniform bool deviceMesh;
+uniform vec3 center;
+uniform float scale;
+varying vec3 tint;
+varying vec3 point;
+void main() {
+    point=position;
+    vec3 p=deviceMesh ? (position-center)/scale*vec3(1.0,-1.0,-1.0) : position;
+    gl_Position=deviceMesh && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
+    tint=color;
+})";
+        const char *fragment = R"(
+#version 120
+varying vec3 tint;
+varying vec3 point;
+uniform bool shaded;
+uniform bool wireframe;
+void main() {
+    float light=1.0;
+    if (shaded) {
+        vec3 n=cross(dFdx(point),dFdy(point));
+        light=0.45+0.55*abs(n.z)/max(length(n),1e-20);
+    }
+    gl_FragColor=vec4(wireframe ? vec3(0.0) : tint*light,1.0);
+})";
         if (!program_->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex) ||
             !program_->addShaderFromSourceCode(QOpenGLShader::Fragment,
                                                fragment) ||
@@ -70,10 +104,11 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
             error->adjustSize();
             error->show();
             program_.reset();
+            emit owner_->renderFailed("Unable to initialize the 3D renderer.");
             return;
         }
         buffer_.create();
-        dirty_ = true;
+        dirty_ = true; failed_=false; announce_gpu_=bool(gpu_mesh_);
     }
     void resizeGL(int width, int height) override {
         glViewport(0, 0, width, height);
@@ -81,10 +116,15 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
     void paintGL() override {
         glClearColor(.067f, .11f, .17f, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (!program_ || !mesh_ || mesh_->vertices.empty())
-            return;
-        if (dirty_)
-            upload();
+        if (!program_ || failed_ || (!gpu_mesh_ && (!mesh_ || mesh_->vertices.empty()))) return;
+        if (dirty_) {
+            try { if (gpu_mesh_) uploadGPU(); else upload(); }
+            catch (const std::exception& e) {
+                failed_=true;
+                emit owner_->renderFailed(QString("Mesh rendering failed: %1").arg(e.what()));
+                return;
+            }
+        }
         QMatrix4x4 projection;
         const float aspect = float(width()) / std::max(1, height());
         // Fit the camera as well as the mesh while preserving the mesh-centred
@@ -104,6 +144,11 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
         view.rotate(yaw_, 0, 1, 0);
         program_->bind();
         program_->setUniformValue("matrix", projection * view);
+        program_->setUniformValue("deviceMesh",bool(gpu_mesh_));
+        program_->setUniformValue("center",center_);
+        program_->setUniformValue("scale",scale_);
+        program_->setUniformValue("shaded",bool(gpu_mesh_) && mode_==1);
+        program_->setUniformValue("wireframe",bool(gpu_mesh_) && mode_==2);
         buffer_.bind();
         const int pos = program_->attributeLocation("position"),
                   col = program_->attributeLocation("color");
@@ -112,16 +157,27 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
         program_->setAttributeBuffer(pos, GL_FLOAT, 0, 3, 6 * sizeof(float));
         program_->setAttributeBuffer(col, GL_FLOAT, 3 * sizeof(float), 3,
                                      6 * sizeof(float));
-        glDrawArrays(mode_ == 0   ? GL_POINTS
-                     : mode_ == 2 ? GL_LINES
-                                  : GL_TRIANGLES,
-                     0, count_);
-        if (camera_visible_ && camera_count_ > 0)
-            glDrawArrays(GL_LINES, count_, camera_count_);
+        if (gpu_mesh_ && mode_==2) glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
+        glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
+        if (gpu_mesh_ && mode_==2) glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+        if (camera_visible_ && camera_count_>0) {
+            program_->setUniformValue("deviceMesh",false);
+            program_->setUniformValue("shaded",false);
+            program_->setUniformValue("wireframe",false);
+            glDrawArrays(GL_LINES,count_,camera_count_);
+        }
         program_->disableAttributeArray(pos);
         program_->disableAttributeArray(col);
         buffer_.release();
         program_->release();
+        if (announce_gpu_ && gpu_mesh_) {
+            announce_gpu_=false;
+            const auto error=glGetError();
+            if (error!=GL_NO_ERROR) {
+                failed_=true;
+                emit owner_->renderFailed(QString("OpenGL mesh draw failed (error %1).").arg(error));
+            } else emit owner_->gpuMeshPresented(gpu_mesh_);
+        }
     }
     void mousePressEvent(QMouseEvent *e) override { last_ = e->position(); }
     void mouseMoveEvent(QMouseEvent *e) override {
@@ -147,6 +203,10 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
     void cleanup() {
         if (context()) {
             makeCurrent();
+            if (interop_) {
+                cudaSetDevice(interop_device_);
+                cudaGraphicsUnregisterResource(interop_); interop_=nullptr;
+            }
             buffer_.destroy();
             program_.reset();
             doneCurrent();
@@ -154,7 +214,66 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
         if (context())
             disconnect(context(), nullptr, this, nullptr);
     }
+    static void cudaCheck(cudaError_t e, const char* operation) {
+        if (e!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(e));
+    }
+    void unregisterInterop() {
+        if (interop_) {
+            cudaCheck(cudaSetDevice(interop_device_),"select GL buffer CUDA device");
+            cudaCheck(cudaGraphicsUnregisterResource(interop_),"unregister GL buffer");
+            interop_=nullptr;
+        }
+    }
+    void uploadGPU() {
+        QElapsedTimer elapsed; elapsed.start();
+        const auto& frame=*gpu_mesh_;
+        if (!frame.buffer || !frame.stats.triangle_count || !frame.stream || !frame.stream_owner)
+            throw std::runtime_error("Incomplete GPU mesh result");
+        unsigned int count=0; int devices[8];
+        cudaCheck(cudaGLGetDevices(&count,devices,8,cudaGLDeviceListAll),"find CUDA device for OpenGL");
+        if (std::find(devices,devices+count,frame.device)==devices+count)
+            throw std::runtime_error("OpenGL and mesh computation must use the same NVIDIA GPU");
+        cudaCheck(cudaSetDevice(frame.device),"select mesh CUDA device");
+        const auto& stats=frame.stats;
+        const cv::Vec3f low(stats.low[0],stats.low[1],stats.low[2]), high(stats.high[0],stats.high[1],stats.high[2]);
+        const auto center=(low+high)*.5f;
+        scale_=std::max({high[0]-low[0],high[1]-low[1],high[2]-low[2],1e-6f});
+        center_=QVector3D(center[0],center[1],center[2]);
+        auto camera=cameraData(frame.camera,center,scale_);
+        const std::size_t bytes=frame.buffer->vertex_slots()*sizeof(fs::MeshGPUVertex);
+        const std::size_t total=bytes+camera.size()*sizeof(float);
+        if (total>std::size_t(std::numeric_limits<int>::max())) throw std::runtime_error("GPU mesh exceeds OpenGL buffer capacity");
+        buffer_.bind();
+        if (!interop_ || buffer_.size()!=int(total) || interop_device_!=frame.device) {
+            unregisterInterop();
+            cudaCheck(cudaSetDevice(frame.device),"select mesh CUDA device");
+            buffer_.allocate(nullptr,int(total));
+            if (glGetError()!=GL_NO_ERROR || buffer_.size()!=int(total)) throw std::runtime_error("Unable to allocate OpenGL mesh buffer");
+            cudaCheck(cudaGraphicsGLRegisterBuffer(&interop_,buffer_.bufferId(),cudaGraphicsRegisterFlagsWriteDiscard),"register OpenGL mesh buffer");
+            interop_device_=frame.device;
+        }
+        cudaCheck(cudaGraphicsMapResources(1,&interop_,frame.stream),"map OpenGL mesh buffer");
+        bool mapped=true;
+        try {
+            void* destination=nullptr; std::size_t capacity=0;
+            cudaCheck(cudaGraphicsResourceGetMappedPointer(&destination,&capacity,interop_),"get mapped vertex pointer");
+            if (capacity<total) throw std::runtime_error("Mapped OpenGL buffer is too small");
+            cudaCheck(cudaMemcpyAsync(destination,frame.buffer->vertices(),bytes,cudaMemcpyDeviceToDevice,frame.stream),"copy GPU mesh into OpenGL buffer");
+            cudaCheck(cudaGraphicsUnmapResources(1,&interop_,frame.stream),"unmap OpenGL mesh buffer");
+            mapped=false;
+            cudaCheck(cudaStreamSynchronize(frame.stream),"complete GPU mesh handoff");
+        } catch (...) {
+            if (mapped) cudaGraphicsUnmapResources(1,&interop_,frame.stream);
+            cudaStreamSynchronize(frame.stream);
+            throw;
+        }
+        if (!camera.empty()) buffer_.write(int(bytes),camera.data(),int(camera.size()*sizeof(float)));
+        count_=int(frame.buffer->vertex_slots());
+        buffer_.release(); dirty_=false;
+        emit owner_->log(QString("GPU mesh → OpenGL: %1 ms (VBO setup + device copy + handoff; excludes drawing)").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
+    }
     void upload() {
+        unregisterInterop();
         cv::Vec3f low = mesh_->vertices[0], high = low;
         for (auto p : mesh_->vertices)
             for (int k = 0; k < 3; ++k) {
@@ -196,10 +315,19 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
                         add(f[i], light);
             }
         count_ = int(data.size() / 6);
+        const auto camera=cameraData(mesh_->camera,center,scale);
+        data.insert(data.end(),camera.begin(),camera.end());
+        buffer_.bind();
+        buffer_.allocate(data.data(), int(data.size() * sizeof(float)));
+        buffer_.release();
+        dirty_ = false;
+    }
+    std::vector<float> cameraData(const std::optional<fs::MeshCamera>& metadata, cv::Vec3f center, float scale) {
+        std::vector<float> data;
         camera_count_ = 0;
         camera_radius_ = .87f; // Radius of the mesh's normalized bounding box.
-        if (mesh_->camera) {
-            const auto &camera = *mesh_->camera;
+        if (metadata) {
+            const auto &camera = *metadata;
             const double fx = camera.intrinsics(0, 0),
                          fy = camera.intrinsics(1, 1);
             const double cx = camera.intrinsics(0, 2),
@@ -245,14 +373,18 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
                 const auto up = top + cv::Vec3f(0, -z * .2f, 0);
                 line(corners[0], up);
                 line(up, corners[1]);
-                camera_count_ = int(data.size() / 6) - count_;
+                camera_count_ = int(data.size() / 6);
             }
         }
-        buffer_.bind();
-        buffer_.allocate(data.data(), int(data.size() * sizeof(float)));
-        buffer_.release();
-        dirty_ = false;
+        return data;
     }
+    MeshView* owner_;
+    SharedGPUMesh gpu_mesh_;
+    cudaGraphicsResource* interop_{nullptr};
+    int interop_device_{0};
+    QVector3D center_;
+    float scale_{1};
+    bool failed_{false}, announce_gpu_{false};
     QOpenGLBuffer buffer_;
     std::unique_ptr<QOpenGLShaderProgram> program_;
     std::shared_ptr<const fs::MeshResult> mesh_;
@@ -278,6 +410,10 @@ MeshView::MeshView(QWidget *parent) : QWidget(parent) {
 void MeshView::setMesh(std::shared_ptr<const fs::MeshResult> mesh) {
     if (canvas_)
         canvas_->setMesh(std::move(mesh));
+}
+void MeshView::setGPUMesh(SharedGPUMesh mesh) {
+    if (canvas_) canvas_->setGPUMesh(std::move(mesh));
+    else emit renderFailed("GPU mesh rendering requires a hardware OpenGL display session.");
 }
 void MeshView::setMode(int mode) {
     if (canvas_)

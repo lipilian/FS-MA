@@ -117,6 +117,7 @@ void FS::check_cuda(cudaError_t status, const char* operation) {
 }
 
 void FS::loadEngine(const std::filesystem::path& engine_path) {
+    xyz_ready_ = false;
     if (!std::filesystem::is_regular_file(engine_path)) {
         throw std::runtime_error("TensorRT engine does not exist: " + engine_path.string());
     }
@@ -301,6 +302,7 @@ void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_cam
         rectified_camera_parameters.baseline_meters <= 0.0F) {
         throw std::invalid_argument("XYZ reconstruction requires valid camera parameters and image size");
     }
+    xyz_ready_ = false;
     const double scale_x = static_cast<double>(rectified_image_size.width) / kTensorRtInputWidth;
     const double scale_y = static_cast<double>(rectified_image_size.height) / kTensorRtInputHeight;
     model_camera_parameters_ = rectified_camera_parameters;
@@ -311,6 +313,7 @@ void FS::set_model_camera_parameters(const StereoCameraParameters& rectified_cam
 }
 
 void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
+    xyz_ready_ = false;
     selection_mask_ready_=false;
     if (!isEngineLoaded() || stream_ == nullptr || !left_input_device_ || !right_input_device_) {
         throw std::logic_error("loadEngine must complete before preparing TensorRT inputs");
@@ -360,6 +363,7 @@ void FS::prepare_stereo_images(const cv::Mat& left, const cv::Mat& right) {
 }
 
 void FS::inference() {
+    xyz_ready_ = false;
     if (!isEngineLoaded() || stream_ == nullptr || !disparity_output_device_) {
         throw std::logic_error("loadEngine must complete before TensorRT inference");
     }
@@ -369,6 +373,7 @@ void FS::inference() {
 }
 
 void FS::compute_xyz_map(float min_depth_m, float max_depth_m) {
+    xyz_ready_ = false;
     if (!isEngineLoaded() || !disparity_output_device_ || !xyz_map_device_) {
         throw std::logic_error("loadEngine must complete before XYZ reconstruction");
     }
@@ -381,6 +386,7 @@ void FS::compute_xyz_map(float min_depth_m, float max_depth_m) {
                    min_depth_m, max_depth_m, stream_),
                "failed to launch XYZ reconstruction");
     synchronize();
+    xyz_ready_ = true;
 }
 
 void FS::set_selection_mask(const cv::Mat& rectified_mask) {
@@ -397,13 +403,15 @@ void FS::set_selection_mask(const cv::Mat& rectified_mask) {
     synchronize(); selection_mask_ready_=true;
 }
 void FS::denoise_xyz_map(float max_neighbor_distance_m, int min_neighbors, int edge_min_neighbors) {
-    if (!isEngineLoaded() || !xyz_map_device_ || !xyz_scratch_device_)
+    if (!isEngineLoaded() || !xyz_ready_ || !xyz_map_device_ || !xyz_scratch_device_)
         throw std::logic_error("loadEngine and compute_xyz_map must complete before denoising");
+    xyz_ready_ = false;
     check_cuda(fs::postprocessing::denoise_xyz_map(
         xyz_map_device_.get(),xyz_scratch_device_.get(),selection_mask_ready_ ? selection_mask_device_.get() : nullptr,
         kTensorRtInputWidth,kTensorRtInputHeight,max_neighbor_distance_m,min_neighbors,edge_min_neighbors,stream_),
         "failed to launch XYZ denoising");
     synchronize(); xyz_map_device_.swap(xyz_scratch_device_);
+    xyz_ready_ = true;
 }
 
 cv::Mat FS::download_xyz_map() {
@@ -415,6 +423,16 @@ cv::Mat FS::download_xyz_map() {
                                cudaMemcpyDeviceToHost, stream_), "failed to download XYZ map");
     synchronize();
     return xyz;
+}
+
+fs::MeshGPUInputs FS::prepare_gpu_mesh_inputs(const cv::Mat& rectified_mask) {
+    if (!isEngineLoaded() || !xyz_ready_ || !xyz_map_device_ || !left_input_device_ || !stream_)
+        throw std::logic_error("Reconstruct XYZ before preparing GPU mesh inputs");
+    if (rectified_mask.empty() || rectified_mask.type() != CV_8UC1)
+        throw std::invalid_argument("GPU mesh requires a nonempty CV_8UC1 selection mask");
+    set_selection_mask(rectified_mask);
+    return {xyz_map_device_.get(), left_input_device_.get(), selection_mask_device_.get(),
+            kTensorRtInputWidth, kTensorRtInputHeight, stream_};
 }
 
 void FS::synchronize() {

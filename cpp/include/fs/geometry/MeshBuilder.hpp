@@ -23,9 +23,11 @@ struct MeshResult {
     std::optional<MeshCamera> camera; // Display metadata; not a mesh vertex.
 };
 
-// Matches fs_tensorrt800x960_gwc_plugin: every valid selected point, exterior
+// Based on fs_tensorrt800x960_gwc_plugin: every valid selected point, exterior
 // contour constraints, centroid-mask / 3D edge / depth-jump rejection. Internal
 // holes are not constraints; rejected triangles are not filled afterwards.
+// Snapped contours are split at repeated vertices into nonzero-area cycles;
+// zero-area spurs are discarded without dropping the entire component.
 // All inputs are CPU-owned, aligned to the same image grid, and left unchanged.
 MeshResult build_constrained_mesh(const cv::Mat &xyz, const cv::Mat &selection,
                                   const cv::Mat &rgb, double max_edge_m = .02,

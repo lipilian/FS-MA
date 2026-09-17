@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fs/stereo/StereoFrame.hpp"
+#include "fs/geometry/MeshBuilderGPU.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -89,6 +90,14 @@ public:
      */
     cv::Mat download_xyz_map();
 
+    /** Upload the current nonempty rectified-left mask on the FS stream and
+     * borrow GPU RGB and the latest XYZ (including the denoising buffer swap). Requires
+     * completed XYZ for the current inputs. No inference or XYZ transfer occurs.
+     * The mask upload completes before return; consume this view immediately in
+     * the same serialized action, before any further FS mutation or destruction.
+     */
+    fs::MeshGPUInputs prepare_gpu_mesh_inputs(const cv::Mat& rectified_mask);
+
     /** Wait for queued GPU work and report asynchronous execution errors. */
     void synchronize();
 
@@ -125,6 +134,7 @@ private:
     cv::Mat model_right_;
     cv::Mat model_mask_;
     bool selection_mask_ready_{false};
+    bool xyz_ready_{false};
     std::unique_ptr<float, CudaDeviceBufferDeleter> left_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> right_input_device_;
     std::unique_ptr<float, CudaDeviceBufferDeleter> disparity_output_device_;

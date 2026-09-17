@@ -85,11 +85,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     import_ = button("Import capture…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     preview_ = button("Resume preview", "preview"); capture_ = button("Capture pair", "capturePair");
     run_ = button("Reconstruct", "run"); finish_draw_ = button("Finish draw", "finishDraw");
-    build_mesh_ = button("Generate mesh", "buildMesh");
+    build_mesh_cpu_ = button("CPU mesh", "buildMeshCPU");
+    build_mesh_gpu_ = button("GPU mesh", "buildMeshGPU");
+    build_mesh_cpu_->setToolTip("Generate a constrained Delaunay mesh on the CPU.");
+    build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     next_ = button("Next", "nextStep");
     next_->setToolTip("Complete reconstruction, then continue to 3D browser.");
     for (auto* b : {import_, camera_, preview_}) toolbar->addWidget(b);
-    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(next_); toolbar->addWidget(build_mesh_); outer->addLayout(toolbar);
+    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(next_); toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -166,7 +169,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     scene_controls->insertWidget(1,show_camera);
     scene_layout->addLayout(scene_controls);
     mesh_view_=new MeshView; mesh_view_->setObjectName("meshView"); scene_layout->addWidget(mesh_view_,1);
-    scene_status_=label("Reconstruct depth, then click Generate mesh."); scene_status_->setObjectName("meshStatus"); scene_layout->addWidget(scene_status_);
+    scene_status_=label("Reconstruct depth, then click CPU mesh or GPU mesh."); scene_status_->setObjectName("meshStatus"); scene_layout->addWidget(scene_status_);
     scene_layout->addWidget(label("Left drag: rotate · Right drag: pan · Wheel: zoom")); tabs_->addTab(scene,"3D browser");
     connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); });
     connect(reset,&QPushButton::clicked,this,[this] { mesh_view_->resetView(); });
@@ -248,7 +251,27 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(&controller_,&PipelineController::meshReady,this,[this](SharedMesh mesh) {
         if (closing_ || !reconstruction_valid_) return;
+        gpu_mesh_result_.reset(); gpu_upload_pending_=false;
         mesh_result_=std::move(mesh); mesh_valid_=true; mesh_view_->setMesh(mesh_result_); refresh(); tabs_->setCurrentIndex(3);
+    });
+    connect(&controller_,&PipelineController::gpuMeshReady,this,[this](SharedGPUMesh mesh) {
+        if (closing_ || !reconstruction_valid_) return;
+        mesh_result_.reset(); mesh_valid_=false;
+        gpu_mesh_result_=std::move(mesh); gpu_upload_pending_=true;
+        tabs_->setCurrentIndex(3);
+        mesh_view_->setGPUMesh(gpu_mesh_result_); refresh();
+    });
+    connect(mesh_view_,&MeshView::gpuMeshPresented,this,[this](SharedGPUMesh mesh) {
+        if (closing_ || !reconstruction_valid_ || mesh!=gpu_mesh_result_) return;
+        gpu_upload_pending_=false; mesh_valid_=true; refresh();
+    });
+    connect(mesh_view_,&MeshView::renderFailed,this,[this](const QString& message) {
+        gpu_upload_pending_=false; mesh_valid_=false; refresh();
+        scene_status_->setText(message); status_->setText(message);
+        log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss")+"  "+message);
+    });
+    connect(mesh_view_,&MeshView::log,this,[this](const QString& message) {
+        log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss")+"  "+message);
     });
     connect(&controller_,&PipelineController::depthImages,this,[this,depth_page](QImage left,QImage depth,float minimum,float maximum) {
         if (closing_) return;
@@ -306,7 +329,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         const QImage selection=mask_->mask();
         const SharedMesh mesh=mesh_valid_ ? mesh_result_ : SharedMesh{};
-        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite); });
+        const SharedGPUMesh gpu_mesh=mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
+        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite,gpu_mesh); });
     };
     connect(save_selected_,&QPushButton::clicked,this,[this,save_results] {
         save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked()});
@@ -315,12 +339,18 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         save_results({true,true,true,true});
     });
     connect(next_,&QPushButton::clicked,this,[this] { tabs_->setCurrentIndex(3); });
-    connect(build_mesh_,&QPushButton::clicked,this,[this] {
-        mesh_valid_=false; refresh();
+    connect(build_mesh_cpu_,&QPushButton::clicked,this,[this] {
+        gpu_upload_pending_=false; mesh_valid_=false; refresh();
         const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
-        controller_.submit([=](auto& worker) { worker.buildMesh(edge,jump); });
+        controller_.submit([=](auto& worker) { worker.buildMeshCPU(edge,jump); });
     });
-    const auto mesh_settings_changed=[this] { mesh_valid_=false; refresh(); };
+    connect(build_mesh_gpu_,&QPushButton::clicked,this,[this] {
+        gpu_upload_pending_=false; mesh_valid_=false; refresh();
+        const QImage selected=mask_->mask();
+        const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
+        controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge,jump); });
+    });
+    const auto mesh_settings_changed=[this] { gpu_upload_pending_=false; mesh_valid_=false; refresh(); };
     connect(mesh_edge_,&QDoubleSpinBox::valueChanged,this,mesh_settings_changed);
     connect(mesh_jump_,&QDoubleSpinBox::valueChanged,this,mesh_settings_changed);
     const auto depth_settings_changed = [this] {
@@ -364,14 +394,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     refresh();
 }
 void ReconstructionWindow::refresh() {
-    if (!reconstruction_valid_ || !state_.depth_ready) mesh_valid_=false;
+    if (!reconstruction_valid_ || !state_.depth_ready) { mesh_valid_=false; gpu_upload_pending_=false; }
     const bool idle = !busy_ && !closing_, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
-    build_mesh_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && mask_->hasSelection());
+    build_mesh_cpu_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && mask_->hasSelection());
+    build_mesh_gpu_->setEnabled(build_mesh_cpu_->isEnabled() && state_.gpu_ready && state_.engine_ready);
     next_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && mask_->hasSelection());
     denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
     const bool depth_valid = minimum_->value() < maximum_->value();
@@ -398,19 +429,24 @@ void ReconstructionWindow::refresh() {
         .arg(state_.has_rectified ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", mesh_valid_ ? "✓" : "○"));
     refreshWorkflow();
     progress_->setRange(0,busy_ ? 0 : 4); if (!busy_) progress_->setValue(result_current ? 4 : state_.has_rectified ? 1 : 0);
-    if (!mesh_valid_ && mesh_result_) { mesh_result_.reset(); mesh_view_->setMesh({}); }
+    if (!mesh_valid_ && !gpu_upload_pending_ && (mesh_result_ || gpu_mesh_result_)) {
+        mesh_result_.reset(); gpu_mesh_result_.reset(); mesh_view_->setMesh({});
+    }
+    save_mesh_->setToolTip(gpu_mesh_result_ ? "Save the displayed GPU mesh as PLY; downloads geometry only when saving." : "Save the currently displayed mesh as PLY.");
     mesh_mode_->setEnabled(mesh_valid_);
     browse_save_->setEnabled(idle);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_}) option->setEnabled(idle);
     save_calibration_name_->setText(state_.calibration_filename);
     const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked();
     const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
-        (!save_mesh_->isChecked() || (mesh_valid_ && mesh_result_));
+        (!save_mesh_->isChecked() || (mesh_valid_ && (mesh_result_ || gpu_mesh_result_)));
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
-    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && mesh_result_ && !save_directory_->text().isEmpty());
-    scene_status_->setText(mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")
+    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && (mesh_result_ || gpu_mesh_result_) && !save_directory_->text().isEmpty());
+    scene_status_->setText(gpu_mesh_result_ ? QString("GPU mesh · %1 triangles · %2 cm²%3")
+        .arg(gpu_mesh_result_->stats.triangle_count).arg(gpu_mesh_result_->stats.area_m2*1e4,0,'f',2)
+        .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "") : mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")
         .arg(mesh_result_->vertices.size()).arg(mesh_result_->triangles.size()).arg(mesh_result_->area_m2*1e4,0,'f',2)
-        : result_current ? "Depth ready. Click Generate mesh." : "Reconstruct depth before generating a mesh.");
+        : result_current ? "Depth ready. Click CPU mesh or GPU mesh." : "Reconstruct depth before generating a mesh.");
 }
 void ReconstructionWindow::refreshWorkflow() {
     const bool pair_done=state_.has_rectified && !state_.live;
@@ -432,12 +468,13 @@ void ReconstructionWindow::refreshWorkflow() {
     }
     tabs_->setTabToolTip(1,pair_done ? "Draw and confirm a mask." : "Capture or import a stereo pair first.");
     tabs_->setTabToolTip(2,depth_done ? "Depth map ready." : region_done ? "Set the depth range and click Reconstruct." : "Click Finish draw in Region measurement first.");
-    tabs_->setTabToolTip(3,depth_done ? "Generate or inspect the constrained Delaunay mesh." : "Complete depth reconstruction first.");
+    tabs_->setTabToolTip(3,depth_done ? "Generate or inspect a CPU or GPU mesh." : "Complete depth reconstruction first.");
     capture_->setVisible(tabs_->currentIndex()==0);
     finish_draw_->setVisible(tabs_->currentIndex()==1);
     run_->setVisible(tabs_->currentIndex()==2);
     next_->setVisible(tabs_->currentIndex()==2);
-    build_mesh_->setVisible(tabs_->currentIndex()==3);
+    build_mesh_cpu_->setVisible(tabs_->currentIndex()==3);
+    build_mesh_gpu_->setVisible(tabs_->currentIndex()==3);
     for (auto* b : {import_,camera_,preview_}) b->setVisible(tabs_->currentIndex()==0);
 }
 void ReconstructionWindow::showImages() {
@@ -449,6 +486,6 @@ void ReconstructionWindow::showImages() {
 void ReconstructionWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }
     event->ignore(); if (closing_) return;
-    closing_ = true; mask_request_id_=controller_.requestMask(state_.image_id,{}); refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
+    closing_ = true; gpu_upload_pending_=false; mesh_valid_=false; mask_request_id_=controller_.requestMask(state_.image_id,{}); refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
 }
 void ReconstructionWindow::allowClose() { allow_close_ = true; close(); }

@@ -49,6 +49,7 @@ target_link_libraries(fs_triangle PRIVATE m)
 # Shared processing code for the CLI and future desktop application.
 add_library(fs_core STATIC
     src/geometry/MeshBuilder.cpp
+    src/geometry/MeshBuilderGPU.cu
     src/inference/FS.cpp
     src/inference/SamSegmenter.cpp
     src/inference/PostProcessing.cu
