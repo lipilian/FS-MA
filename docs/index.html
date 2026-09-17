@@ -1392,6 +1392,7 @@
             <a href="#gpu-io-preparation-heading">GPU Tensor I/O Preparation</a>
             <a href="#inference-memory-heading">Inference Memory Reduction</a>
             <a href="#disparity-filter-heading">Disparity Filter + XYZ · Fused CUDA Processing</a>
+            <a href="#cpu-cdt-heading">CPU Constrained Delaunay Triangulation (CDT)</a>
           </div>
         </details>
         <details class="toc-group">
@@ -2369,6 +2370,35 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
         <p><strong>Stream and completion:</strong> FS submits reconstruction on its inference stream and calls <code>synchronize()</code> internally. The method checks launch and execution errors before returning. The CLI runs this stage once after ordinary inference or the tenth <code>--measure</code> inference; its cost is excluded from inference timings. The caller ensures the preparation → inference → XYZ order.</p>
         <p><strong>Validation:</strong> the Qt-free Release build and normal/measured CLI paths passed. 24 GPU cases matched the notebook's postprocessing with denoising disabled and the near-depth limit applied; 23 invalid-parameter cases were rejected. Real-capture checks confirmed CPU-reference agreement, unchanged disparity, XYZ buffer reuse and threshold recomputation (430654 valid points at 0–1 m).</p>
         <p><strong>Implemented:</strong> selection-mask upload, full-image XYZ, selected-region neighbourhood denoising, XYZ download, Jet display and CPU Triangle mesh generation. Raw disparity download remains pending. See <a href="code_structure.html#postprocessing">the postprocessing module</a> for the API contract.</p>
+      </article>
+
+      <article class="engine-build-step" aria-labelledby="cpu-cdt-heading">
+        <h3 id="cpu-cdt-heading">6. CPU Constrained Delaunay Triangulation (CDT)</h3>
+        <p><code>fs::build_constrained_mesh()</code> uses Triangle on the CPU to connect valid image-plane UV samples while preserving the supplied exterior boundary segments. The resulting triangle indices map back to XYZ for 3D filtering and surface-area calculation.</p>
+        <h4>Performance estimates</h4>
+        <p>CPU mesh generation for <code>data/mask_bug</code> takes approximately <strong>500 ms</strong> on the profiled system, producing <strong>442,033 vertices</strong> and <strong>879,050 triangles</strong> with the default denoising and mesh thresholds. These rounded stage estimates exclude inference, XYZ download and GUI rendering; timing varies with the input and hardware.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="CPU CDT mesh generation performance estimates">
+          <table>
+            <thead>
+              <tr><th scope="col">Stage</th><th scope="col">Estimated time</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Build the nearest-point tree for boundary matching</td><td>67 ms</td></tr>
+              <tr><td>Handle repeated boundary vertices</td><td><strong>0.5 ms</strong></td></tr>
+              <tr><td>Triangle triangulation</td><td><strong>335 ms</strong></td></tr>
+              <tr><td>Triangle filtering</td><td>58–66 ms</td></tr>
+              <tr><td>Vertex compaction, area calculation and other work</td><td>About 25 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h4>Advantages</h4>
+        <ol>
+          <li><strong>Preserves small boundary concavities:</strong> exterior constraints retain fine inward boundary details represented at the working resolution and preserved by boundary snapping.</li>
+          <li><strong>Handles irregular valid-point distributions:</strong> triangulates the samples remaining after depth filtering and denoising without requiring a complete pixel grid.</li>
+          <li><strong>Bridges small internal gaps:</strong> connects existing valid samples across gaps when centroid, 3D edge-length and depth-jump checks allow it. The current implementation does not constrain internal holes or reconstruct missing XYZ values.</li>
+          <li><strong>Improves 2D triangle shapes:</strong> the Delaunay criterion helps avoid unnecessarily thin triangles where the boundary constraints and sample distribution permit.</li>
+        </ol>
+        <p><strong style="color: #b42318;">Disadvantage — slow CPU mesh generation:</strong> Triangle alone takes about 335 ms, roughly two-thirds of the total mesh-build time for this fixture, making triangulation the main performance bottleneck.</p>
       </article>
     </section>
 

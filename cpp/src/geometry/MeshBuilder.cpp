@@ -163,11 +163,14 @@ MeshResult build_constrained_mesh(const cv::Mat &xyz, const cv::Mat &selection,
         throw std::invalid_argument(
             "Mesh needs aligned XYZ, binary mask and RGB "
             "with positive finite thresholds");
+    // Invoke the optional cancellation checkpoint.
+    // The callback may throw to abort mesh generation.
     const auto check = [&] {
         if (checkpoint)
             checkpoint();
     };
-    check();
+    check(); // Initial checkpoint before processing components.
+    
     cv::Mat labels;
     const int components =
         cv::connectedComponents(selection, labels, 8, CV_32S);
