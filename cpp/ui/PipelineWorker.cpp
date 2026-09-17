@@ -11,6 +11,8 @@
 #include <opencv2/imgcodecs.hpp>
 #include <cmath>
 #include <algorithm>
+#include <array>
+#include <unordered_map>
 #include <limits>
 #include <stdexcept>
 
@@ -24,6 +26,23 @@ fs::MeshCamera meshCamera(const StereoFrame& frame, cv::Size mesh_size) {
     const double sy=double(mesh_size.height)/frame.rectified_left().rows;
     return {cv::Matx33d(camera.fx*sx,0,camera.cx*sx,0,camera.fy*sy,camera.cy*sy,0,0,1),mesh_size};
 }
+// Match the values actually written to PLY. Exact XYZ equality preserves nearby
+// distinct samples; including RGB preserves color differences at the same XYZ.
+struct PLYVertexKey {
+    std::array<float,3> xyz;
+    std::array<unsigned char,3> rgb;
+    bool operator==(const PLYVertexKey& other) const { return xyz==other.xyz && rgb==other.rgb; }
+};
+struct PLYVertexHash {
+    std::size_t operator()(const PLYVertexKey& key) const {
+        std::size_t hash=0;
+        const auto combine=[&](std::size_t value) { hash^=value+0x9e3779b9u+(hash<<6)+(hash>>2); };
+        // std::hash<float> treats +0 and -0 equally, matching float equality.
+        for (float value:key.xyz) combine(std::hash<float>{}(value));
+        for (auto value:key.rgb) combine(value);
+        return hash;
+    }
+};
 // Called only for an explicit GPU mesh export, on the pipeline thread.
 fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::function<void()>& checkpoint) {
     const auto vertex_count=source.buffer ? source.buffer->vertex_slots() : 0;
@@ -47,8 +66,10 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
     }
     checkpoint();
     fs::MeshResult mesh;
-    mesh.vertices.reserve(source.stats.triangle_count*3);
-    mesh.colors.reserve(source.stats.triangle_count*3);
+    mesh.vertices.reserve(source.stats.triangle_count);
+    mesh.colors.reserve(source.stats.triangle_count);
+    std::unordered_map<PLYVertexKey,int,PLYVertexHash> vertex_indices;
+    vertex_indices.reserve(source.stats.triangle_count);
     mesh.triangles.reserve(source.stats.triangle_count);
     for (std::size_t i=0;i<vertex_count;i+=3) {
         if ((i/3)%4096==0) checkpoint();
@@ -61,16 +82,21 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
         if (!valid) continue; // Includes the zeroed, unused triangle slots.
         const double area=.5*cv::norm((p[1]-p[0]).cross(p[2]-p[0]));
         if (!(area>0) || !std::isfinite(area)) continue;
-        const int base=int(mesh.vertices.size());
+        cv::Vec3i face;
         for (int k=0;k<3;++k) {
             const auto& v=vertices[i+k];
             if (!std::isfinite(v.r) || !std::isfinite(v.g) || !std::isfinite(v.b))
                 throw std::runtime_error("GPU mesh contains invalid colors");
             const auto byte=[](float c) { return static_cast<unsigned char>(std::lround(std::clamp(c,0.f,1.f)*255.f)); };
-            mesh.vertices.emplace_back(v.x,v.y,v.z);
-            mesh.colors.emplace_back(byte(v.r),byte(v.g),byte(v.b));
+            const PLYVertexKey key{{v.x,v.y,v.z},{byte(v.r),byte(v.g),byte(v.b)}};
+            const auto [entry,inserted]=vertex_indices.emplace(key,int(mesh.vertices.size()));
+            if (inserted) {
+                mesh.vertices.emplace_back(v.x,v.y,v.z);
+                mesh.colors.emplace_back(key.rgb[0],key.rgb[1],key.rgb[2]);
+            }
+            face[k]=entry->second;
         }
-        mesh.triangles.emplace_back(base,base+1,base+2);
+        mesh.triangles.push_back(face);
     }
     if (mesh.triangles.size()!=source.stats.triangle_count)
         throw std::runtime_error("GPU mesh export triangle count does not match the displayed result");
@@ -460,8 +486,8 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     if (options.mesh && gpu_mesh) {
         QElapsedTimer download; download.start();
         mesh=std::make_shared<fs::MeshResult>(downloadMeshForExport(*gpu_mesh,[this] { checkpoint(); }));
-        emit log(QString("GPU mesh export download + filtering: %1 ms · %2 triangles · RGB uint8 0–255")
-            .arg(download.nsecsElapsed()/1e6,0,'f',3).arg(mesh->triangles.size()));
+        emit log(QString("GPU mesh export download + filtering: %1 ms · %2 triangles · %3 unique vertices · RGB uint8 0–255")
+            .arg(download.nsecsElapsed()/1e6,0,'f',3).arg(mesh->triangles.size()).arg(mesh->vertices.size()));
     }
     // Encode to temporary files first; each destination is replaced atomically.
     std::vector<std::unique_ptr<QSaveFile>> pending;
