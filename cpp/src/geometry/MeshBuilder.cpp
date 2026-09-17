@@ -106,6 +106,44 @@ std::uint64_t edgeKey(int a, int b) {
         std::swap(a, b);
     return (std::uint64_t(std::uint32_t(a)) << 32) | std::uint32_t(b);
 }
+// Nearest-sample snapping can turn an otherwise simple contour into a
+// closed walk that revisits vertices. Split at those visits instead of
+// discarding the whole component. Keep every nonzero-area cycle (including
+// lobes joined at one vertex); discard only backtracking/collinear spurs.
+// Each retained edge comes from the original walk: global deduplication would
+// instead invent shortcuts between unrelated parts of the boundary.
+std::vector<std::vector<int>> boundaryCycles(const std::vector<int> &walk,
+                                            const std::vector<cv::Point> &uv) {
+    std::vector<std::vector<int>> cycles;
+    if (walk.empty())
+        return cycles;
+    std::vector<int> position(uv.size(), -1), path;
+    const auto visit = [&](int id) {
+        const int start = position[id];
+        if (start < 0) {
+            position[id] = int(path.size());
+            path.push_back(id);
+            return;
+        }
+        if (path.size() - start >= 3) {
+            double twice_area = 0;
+            for (size_t i = start; i < path.size(); ++i) {
+                const auto a = uv[path[i]];
+                const auto b = uv[i + 1 < path.size() ? path[i + 1] : id];
+                twice_area += double(a.x) * b.y - double(a.y) * b.x;
+            }
+            if (twice_area != 0)
+                cycles.emplace_back(path.begin() + start, path.end());
+        }
+        for (size_t i = start + 1; i < path.size(); ++i)
+            position[path[i]] = -1;
+        path.resize(start + 1);
+    };
+    for (int id : walk)
+        visit(id);
+    visit(walk.front());
+    return cycles;
+}
 bool valid(cv::Vec3f p) {
     return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) &&
            p[2] > 0;
@@ -169,9 +207,8 @@ MeshResult build_constrained_mesh(const cv::Mat &xyz, const cv::Mat &selection,
         }
         if (loop.size() > 1 && loop.front() == loop.back())
             loop.pop_back();
-        if (loop.size() < 3 ||
-            std::unordered_set<int>(loop.begin(), loop.end()).size() !=
-                loop.size()) {
+        const auto cycles = boundaryCycles(loop, uv);
+        if (cycles.empty()) {
             ++result.skipped_components;
             continue;
         }
@@ -185,17 +222,19 @@ MeshResult build_constrained_mesh(const cv::Mat &xyz, const cv::Mat &selection,
         std::vector<int> segments;
         segments.reserve(loop.size() * 2);
         std::unordered_set<std::uint64_t> required;
-        for (size_t i = 0; i < loop.size(); ++i) {
-            const int a = loop[i], b = loop[(i + 1) % loop.size()];
-            segments.push_back(a);
-            segments.push_back(b);
-            required.insert(edgeKey(a, b));
-        }
+        for (const auto &cycle : cycles)
+            for (size_t i = 0; i < cycle.size(); ++i) {
+                const int a = cycle[i], b = cycle[(i + 1) % cycle.size()];
+                if (required.insert(edgeKey(a, b)).second) {
+                    segments.push_back(a);
+                    segments.push_back(b);
+                }
+            }
         triangulateio input{};
         input.pointlist = points.data();
         input.numberofpoints = int(uv.size());
         input.segmentlist = segments.data();
-        input.numberofsegments = int(loop.size());
+        input.numberofsegments = int(segments.size() / 2);
         TriangleOutput output;
         {
             std::lock_guard<std::mutex> lock(triangle_mutex);

@@ -2534,7 +2534,7 @@ cmake --build cpp/build --target fs_gui --parallel
         <p><strong>Implemented.</strong> Generate mesh follows <code>python/fs_tensorrt800x960_gwc_plugin.ipynb</code> and its helper using native Triangle 1.6 on the CPU. <code>fs::build_constrained_mesh()</code> reads the XYZ, nearest-neighbour mask and RGB already cached after step three. It does not rerun inference or download XYZ again.</p>
         <ol>
           <li>Separate 8-connected mask components and retain finite, positive-Z points inside the selection, without interior downsampling.</li>
-          <li>Extract the largest exterior contour of each component, snap its boundary to retained UV samples, and reject degenerate boundary loops.</li>
+          <li>Extract the largest exterior contour of each component, snap its boundary to retained UV samples, and split repeated-vertex walks into nonzero-area cycles. Discard zero-area spurs without dropping the entire component.</li>
           <li>Triangulate image-plane UV vertices with exterior segments using Triangle <code>pzQ</code>, then verify constraints.</li>
           <li>Keep triangles whose rounded centroid is in the same component, maximum 3D edge is at most 0.02 m, and Z spread is at most 0.01 m. Compact referenced vertices, retain RGB and sum area.</li>
         </ol>

@@ -320,7 +320,7 @@ cmake --build cpp/build --parallel
       <p><code>geometry/MeshBuilder.hpp/.cpp</code> implements <code>fs::build_constrained_mesh()</code> using native Triangle 1.6. It follows <code>python/fs_tensorrt800x960_gwc_plugin.ipynb</code>: all retained points on the 960 × 800 grid, with no interior downsampling.</p>
       <ol>
         <li>Split the selection into 8-connected components; retain selected finite XYZ with positive Z.</li>
-        <li>Extract each component’s largest exterior contour, snap it to nearest retained image pixels and remove consecutive duplicates. Skip insufficient or repeated-vertex boundary loops.</li>
+        <li>Extract each component’s largest exterior contour, snap it to nearest retained image pixels and remove consecutive duplicates. Split repeated-vertex walks into nonzero-area cycles, discarding zero-area spurs; skip a component only if no valid cycle remains.</li>
         <li>Pass the image-plane UV vertices and exterior segments to Triangle using <code>pzQ</code>; the Python wrapper automatically adds <code>z</code> to its <code>pQ</code> call. Verify every constraint edge before filtering and reject inserted vertices without retained XYZ.</li>
         <li>Keep triangles whose rounded centroid belongs to the same mask component, whose longest 3D edge is at most 0.02 m, and whose Z spread is at most 0.01 m. Compact referenced vertices, retain RGB and sum triangle areas in double precision.</li>
       </ol>
