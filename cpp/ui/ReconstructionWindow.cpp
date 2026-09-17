@@ -329,7 +329,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         const QImage selection=mask_->mask();
         const SharedMesh mesh=mesh_valid_ ? mesh_result_ : SharedMesh{};
-        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite); });
+        const SharedGPUMesh gpu_mesh=mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
+        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite,gpu_mesh); });
     };
     connect(save_selected_,&QPushButton::clicked,this,[this,save_results] {
         save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked()});
@@ -431,16 +432,16 @@ void ReconstructionWindow::refresh() {
     if (!mesh_valid_ && !gpu_upload_pending_ && (mesh_result_ || gpu_mesh_result_)) {
         mesh_result_.reset(); gpu_mesh_result_.reset(); mesh_view_->setMesh({});
     }
-    save_mesh_->setToolTip(gpu_mesh_result_ ? "GPU mesh display is ready; PLY export currently requires CPU mesh." : "Generate the current CPU mesh before saving it.");
+    save_mesh_->setToolTip(gpu_mesh_result_ ? "Save the displayed GPU mesh as PLY; downloads geometry only when saving." : "Save the currently displayed mesh as PLY.");
     mesh_mode_->setEnabled(mesh_valid_);
     browse_save_->setEnabled(idle);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_}) option->setEnabled(idle);
     save_calibration_name_->setText(state_.calibration_filename);
     const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked();
     const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
-        (!save_mesh_->isChecked() || (mesh_valid_ && mesh_result_));
+        (!save_mesh_->isChecked() || (mesh_valid_ && (mesh_result_ || gpu_mesh_result_)));
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
-    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && mesh_result_ && !save_directory_->text().isEmpty());
+    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && (mesh_result_ || gpu_mesh_result_) && !save_directory_->text().isEmpty());
     scene_status_->setText(gpu_mesh_result_ ? QString("GPU mesh · %1 triangles · %2 cm²%3")
         .arg(gpu_mesh_result_->stats.triangle_count).arg(gpu_mesh_result_->stats.area_m2*1e4,0,'f',2)
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "") : mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")

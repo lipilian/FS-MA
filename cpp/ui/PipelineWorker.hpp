@@ -46,7 +46,8 @@ public:
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .02,
                       double max_depth_jump_m = .01);
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
-                     const QImage& selection, SharedMesh mesh, bool overwrite = false);
+                     const QImage& selection, SharedMesh mesh, bool overwrite = false,
+                     SharedGPUMesh gpu_mesh = {});
     void shutdown();
 signals:
     void stateChanged(PipelineState state);
@@ -85,6 +86,7 @@ private:
     cv::Mat mesh_xyz_, mesh_mask_, mesh_rgb_;
     QByteArray calibration_json_;
     SharedMesh latest_mesh_;
+    std::weak_ptr<const GPUMeshFrame> latest_gpu_mesh_;
     std::shared_ptr<fs::MeshGPUBuffer> gpu_mesh_;
     PipelineState state_;
 };
