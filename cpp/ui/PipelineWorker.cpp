@@ -312,7 +312,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
     emit log(state_.status);
 }
-void PipelineWorker::buildMesh(double max_edge_m, double max_depth_jump_m) {
+void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {
     if (!state_.depth_ready || state_.live || !frame_ || mesh_xyz_.empty() || mesh_mask_.empty())
         throw std::runtime_error("Reconstruct depth before generating a mesh.");
     latest_mesh_.reset();
@@ -323,6 +323,36 @@ void PipelineWorker::buildMesh(double max_edge_m, double max_depth_jump_m) {
     checkpoint();
     const double mesh_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Mesh build: %1 ms (CPU)").arg(mesh_ms,0,'f',3));
+    publishMesh(std::move(mesh));
+}
+void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m, double max_depth_jump_m) {
+    if (!state_.depth_ready || !state_.gpu_ready || state_.live || !frame_ || !fs_ || !fs_->isEngineLoaded())
+        throw std::runtime_error("Reconstruct depth before preparing a GPU mesh.");
+    if (selection_mask.isNull() || selection_mask.width() != frame_->rectified_left().cols ||
+        selection_mask.height() != frame_->rectified_left().rows)
+        throw std::invalid_argument("GPU mesh requires the confirmed rectified-left mask.");
+    checkpoint();
+    state_.status = "Preparing GPU mesh…"; publish();
+    QElapsedTimer elapsed; elapsed.start();
+    const QImage grayscale = selection_mask.convertToFormat(QImage::Format_Grayscale8);
+    const cv::Mat mask(grayscale.height(), grayscale.width(), CV_8UC1,
+                       const_cast<uchar*>(grayscale.constBits()), grayscale.bytesPerLine());
+    const auto inputs = fs_->prepare_gpu_mesh_inputs(mask);
+    checkpoint();
+    emit log(QString("GPU mesh input preparation: %1 ms · reuse FS GPU XYZ and stream; upload current mask (%2 × %3).")
+        .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(inputs.width).arg(inputs.height));
+    auto mesh = fs::build_mesh_gpu(inputs, mesh_rgb_, max_edge_m, max_depth_jump_m);
+    fs_->synchronize(); checkpoint();
+    if (!mesh) {
+        // Preserve a previously generated CPU mesh; the scaffold produces no result.
+        state_.status = "GPU mesh generation is not implemented yet. Use CPU mesh to generate a mesh.";
+        publish(); emit log(state_.status);
+        return;
+    }
+    if (mesh->triangles.empty()) throw std::runtime_error("GPU mesh returned no triangles.");
+    publishMesh(std::make_shared<fs::MeshResult>(std::move(*mesh)));
+}
+void PipelineWorker::publishMesh(std::shared_ptr<fs::MeshResult> mesh) {
     const auto camera=frame_->rectified_camera_parameters();
     const double sx=double(mesh_xyz_.cols)/frame_->rectified_left().cols;
     const double sy=double(mesh_xyz_.rows)/frame_->rectified_left().rows;

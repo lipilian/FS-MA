@@ -41,7 +41,9 @@ public:
                      bool denoise = true, float max_neighbor_distance_m = 0.01F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
                  const std::shared_ptr<std::atomic_uint64_t>& current_request);
-    void buildMesh(double max_edge_m = .02, double max_depth_jump_m = .01);
+    void buildMeshCPU(double max_edge_m = .02, double max_depth_jump_m = .01);
+    void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .02,
+                      double max_depth_jump_m = .01);
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedMesh mesh, bool overwrite = false);
     void shutdown();
@@ -58,6 +60,7 @@ signals:
 private:
     void poll();
     void publish();
+    void publishMesh(std::shared_ptr<fs::MeshResult> mesh);
     QString liveStatus() const;
     void emitPreview();
     void checkpoint() const;

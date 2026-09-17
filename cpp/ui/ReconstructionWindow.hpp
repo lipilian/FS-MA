@@ -37,7 +37,7 @@ private:
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
     QImage raw_left_, raw_right_, rectified_left_, rectified_right_, live_left_, live_right_;
-    QPushButton *import_, *camera_, *preview_, *capture_, *run_, *finish_draw_, *clear_, *build_mesh_, *next_;
+    QPushButton *import_, *camera_, *preview_, *capture_, *run_, *finish_draw_, *clear_, *build_mesh_cpu_, *build_mesh_gpu_, *next_;
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *rectified_, *epilines_, *denoise_;
