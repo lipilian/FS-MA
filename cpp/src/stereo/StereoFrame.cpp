@@ -135,6 +135,21 @@ void StereoFrame::rectify() {
     Logger::log(summary.str());
 }
 
+cv::Mat StereoFrame::rectify_left_mask(const cv::Mat& raw_mask) const {
+    if (rectified_left_.empty() || r1_.empty() || p1_.empty()) {
+        throw std::logic_error("Rectify the stereo pair before rectifying its mask");
+    }
+    if (raw_mask.empty() || raw_mask.type() != CV_8UC1 || raw_mask.size() != left_.size()) {
+        throw std::invalid_argument("Left mask must be CV_8UC1 and match the raw left image dimensions");
+    }
+    cv::Mat map_x, map_y, rectified_mask;
+    cv::initUndistortRectifyMap(k1_, d1_, r1_, p1_, left_.size(), kMapType, map_x, map_y);
+    const cv::Mat binary_mask = raw_mask > 0;
+    cv::remap(binary_mask, rectified_mask, map_x, map_y, cv::INTER_NEAREST,
+              cv::BORDER_CONSTANT, cv::Scalar(0));
+    return rectified_mask;
+}
+
 StereoCameraParameters StereoFrame::rectified_camera_parameters() const {
     if (p1_.empty() || p2_.empty() || p2_.at<double>(0, 0) == 0.0) {
         throw std::runtime_error("Rectification has not completed or has invalid projection matrices");

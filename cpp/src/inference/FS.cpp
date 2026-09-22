@@ -414,6 +414,18 @@ void FS::denoise_xyz_map(float max_neighbor_distance_m, int min_neighbors, int e
     xyz_ready_ = true;
 }
 
+cv::Mat FS::download_disparity() {
+    if (!isEngineLoaded() || !disparity_output_device_) {
+        throw std::logic_error("loadEngine and inference must complete before downloading disparity");
+    }
+    cv::Mat disparity(kTensorRtInputHeight, kTensorRtInputWidth, CV_32FC1);
+    check_cuda(cudaMemcpyAsync(disparity.data, disparity_output_device_.get(),
+                               disparity.total() * disparity.elemSize(),
+                               cudaMemcpyDeviceToHost, stream_), "failed to download disparity");
+    synchronize();
+    return disparity;
+}
+
 cv::Mat FS::download_xyz_map() {
     if (!isEngineLoaded() || !xyz_map_device_) {
         throw std::logic_error("loadEngine and compute_xyz_map must complete before downloading XYZ");

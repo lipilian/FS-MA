@@ -85,6 +85,12 @@ public:
     void denoise_xyz_map(float max_neighbor_distance_m = 0.01F,
                          int min_neighbors = 3, int edge_min_neighbors = 2);
 
+    /** Download raw disparity as an owned CV_32FC1 matrix (800 x 960, pixels).
+     * Call inference first. Completes the transfer on the FS stream before returning.
+     * XYZ filtering and denoising do not alter these disparity values.
+     */
+    cv::Mat download_disparity();
+
     /** Download the last computed XYZ map as an owned CV_32FC3 matrix (800 rows × 960 columns, metres).
      * Call compute_xyz_map first. Completes the transfer before returning.
      */

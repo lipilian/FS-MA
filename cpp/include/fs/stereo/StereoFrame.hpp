@@ -34,6 +34,11 @@ public:
     /** Undistort and rectify both RGB images using cv::CALIB_ZERO_DISPARITY. */
     void rectify();
 
+    /** Rectify a raw-left-aligned CV_8UC1 mask with nearest-neighbour sampling.
+     * Call rectify first. Returns owned binary storage with zero outside the image.
+     */
+    cv::Mat rectify_left_mask(const cv::Mat& raw_mask) const;
+
     const cv::Mat& left() const { return left_; }
     const cv::Mat& right() const { return right_; }
     const cv::Mat& rectified_left() const { return rectified_left_; }
