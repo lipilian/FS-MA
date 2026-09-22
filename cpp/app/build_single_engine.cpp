@@ -54,6 +54,75 @@ size_t parsePositiveSize(char const* value, char const* option) {
     }
 }
 
+#if NV_TENSORRT_MAJOR == 10
+int rewriteCorrelationAveragePools(nvinfer1::INetworkDefinition& network) {
+    // TRT 10.14 can corrupt coarse-volume samples when AveragePool stays inside
+    // the fused recurrent subgraph. The equivalent pair average avoids that path
+    // without extra engine outputs or a change to the model's precision.
+    static constexpr float half = 0.5F; // Weights must live through engine construction.
+    const int32_t originalLayerCount = network.getNbLayers();
+    int rewritten = 0;
+    const auto matches2D = [](nvinfer1::Dims dims, int64_t height, int64_t width) {
+        return dims.nbDims == 2 && dims.d[0] == height && dims.d[1] == width;
+    };
+    for (int32_t index = 0; index < originalLayerCount; ++index) {
+        auto* layer = network.getLayer(index);
+        if (layer->getType() != nvinfer1::LayerType::kPOOLING) continue;
+        auto* pool = static_cast<nvinfer1::IPoolingLayer*>(layer);
+        auto* input = pool->getInput(0);
+        const auto shape = input->getDimensions();
+        if (pool->getPoolingType() != nvinfer1::PoolingType::kAVERAGE ||
+            !matches2D(pool->getWindowSizeNd(), 1, 2) ||
+            !matches2D(pool->getStrideNd(), 1, 2) ||
+            !matches2D(pool->getPrePadding(), 0, 0) ||
+            !matches2D(pool->getPostPadding(), 0, 0) ||
+            pool->getPaddingMode() != nvinfer1::PaddingMode::kEXPLICIT_ROUND_DOWN ||
+            shape.nbDims != 4 || shape.d[0] <= 0 || shape.d[1] <= 0 ||
+            shape.d[2] != 1 || shape.d[3] <= 0 || shape.d[3] % 2 != 0 ||
+            input->getType() != nvinfer1::DataType::kFLOAT) {
+            continue;
+        }
+        auto pooledShape = shape;
+        pooledShape.d[3] /= 2;
+        auto* even = network.addSlice(*input, nvinfer1::Dims4{0, 0, 0, 0},
+                                     pooledShape, nvinfer1::Dims4{1, 1, 1, 2});
+        auto* odd = network.addSlice(*input, nvinfer1::Dims4{0, 0, 0, 1},
+                                    pooledShape, nvinfer1::Dims4{1, 1, 1, 2});
+        auto* scale = network.addConstant(nvinfer1::Dims4{1, 1, 1, 1},
+            nvinfer1::Weights{nvinfer1::DataType::kFLOAT, &half, 1});
+        if (!even || !odd || !scale) throw std::runtime_error("Failed to rewrite correlation pooling");
+        auto* sum = network.addElementWise(*even->getOutput(0), *odd->getOutput(0),
+                                          nvinfer1::ElementWiseOperation::kSUM);
+        if (!sum) throw std::runtime_error("Failed to create correlation pair sum");
+        auto* average = network.addElementWise(*sum->getOutput(0), *scale->getOutput(0),
+                                              nvinfer1::ElementWiseOperation::kPROD);
+        if (!average) throw std::runtime_error("Failed to create correlation pair average");
+        const std::string name = pool->getName();
+        even->setName((name + "/pair_even").c_str());
+        odd->setName((name + "/pair_odd").c_str());
+        sum->setName((name + "/pair_sum").c_str());
+        average->setName((name + "/pair_average").c_str());
+        auto* oldOutput = pool->getOutput(0);
+        auto* newOutput = average->getOutput(0);
+        const std::string outputName = oldOutput->getName();
+        oldOutput->setName((outputName + "/replaced").c_str());
+        newOutput->setName(outputName.c_str());
+        for (int32_t consumerIndex = 0; consumerIndex < originalLayerCount; ++consumerIndex) {
+            auto* consumer = network.getLayer(consumerIndex);
+            for (int32_t slot = 0; slot < consumer->getNbInputs(); ++slot) {
+                if (consumer->getInput(slot) == oldOutput) consumer->setInput(slot, *newOutput);
+            }
+        }
+        if (oldOutput->isNetworkOutput()) {
+            network.unmarkOutput(*oldOutput);
+            network.markOutput(*newOutput);
+        }
+        ++rewritten;
+    }
+    return rewritten;
+}
+#endif
+
 int parseOptimizationLevel(char const* value) {
     try {
         const int level = std::stoi(value);
@@ -137,6 +206,12 @@ int main(int argc, char** argv) {
             }
             throw std::runtime_error("failed to parse ONNX: " + onnxPath.string());
         }
+
+#if NV_TENSORRT_MAJOR == 10
+        const int poolingRewrites = rewriteCorrelationAveragePools(*network);
+        std::cout << "TensorRT 10 correlation pooling compatibility rewrites: "
+                  << poolingRewrites << std::endl;
+#endif
 
         TrtPtr<nvinfer1::IBuilderConfig> config(builder->createBuilderConfig());
         if (!config) {
