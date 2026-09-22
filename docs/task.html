@@ -378,12 +378,14 @@
     .task-button:focus-visible .task-tooltip { display: block; }
 
     .liu { background: var(--liu); }
-    .coarse-build { background: #dc2626; }
+    .coarse-build,
+    .task-failed { background: #dc2626; }
     .repo-debug { background: #166534; }
     .repo-debug .task-tooltip strong { color: #166534; }
     .cuda-preprocessing { background: #facc15; color: var(--ink); }
     .cuda-preprocessing .task-tooltip strong { color: #a16207; }
-    .coarse-build .task-tooltip strong { color: #dc2626; }
+    .coarse-build .task-tooltip strong,
+    .task-failed .task-tooltip strong { color: #dc2626; }
     .liu.task-button {
       height: 42px;
       align-self: end;
@@ -606,7 +608,17 @@
                 </span>
               </button>
               <span class="task-duration" style="grid-column: 57 / 71" title="Schedule: 2026/09/21 – 2026/10/04">2 weeks</span>
-              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 57 / 71" data-task="liu-cuda" aria-controls="task-details">
+              <button class="bar liu task-failed task-button" type="button" style="grid-column: 57 / 71" data-task="liu-cuda-tensorrt-environment" aria-controls="task-details">
+                <small>CUDA 12.9 TensorRT 10.14 environment test · Failed</small>
+                <span class="task-tooltip" role="tooltip">
+                  <strong>Task details</strong>
+                  <ol>
+                    <li>Failed: the GRU returned NaN after the second iteration. The CUDA 12.9 / TensorRT 10.14 approach was archived.</li>
+                  </ol>
+                </span>
+              </button>
+              <span class="task-duration" style="grid-column: 71 / 85" title="Schedule: 2026/10/05 – 2026/10/18">2 weeks</span>
+              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 71 / 85" data-task="liu-cuda" aria-controls="task-details">
                 <small>CUDA pre-processing</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -617,8 +629,8 @@
                   </ol>
                 </span>
               </button>
-              <span class="task-duration" style="grid-column: 71 / 85" title="Schedule: 2026/10/05 – 2026/10/18">2 weeks</span>
-              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 71 / 85" data-task="liu-cpp-inferencing" aria-controls="task-details">
+              <span class="task-duration" style="grid-column: 85 / 99" title="Schedule: 2026/10/19 – 2026/11/01">2 weeks</span>
+              <button class="bar liu cuda-preprocessing task-button" type="button" style="grid-column: 85 / 99" data-task="liu-cpp-inferencing" aria-controls="task-details">
                 <small>C++ inferencing script example</small>
                 <span class="task-tooltip" role="tooltip">
                   <strong>Task details</strong>
@@ -626,16 +638,6 @@
                     <li>Load a TensorRT Engine with the GWC Plugin.</li>
                     <li>Stereo Preprocessing · 800 × 960 with Intrinsic Rescale.</li>
                     <li>GPU tensor I/O preparation (Completed): convert resized RGB HWC <code>uint8</code> images to FP32 NCHW <code>[1, 3, 800, 960]</code>; preallocate and bind <code>left</code>, <code>right</code>, and <code>disp</code> buffers during engine loading; use pinned host buffers and <code>cudaMemcpyAsync</code> for transfer.</li>
-                  </ol>
-                </span>
-              </button>
-              <span class="task-duration" style="grid-column: 85 / 99" title="Schedule: 2026/10/19 – 2026/11/01">2 weeks</span>
-              <button class="bar liu task-button" type="button" style="grid-column: 85 / 99" data-task="liu-cuda-tensorrt-environment" aria-controls="task-details">
-                <small>CUDA 12.9 TensorRT 10.16 environment test</small>
-                <span class="task-tooltip" role="tooltip">
-                  <strong>Task details</strong>
-                  <ol>
-                    <li>Test the CUDA 12.9 and TensorRT 10.16 environment.</li>
                   </ol>
                 </span>
               </button>
@@ -803,7 +805,7 @@
 
       <section class="task-details" id="task-details" hidden aria-live="polite">
         <h2 id="task-title">Liu Hong — CUDA pre-processing</h2>
-        <p id="task-period">Schedule: 2026/09/21 – 2026/10/04</p>
+        <p id="task-period">Schedule: 2026/10/05 – 2026/10/18</p>
         <ul id="task-list">
           <li>GPU memory holding for the second model.</li>
           <li>Resolution padding for DINO dimension fitting.</li>
@@ -852,7 +854,7 @@
       },
       "liu-cuda": {
         title: "Liu Hong — CUDA pre-processing",
-        duration: "Schedule: 2026/09/21 – 2026/10/04",
+        duration: "Schedule: 2026/10/05 – 2026/10/18",
         items: [
           "GPU memory holding for the second model.",
           "Resolution padding for DINO dimension fitting.",
@@ -861,7 +863,7 @@
       },
       "liu-cpp-inferencing": {
         title: "Liu Hong — C++ inferencing script example",
-        duration: "Schedule: 2026/10/05 – 2026/10/18",
+        duration: "Schedule: 2026/10/19 – 2026/11/01",
         items: [
           "Load a TensorRT Engine with the GWC Plugin.",
           "Stereo Preprocessing · 800 × 960 with Intrinsic Rescale.",
@@ -869,10 +871,11 @@
         ]
       },
       "liu-cuda-tensorrt-environment": {
-        title: "Liu Hong — CUDA 12.9 TensorRT 10.16 environment test",
-        duration: "Schedule: 2026/10/19 – 2026/11/01",
+        title: "Liu Hong — CUDA 12.9 TensorRT 10.14 environment test · Failed",
+        duration: "Schedule: 2026/09/21 – 2026/10/04",
         items: [
-          "Test the CUDA 12.9 and TensorRT 10.16 environment."
+          "Failed: the GRU returned NaN after the second iteration.",
+          "The CUDA 12.9 / TensorRT 10.14 approach was archived; no further work was pursued."
         ]
       },
       "liu-post": {

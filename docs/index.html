@@ -164,6 +164,141 @@
       margin: 0 8px 8px;
     }
 
+    .floating-contents {
+      position: fixed;
+      z-index: 30;
+      top: 50vh;
+      top: 50dvh;
+      left: max(6px, env(safe-area-inset-left));
+      display: flex;
+      align-items: center;
+      transform: translateY(-50%);
+    }
+
+    .floating-contents[hidden],
+    .floating-contents [hidden] { display: none; }
+
+    .contents-dots {
+      display: grid;
+      max-height: 75vh;
+      max-height: 75dvh;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: rgb(255 255 255 / 96%);
+      box-shadow: 0 4px 18px rgb(31 41 55 / 12%);
+      scrollbar-width: thin;
+    }
+
+    .contents-dot {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .contents-dot::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #98a2b3;
+      transition: transform 160ms ease, background 160ms ease;
+    }
+
+    .contents-dot[aria-current="location"]::before {
+      background: var(--accent);
+      transform: scale(1.5);
+    }
+
+    .contents-dot:hover,
+    .contents-dot[aria-expanded="true"] { background: var(--accent-soft); }
+
+    .contents-dot:focus-visible,
+    .contents-close:focus-visible,
+    .contents-panel a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .contents-panel {
+      width: min(360px, calc(100vw - 64px));
+      max-height: 75vh;
+      max-height: 75dvh;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      margin-left: 6px;
+      padding: 16px;
+      border: 1px solid #c8d8ff;
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: 0 12px 36px rgb(31 41 55 / 18%);
+      animation: contents-slide-in 160ms ease-out;
+    }
+
+    .contents-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .contents-panel-header strong { color: #1849a9; font-size: 0.86rem; }
+    .contents-panel h2 { margin: 0 0 12px; font-size: 1rem; line-height: 1.4; }
+    .contents-panel-links { display: grid; gap: 6px; }
+
+    .contents-panel a {
+      display: block;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: #1849a9;
+      font-size: 0.84rem;
+      line-height: 1.4;
+      text-decoration: none;
+    }
+
+    .contents-panel a:hover,
+    .contents-panel a[aria-current="location"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .contents-close {
+      flex: 0 0 36px;
+      height: 36px;
+      border: 0;
+      border-radius: 8px;
+      color: var(--muted);
+      background: var(--canvas);
+      font-size: 1.4rem;
+      cursor: pointer;
+    }
+
+    @keyframes contents-slide-in {
+      from { opacity: 0; transform: translateX(-8px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    @media (pointer: coarse) {
+      .contents-dot { width: 40px; height: 44px; }
+      .contents-close { flex-basis: 44px; height: 44px; }
+      .contents-panel { width: min(360px, calc(100vw - 72px)); padding: 12px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .contents-panel { animation: none; }
+      .contents-dot::before { transition: none; }
+    }
+
     .back-to-top,
     .back-to-contents {
       position: fixed;
@@ -1413,6 +1548,13 @@
           </div>
         </details>
         <a href="#urgent-lens-e-vignette-validation-heading" style="color: #15803d;">Urgent Task Lens E vignetting problem validation 2026/09/15 · Completed</a>
+        <details class="toc-group">
+          <summary>Windows Transition</summary>
+          <div class="toc-links">
+            <a href="#windows-transition-heading">Overview</a>
+            <a href="#windows-cuda12-trt10-heading" style="color: var(--muted);"><s>Try CUDA 12.9 + TensorRT 10.14 · Archived</s></a>
+          </div>
+        </details>
       </div>
     </nav>
 
@@ -2684,8 +2826,195 @@ cmake --build cpp/build --target fs_gui --parallel
       </div>
     </section>
 
+    <section class="card" aria-labelledby="windows-transition-heading">
+      <h2 id="windows-transition-heading" style="font-size: clamp(1.8rem, 3.5vw, 3rem);">Windows Transition</h2>
+      <article class="engine-build-step" aria-labelledby="windows-cuda12-trt10-heading">
+        <h3 id="windows-cuda12-trt10-heading" style="color: var(--muted);"><s>Try CUDA 12.9 + TensorRT 10.14 · Archived</s></h3>
+        <p>Tested CUDA 12.9 with TensorRT 10.14 in an Ubuntu 24.04 Docker container as an initial compatibility check for the Windows transition. The <a href="#forward-gru" title="Context + iterative GRU refinement">GRU</a> returned <code>NaN</code> values after the second iteration.</p>
+        <p><strong>Investigation:</strong> the failure was traced to <code>AveragePool</code> in the <a href="#forward-gru" title="Context + iterative GRU refinement">GRU</a> path, with <a href="https://github.com/NVIDIA/TensorRT/issues/4821">NVIDIA/TensorRT issue #4821</a> identified as the suspected underlying bug. That report describes an AveragePool failure at the batch boundary <code>N = 65536</code> on an RTX 5090 with CUDA 12.9; the issue remained open as of September 22, 2026.</p>
+        <p><strong>Decision:</strong> archived this approach and stopped further work on this configuration. The exploration is preserved in <a href="https://github.com/smd-ai/FS_Engine/tree/archive/TBSA2-449-cuda12-trt10"><code>archive/TBSA2-449-cuda12-trt10</code></a>.</p>
+        <p>The issue may be resolved in the newer CUDA 13.3 / TensorRT 11.2 environment, but a fix attributable specifically to CUDA 13.3 has not been confirmed.</p>
+        <h4>Current Working Environment</h4>
+        <ul>
+          <li><strong>CUDA Toolkit:</strong> 13.3 (<code>nvcc 13.3.73</code>).</li>
+          <li><strong>TensorRT:</strong> 11.2.1.2, built for CUDA 13.3.</li>
+        </ul>
+      </article>
+    </section>
+
   </main>
   <a class="back-to-contents" href="#contents" aria-label="Back to contents" title="Back to contents">☰</a>
   <a class="back-to-top" href="#top" aria-label="Back to top" title="Back to top">↑</a>
+  <script>
+    (() => {
+      const contents = document.querySelector("#contents");
+      const navigation = document.createElement("nav");
+      navigation.className = "floating-contents";
+      navigation.hidden = true;
+      navigation.setAttribute("aria-label", "Quick section navigation");
+      navigation.innerHTML = `
+        <div class="contents-dots" aria-label="Contents sections"></div>
+        <div class="contents-panel" id="floating-contents-panel" hidden>
+          <div class="contents-panel-header">
+            <strong>Contents</strong>
+            <button class="contents-close" type="button" aria-label="Close quick contents">×</button>
+          </div>
+          <h2 id="floating-contents-title"></h2>
+          <div class="contents-panel-links"></div>
+        </div>`;
+      document.body.append(navigation);
+      const dots = navigation.querySelector(".contents-dots");
+      const panel = navigation.querySelector(".contents-panel");
+      const title = navigation.querySelector("h2");
+      const panelLinks = navigation.querySelector(".contents-panel-links");
+      const closeButton = navigation.querySelector(".contents-close");
+      panel.setAttribute("aria-labelledby", title.id);
+      const groups = [];
+      const targets = [];
+      let openGroup = null;
+      let currentTarget = null;
+      let pinned = false;
+      let closeTimer;
+      let framePending = false;
+
+      function markCurrentLink() {
+        panelLinks.querySelectorAll("a").forEach((link) => {
+          if (link.hash === currentTarget?.hash) link.setAttribute("aria-current", "location");
+          else link.removeAttribute("aria-current");
+        });
+      }
+
+      function openPanel(group) {
+        clearTimeout(closeTimer);
+        if (openGroup !== group) {
+          if (openGroup) openGroup.button.setAttribute("aria-expanded", "false");
+          title.textContent = group.label;
+          panelLinks.replaceChildren(...group.links.map((link) => link.cloneNode(true)));
+          openGroup = group;
+          markCurrentLink();
+        }
+        group.button.setAttribute("aria-expanded", "true");
+        panel.hidden = false;
+      }
+
+      function closePanel(returnFocus = false) {
+        clearTimeout(closeTimer);
+        if (returnFocus && openGroup) openGroup.button.focus({ preventScroll: true });
+        if (openGroup) openGroup.button.setAttribute("aria-expanded", "false");
+        panel.hidden = true;
+        openGroup = null;
+        pinned = false;
+      }
+
+      // Derive the quick navigation from the existing contents, including subtopics.
+      Array.from(contents.querySelector(":scope > .toc-links").children).forEach((item) => {
+        const label = item.matches("details")
+          ? item.querySelector("summary").textContent.trim() : item.textContent.trim();
+        const links = item.matches("a") ? [item] : Array.from(item.querySelectorAll("a"));
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "contents-dot";
+        button.setAttribute("aria-label", label);
+        button.setAttribute("aria-controls", panel.id);
+        button.setAttribute("aria-expanded", "false");
+        const group = { label, links, button };
+        groups.push(group);
+        dots.append(button);
+        links.forEach((link) => {
+          const heading = document.getElementById(decodeURIComponent(link.hash.slice(1)));
+          if (heading) targets.push({ heading, hash: link.hash, group });
+        });
+        button.addEventListener("pointerenter", (event) => {
+          if (event.pointerType === "mouse" && !pinned && !panel.contains(document.activeElement)) openPanel(group);
+        });
+        button.addEventListener("focus", () => openPanel(group));
+        button.addEventListener("click", () => { openPanel(group); pinned = true; });
+        button.addEventListener("keydown", (event) => {
+          const index = groups.indexOf(group);
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            groups[(index + (event.key === "ArrowDown" ? 1 : groups.length - 1)) % groups.length].button.focus();
+          } else if (event.key === "ArrowRight") {
+            event.preventDefault();
+            openPanel(group);
+            panelLinks.querySelector("a")?.focus();
+          }
+        });
+      });
+
+      navigation.addEventListener("pointerenter", () => clearTimeout(closeTimer));
+      navigation.addEventListener("pointerleave", () => {
+        if (!pinned && !navigation.contains(document.activeElement)) {
+          closeTimer = setTimeout(() => closePanel(), 180);
+        }
+      });
+      navigation.addEventListener("focusout", () => {
+        requestAnimationFrame(() => {
+          if (!navigation.contains(document.activeElement)) closePanel();
+        });
+      });
+      closeButton.addEventListener("click", () => closePanel(true));
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !panel.hidden) {
+          closePanel(navigation.contains(document.activeElement));
+        }
+      });
+      document.addEventListener("pointerdown", (event) => {
+        if (!navigation.contains(event.target)) closePanel();
+      });
+      panelLinks.addEventListener("click", (event) => {
+        const link = event.target.closest("a");
+        if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        const target = document.getElementById(decodeURIComponent(link.hash.slice(1)));
+        if (target) {
+          // Keep native anchor/history behavior, and move keyboard focus into the document.
+          const temporaryTabIndex = !target.hasAttribute("tabindex");
+          if (temporaryTabIndex) target.setAttribute("tabindex", "-1");
+          target.focus({ preventScroll: true });
+          if (temporaryTabIndex) target.addEventListener("blur", () => target.removeAttribute("tabindex"), { once: true });
+        }
+        closePanel();
+      });
+
+      function updateNavigation() {
+        framePending = false;
+        const pastContents = contents.getBoundingClientRect().bottom <= 0;
+        if (!pastContents && !navigation.hidden) {
+          if (navigation.contains(document.activeElement)) {
+            contents.querySelector("a").focus({ preventScroll: true });
+          }
+          closePanel();
+        }
+        navigation.hidden = !pastContents;
+        if (!pastContents) return;
+        let current = targets[0];
+        for (const target of targets) {
+          if (target.heading.getBoundingClientRect().top <= 120) current = target;
+        }
+        if (window.scrollY + document.documentElement.clientHeight >= document.documentElement.scrollHeight - 2) {
+          current = targets[targets.length - 1];
+        }
+        currentTarget = current;
+        groups.forEach((group) => {
+          if (group === current?.group) group.button.setAttribute("aria-current", "location");
+          else group.button.removeAttribute("aria-current");
+        });
+        markCurrentLink();
+      }
+
+      function scheduleUpdate() {
+        if (!framePending) {
+          framePending = true;
+          requestAnimationFrame(updateNavigation);
+        }
+      }
+      window.addEventListener("scroll", scheduleUpdate, { passive: true });
+      window.addEventListener("resize", scheduleUpdate);
+      window.addEventListener("load", scheduleUpdate);
+      contents.addEventListener("toggle", scheduleUpdate, true);
+      if ("ResizeObserver" in window) new ResizeObserver(scheduleUpdate).observe(document.querySelector("main"));
+      updateNavigation();
+    })();
+  </script>
 </body>
 </html>
