@@ -37,25 +37,13 @@
       "program": "${workspaceFolder}/cpp/build/fs_build_single_engine",
       "args": [
         "${workspaceFolder}/onnx/foundationstereo_800x960_gwc_plugin.onnx",
-        "${workspaceFolder}/onnx/foundationstereo_800x960_gwc_plugin.engine"
+        "${workspaceFolder}/onnx/foundationstereo_800x960_gwc_plugin_cu129.engine"
       ],
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "externalConsole": false,
       "MIMode": "gdb",
       "preLaunchTask": "Build TSFS"
-    },
-    {
-      "name": "Run FS GUI",
-      "type": "cppdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}/cpp/build/fs_gui",
-      "args": [],
-      "cwd": "${workspaceFolder}",
-      "stopAtEntry": false,
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "preLaunchTask": "Build FS GUI"
     }
   ]
 }

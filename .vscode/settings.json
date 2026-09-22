@@ -3,8 +3,10 @@
   "cmake.buildDirectory": "${workspaceFolder}/cpp/build",
   "cmake.configureSettings": {
     "CMAKE_BUILD_TYPE": "Release",
-    "CMAKE_CUDA_COMPILER": "/usr/local/cuda-13.3/bin/nvcc",
+    "CMAKE_CUDA_COMPILER": "/usr/local/cuda-12.9/bin/nvcc",
     "CMAKE_CUDA_ARCHITECTURES": "120",
-    "CUDAToolkit_ROOT": "/usr/local/cuda-13.3"
-  }
+    "CUDAToolkit_ROOT": "/usr/local/cuda-12.9",
+    "FS_BUILD_DESKTOP": "OFF"
+  },
+  "cmake.generator": "Unix Makefiles"
 }

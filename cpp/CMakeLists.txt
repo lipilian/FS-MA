@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 
+# Set the default before project() initializes CUDA's compiler default.
+# Keep explicit -D overrides and the standard CUDAARCHS environment override.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "CUDA architectures to build")
+endif()
+
 project(TSFS LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -7,10 +13,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 120)
-endif()
 
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs imgproc calib3d)
 find_package(CUDAToolkit REQUIRED)
@@ -23,13 +25,13 @@ find_path(TENSORRT_INCLUDE_DIR
     PATH_SUFFIXES include include/x86_64-linux-gnu
 )
 find_library(TENSORRT_NVINFER_LIBRARY
-    NAMES nvinfer nvinfer.so.11
+    NAMES nvinfer libnvinfer.so.10 libnvinfer.so.11
     HINTS /usr /usr/local
     PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu
 )
 
 find_library(TENSORRT_NVONNXPARSER_LIBRARY
-    NAMES nvonnxparser nvonnxparser.so.11
+    NAMES nvonnxparser libnvonnxparser.so.10 libnvonnxparser.so.11
     HINTS /usr /usr/local
     PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu
 )

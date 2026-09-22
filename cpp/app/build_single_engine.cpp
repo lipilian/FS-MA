@@ -39,7 +39,7 @@ void printUsage(char const* program) {
         << " [--optimization-level N] [--no-compilation-cache]\n\n"
         << "Build one TensorRT engine from an ONNX graph containing the\n"
         << "foundation_stereo::GWCVolume Plugin V3 node.\n\n"
-        << "TensorRT 11 uses the tensor types encoded in ONNX; default workspace is 4096 MiB.\n";
+        << "Strong typing preserves the tensor types encoded in ONNX; default workspace is 4096 MiB.\n";
 }
 
 size_t parsePositiveSize(char const* value, char const* option) {
@@ -113,8 +113,14 @@ int main(int argc, char** argv) {
             throw std::runtime_error("createInferBuilder failed");
         }
 
-        // TensorRT 11 networks are explicit-batch and strongly typed by default.
-        TrtPtr<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(0U));
+        // TensorRT 10 requires an explicit flag to preserve ONNX tensor types.
+        // TensorRT 11 uses strong typing by default.
+        uint32_t networkFlags = 0U;
+#if NV_TENSORRT_MAJOR < 11
+        networkFlags = 1U << static_cast<uint32_t>(
+            nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+#endif
+        TrtPtr<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(networkFlags));
         if (!network) {
             throw std::runtime_error("createNetworkV2 failed");
         }
@@ -161,7 +167,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "Built engine: " << enginePath << '\n';
-        std::cout << "Precision: determined by the ONNX tensor types (TensorRT 11 strong typing)\n";
+        std::cout << "Precision: determined by the ONNX tensor types (strong typing)\n";
         std::cout << "Plugin: foundation_stereo::GWCVolume (Plugin V3)\n";
     } catch (std::exception const& error) {
         std::cerr << "ERROR: " << error.what() << '\n';

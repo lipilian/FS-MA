@@ -10,7 +10,13 @@
         "${workspaceFolder}/cpp",
         "-B",
         "${workspaceFolder}/cpp/build",
-        "-DCMAKE_BUILD_TYPE=Release"
+        "-G",
+        "Unix Makefiles",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc",
+        "-DCUDAToolkit_ROOT=/usr/local/cuda-12.9",
+        "-DCMAKE_CUDA_ARCHITECTURES=120",
+        "-DFS_BUILD_DESKTOP=OFF"
       ],
       "problemMatcher": []
     },
@@ -21,7 +27,8 @@
       "args": [
         "--build",
         "${workspaceFolder}/cpp/build",
-        "--parallel"
+        "--parallel",
+        "4"
       ],
       "dependsOn": "Configure TSFS (Release)",
       "dependsOrder": "sequence",
@@ -29,34 +36,6 @@
         "kind": "build",
         "isDefault": true
       },
-      "problemMatcher": "$gcc"
-    },
-    {
-      "label": "Configure FS GUI (Release)",
-      "type": "shell",
-      "command": "cmake",
-      "args": [
-        "-S",
-        "${workspaceFolder}/cpp",
-        "-B",
-        "${workspaceFolder}/cpp/build",
-        "-DCMAKE_BUILD_TYPE=Release"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "Build FS GUI",
-      "type": "shell",
-      "command": "cmake",
-      "args": [
-        "--build",
-        "${workspaceFolder}/cpp/build",
-        "--target",
-        "fs_gui",
-        "--parallel"
-      ],
-      "dependsOn": "Configure FS GUI (Release)",
-      "dependsOrder": "sequence",
       "problemMatcher": "$gcc"
     }
   ]

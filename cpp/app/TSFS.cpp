@@ -29,7 +29,7 @@ int main(int argc, char* argv[]) {
 
     try {
         FS fs;
-        fs.loadEngine("onnx/foundationstereo_800x960_gwc_plugin.engine");
+        fs.loadEngine("onnx/foundationstereo_800x960_gwc_plugin_cu129.engine");
 
         Logger::log("Loading stereo capture.");
         StereoFrame frame(left_path, right_path, calibration_path);
