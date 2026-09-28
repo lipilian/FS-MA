@@ -491,6 +491,38 @@
       line-height: 1.5;
     }
 
+    .vit-workstream { margin-top: 32px; }
+
+    .workstream-heading {
+      margin: 0;
+      padding: 24px 28px 0;
+      font-size: 1.35rem;
+      letter-spacing: -0.02em;
+    }
+
+    .vit-workstream .timeline { padding-bottom: 30px; }
+
+    .vit-workstream .track { grid-template-rows: 26px auto; }
+
+    .vit-task-card {
+      display: block;
+      grid-row: 2;
+      height: auto;
+      align-self: start;
+      padding: 14px;
+      font-size: .78rem;
+      line-height: 1.45;
+    }
+
+    .vit-task-card:nth-of-type(even) {
+      background: #facc15;
+      color: var(--ink);
+    }
+
+    .vit-task-card h3 { margin: 0; font-size: inherit; }
+    .vit-task-card ul { margin: 10px 0 0; padding-left: 18px; font-weight: 400; }
+    .vit-task-card li + li { margin-top: 5px; }
+
     @media (max-width: 680px) {
       main {
         width: min(100% - 28px, 1400px);
@@ -812,12 +844,105 @@
       </section>
 
     </section>
+
+    <section class="timeline-card vit-workstream" aria-labelledby="vit-workstream-title">
+      <h2 class="workstream-heading" id="vit-workstream-title">Vit few shot photogrammetry（VGGT）</h2>
+      <div class="timeline-scroll">
+        <div class="timeline">
+          <div class="axis">
+            <div class="axis-label">Workstream</div>
+            <div class="months" aria-label="2026–2027 calendar timeline starting November 2, 2026, weekly ticks">
+              <span style="left: 0%" title="2026/11/02">11/02</span>
+              <span style="left: 5%" title="2026/11/09">11/09</span>
+              <span style="left: 10%" title="2026/11/16">11/16</span>
+              <span style="left: 15%" title="2026/11/23">11/23</span>
+              <span style="left: 20%" title="2026/11/30">11/30</span>
+              <span style="left: 25%" title="2026/12/07">12/07</span>
+              <span style="left: 30%" title="2026/12/14">12/14</span>
+              <span style="left: 35%" title="2026/12/21">12/21</span>
+              <span style="left: 40%" title="2026/12/28">12/28</span>
+              <span style="left: 45%" title="2027/01/04">01/04</span>
+              <span style="left: 50%" title="2027/01/11">01/11</span>
+              <span style="left: 55%" title="2027/01/18">01/18</span>
+              <span style="left: 60%" title="2027/01/25">01/25</span>
+              <span style="left: 65%" title="2027/02/01">02/01</span>
+              <span style="left: 70%" title="2027/02/08">02/08</span>
+              <span style="left: 75%" title="2027/02/15">02/15</span>
+              <span style="left: 80%" title="2027/02/22">02/22</span>
+              <span style="left: 85%" title="2027/03/01">03/01</span>
+              <span style="left: 90%" title="2027/03/08">03/08</span>
+              <span style="left: 95%" title="2027/03/15">03/15</span>
+            </div>
+          </div>
+
+          <div class="lane liu-lane">
+            <div class="person">
+              <div class="avatar" style="background: var(--liu)">LH</div>
+              <div>
+                <h2>Liu Hong</h2>
+                <p>Vit few shot photogrammetry（VGGT）</p>
+              </div>
+            </div>
+            <div class="track liu-track">
+              <span class="task-duration" style="grid-column: 1 / 15" title="Schedule: 2026/11/02 – 2026/11/15">2 weeks</span>
+              <article class="bar liu vit-task-card" style="grid-column: 1 / 15">
+                <h3>Prototype testing &amp; test-data capture</h3>
+                <ul>
+                  <li>Test the prototype.</li>
+                  <li>Develop the capture code.</li>
+                  <li>Check camera calibration.</li>
+                  <li>Capture the required test data.</li>
+                </ul>
+              </article>
+              <span class="task-duration" style="grid-column: 15 / 43" title="Schedule: 2026/11/16 – 2026/12/13">4 weeks</span>
+              <article class="bar liu vit-task-card" style="grid-column: 15 / 43">
+                <h3>Left RGB + FoundationStereo depth fusion</h3>
+                <ul>
+                  <li>Generate depth using the completed FoundationStereo pipeline.</li>
+                  <li>Fuse RGB and depth at different resolutions.</li>
+                  <li>Encode depth information into camera tokens and image tokens using the same encoding approach as VGGT / DINOv3.</li>
+                  <li>Modify the aggregator’s encoding and attention components.</li>
+                </ul>
+              </article>
+              <span class="task-duration" style="grid-column: 43 / 57" title="Schedule: 2026/12/14 – 2026/12/27">2 weeks</span>
+              <article class="bar liu vit-task-card" style="grid-column: 43 / 57">
+                <h3>Complete camera head decoding modifications</h3>
+                <ul>
+                  <li>Generate the corresponding camera extrinsics.</li>
+                  <li>Compare the camera intrinsics produced by inference with the original calibration intrinsics.</li>
+                </ul>
+              </article>
+              <span class="task-duration" style="grid-column: 57 / 71" title="Schedule: 2026/12/28 – 2027/01/10">2 weeks</span>
+              <article class="bar liu vit-task-card" style="grid-column: 57 / 71">
+                <h3>Depth head: generate an additional ray direction map</h3>
+                <ul>
+                  <li>Compare the high-precision depth map generated by FoundationStereo with the depth map decoded by the depth head, and verify their scale relationship.</li>
+                </ul>
+              </article>
+              <span class="task-duration" style="grid-column: 71 / 99" title="Schedule: 2027/01/11 – 2027/02/07">4 weeks</span>
+              <article class="bar liu vit-task-card" style="grid-column: 71 / 99">
+                <h3>N-view fusion</h3>
+                <ul>
+                  <li>Use camera extrinsics with real-world scale obtained from ViT (VGGT) to project FoundationStereo depth into a shared 3D coordinate system and generate N meshes.</li>
+                  <li>Fuse the point clouds using depth fusion, then fuse the meshes.</li>
+                  <li>If fusion fails, use a normal-priority method to identify overlap and compute its boundary in the 2D images, avoiding overestimation of TBSA area during segmentation projection.</li>
+                </ul>
+              </article>
+              <span class="task-duration" style="grid-column: 99 / 113" title="Schedule: 2027/02/08 – 2027/02/21">2 weeks</span>
+              <article class="bar liu vit-task-card" style="grid-column: 99 / 113">
+                <h3>Demo</h3>
+                <ul>
+                  <li>Prepare the materials needed for the demo.</li>
+                  <li>Conduct a live demo, if feasible.</li>
+                </ul>
+              </article>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
   <script>
-    const taskDetails = document.querySelector("#task-details");
-    const taskTitle = document.querySelector("#task-title");
-    const taskPeriod = document.querySelector("#task-period");
-    const taskList = document.querySelector("#task-list");
     const taskButtons = document.querySelectorAll(".task-button");
     const taskData = {
       "liu-coarse-build": {
@@ -982,6 +1107,11 @@
       button.addEventListener("click", () => {
         const task = taskData[button.dataset.task];
         if (!task) return;
+
+        const taskDetails = document.getElementById(button.getAttribute("aria-controls"));
+        const taskTitle = taskDetails.querySelector("h2");
+        const taskPeriod = taskDetails.querySelector("p");
+        const taskList = taskDetails.querySelector("ul");
 
         if (activeTask === button.dataset.task && !taskDetails.hidden) {
           taskDetails.hidden = true;
