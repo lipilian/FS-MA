@@ -210,12 +210,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     save_calibration_=new QCheckBox("Calibration JSON"); save_calibration_->setObjectName("saveCalibration");
     save_mask_=new QCheckBox("Mask (mask.png)"); save_mask_->setObjectName("saveMask");
     save_mask_->setToolTip("Full-resolution confirmed mask in rectified-left image coordinates.");
+    save_depth_=new QCheckBox("Depth (depth.tiff)"); save_depth_->setObjectName("saveDepth");
+    save_depth_->setToolTip("Filtered Z depth in metres, single-channel float32 TIFF. Invalid pixels are zero. Aligned with the rectified left image resized to the depth resolution.");
     save_mesh_=new QCheckBox("Mesh (mesh.ply)"); save_mesh_->setObjectName("saveMesh");
     save_mesh_->setToolTip("Generate the current mesh before saving it.");
-    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_}) option->setChecked(true);
+    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setChecked(true);
     layout->addWidget(save_images_); layout->addWidget(label("left.png · right.png"));
     layout->addWidget(save_calibration_); save_calibration_name_=label(state_.calibration_filename); layout->addWidget(save_calibration_name_);
-    layout->addWidget(save_mask_); layout->addWidget(save_mesh_);
+    layout->addWidget(save_mask_); layout->addWidget(save_depth_); layout->addWidget(save_mesh_);
     save_directory_=new QLineEdit; save_directory_->setObjectName("saveDirectory"); save_directory_->setReadOnly(true); save_directory_->setPlaceholderText("Choose output folder");
     layout->addWidget(save_directory_); browse_save_=button("Browse…","browseSaveDirectory"); layout->addWidget(browse_save_);
     save_selected_=button("Save selected","saveSelected"); layout->addWidget(save_selected_);
@@ -311,7 +313,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (!directory.isEmpty()) save_directory_->setText(directory);
     });
     connect(save_directory_,&QLineEdit::textChanged,this,[this] { refresh(); });
-    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_})
+    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_})
         connect(option,&QCheckBox::toggled,this,[this] { refresh(); });
     const auto save_results=[this](ReconstructionSaveOptions options) {
         const QString directory=save_directory_->text();
@@ -320,6 +322,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (options.images) names << "left.png" << "right.png";
         if (options.calibration) names << state_.calibration_filename;
         if (options.mask) names << "mask.png";
+        if (options.depth) names << "depth.tiff";
         if (options.mesh) names << "mesh.ply";
         QStringList existing;
         for (const auto& name:names) if (QFileInfo::exists(dir.filePath(name)) || QFileInfo(dir.filePath(name)).isSymLink()) existing << name;
@@ -333,10 +336,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite,gpu_mesh); });
     };
     connect(save_selected_,&QPushButton::clicked,this,[this,save_results] {
-        save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked()});
+        save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked(),save_depth_->isChecked()});
     });
     connect(save_all_,&QPushButton::clicked,this,[save_results] {
-        save_results({true,true,true,true});
+        save_results({true,true,true,true,true});
     });
     connect(next_,&QPushButton::clicked,this,[this] { tabs_->setCurrentIndex(3); });
     connect(build_mesh_cpu_,&QPushButton::clicked,this,[this] {
@@ -435,10 +438,11 @@ void ReconstructionWindow::refresh() {
     save_mesh_->setToolTip(gpu_mesh_result_ ? "Save the displayed GPU mesh as PLY; downloads geometry only when saving." : "Save the currently displayed mesh as PLY.");
     mesh_mode_->setEnabled(mesh_valid_);
     browse_save_->setEnabled(idle);
-    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_}) option->setEnabled(idle);
+    for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
     save_calibration_name_->setText(state_.calibration_filename);
-    const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked();
+    const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked() || save_depth_->isChecked();
     const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
+        (!save_depth_->isChecked() || result_current) &&
         (!save_mesh_->isChecked() || (mesh_valid_ && (mesh_result_ || gpu_mesh_result_)));
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
     save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && (mesh_result_ || gpu_mesh_result_) && !save_directory_->text().isEmpty());

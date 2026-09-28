@@ -1,0 +1,27 @@
+# Run from the map-anything directory in your activated Conda environment:
+#   python -m pip install -r requirements.txt
+#
+# To select CUDA 13.2 wheels, install the PyTorch packages first:
+#   python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu132
+#
+# Base dependencies only, from [project].dependencies in pyproject.toml.
+# Keep this list synchronized with pyproject.toml.
+# uniception also requires torch, torchvision and torchaudio.
+huggingface_hub
+hydra-core
+natsort
+opencv-python-headless==4.10.0.84
+orjson
+pillow-heif
+plyfile
+python-box
+requests
+rerun-sdk~=0.24.1
+safetensors
+tensorboard
+tqdm
+trimesh
+uniception==0.1.7
+
+# Install the local MapAnything source in editable mode, without extras.
+-e .
