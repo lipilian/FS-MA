@@ -1452,6 +1452,26 @@
       .ngc-comparison-layout .pipeline-flow { grid-template-columns: 1fr; }
       .ngc-comparison-grid { grid-template-columns: 1fr; }
     }
+    .card.section-green {
+      border-left: 5px solid #15803d;
+      background: linear-gradient(135deg, #ffffff, #f0fdf4);
+    }
+
+    .section-green h2,
+    .section-green > .bottleneck-kicker { color: #15803d; }
+
+    .toc-green summary,
+    .toc-green a,
+    .toc-links a.toc-green { color: #15803d; }
+
+    .toc-green a:hover,
+    .toc-green a:focus-visible,
+    .toc-links a.toc-green:hover,
+    .toc-links a.toc-green:focus-visible {
+      color: #15803d;
+      background: #fff;
+    }
+
   </style>
 </head>
 <body id="top">
@@ -1489,10 +1509,10 @@
       <h2>Contents</h2>
       <div class="toc-links">
         <a href="#goal-heading">Goal</a>
-        <a href="#baseline-heading">PyTorch Performance</a>
-        <a href="#progress-heading">Environment Setup</a>
-        <a href="#pipeline-update-heading">Stereo Preprocessing</a>
-        <details class="toc-group">
+        <a class="toc-green" href="#baseline-heading">PyTorch Performance</a>
+        <a class="toc-green" href="#progress-heading">Environment Setup</a>
+        <a href="#pipeline-update-heading" style="color: var(--muted);"><s>Stereo Preprocessing</s> · Deprecated</a>
+        <details class="toc-group toc-green">
           <summary>Investigating Abnormally High TensorRT Memory Usage and Long Inference Time</summary>
           <div class="toc-links">
             <a href="#coarse-engine-heading"><s>Coarse Engine</s> · Deprecated</a>
@@ -1502,14 +1522,14 @@
             <a href="#resolution-analysis-heading">Resolution Analysis</a>
           </div>
         </details>
-        <details class="toc-group">
+        <details class="toc-group toc-green">
           <summary>Issue Investigation</summary>
           <div class="toc-links">
             <a href="#bottleneck-heading">Bottleneck Analysis</a>
             <a href="#attention-axis-heading">Attention-axis Issue</a>
           </div>
         </details>
-        <details class="toc-group">
+        <details class="toc-group toc-green">
           <summary>Implemented Fix</summary>
           <div class="toc-links">
             <a href="#bug-fixed-heading">PyTorch / Python Fix</a>
@@ -1518,8 +1538,8 @@
             <a href="#performance-improvement-heading">Performance Improvement</a>
           </div>
         </details>
-        <a href="#build-new-engine-heading">How to Build a New TensorRT Engine</a>
-        <details class="toc-group">
+        <a class="toc-green" href="#build-new-engine-heading">How to Build a New TensorRT Engine</a>
+        <details class="toc-group toc-green">
           <summary>C++ Engine Usage</summary>
           <div class="toc-links">
             <a href="#load-plugin-engine-heading">Load a TensorRT Engine with the GWC Plugin</a>
@@ -1549,12 +1569,13 @@
         </details>
         <a href="#urgent-lens-e-vignette-validation-heading" style="color: #15803d;">Urgent Task Lens E vignetting problem validation 2026/09/15 · Completed</a>
         <details class="toc-group">
-          <summary>Windows Transition</summary>
+          <summary style="color: #854d0e;">Windows Transition</summary>
           <div class="toc-links">
             <a href="#windows-transition-heading">Overview</a>
             <a href="#windows-cuda12-trt10-heading" style="color: var(--muted);"><s>Try CUDA 12.9 + TensorRT 10.14 · Archived</s></a>
           </div>
         </details>
+        <a href="#vit-fiew-views-photogrammetry-heading" style="color: #854d0e;">Vit fiew views photogrammetry</a>
       </div>
     </nav>
 
@@ -1572,7 +1593,7 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="baseline-heading">
+    <section class="card section-green" aria-labelledby="baseline-heading">
       <h2 id="baseline-heading">Current Baseline</h2>
       <table>
         <thead>
@@ -1605,7 +1626,7 @@
       </p>
     </section>
 
-    <section class="card" aria-labelledby="memory-heading">
+    <section class="card section-green" aria-labelledby="memory-heading">
       <h2 id="memory-heading">GPU Memory Baseline</h2>
       <table>
         <thead>
@@ -1642,7 +1663,7 @@
         The primary memory-reduction target is peak allocated memory during Hiera inference.
       </p>
     </section>
-    <section class="card" aria-labelledby="progress-heading">
+    <section class="card section-green" aria-labelledby="progress-heading">
       <h2 id="progress-heading">Environment Setup</h2>
       <div class="progress-grid">
         <article class="progress-item">
@@ -1669,7 +1690,7 @@
 
     <section class="card preprocessing-layout" aria-labelledby="pipeline-update-heading">
       <div class="preprocessing-title">
-        <h2 id="pipeline-update-heading">Stereo Preprocessing</h2>
+        <h2 id="pipeline-update-heading" style="color: var(--muted);"><s>Stereo Preprocessing</s> · Deprecated</h2>
       </div>
       <div class="preprocessing-content">
         <div class="pipeline-flow">
@@ -1732,7 +1753,7 @@
       </div>
     </section>
 
-    <section class="card preprocessing-layout" aria-labelledby="coarse-engine-heading">
+    <section class="card section-green preprocessing-layout" aria-labelledby="coarse-engine-heading">
       <div class="preprocessing-title">
         <h2 id="coarse-engine-heading"><s>Coarse Engine</s> · Deprecated</h2>
       </div>
@@ -1790,7 +1811,7 @@
         </div>
       </div>
     </section>
-    <section class="card preprocessing-layout" aria-labelledby="container-validation-heading">
+    <section class="card section-green preprocessing-layout" aria-labelledby="container-validation-heading">
       <div class="preprocessing-title">
         <h2 id="container-validation-heading"><s>Official Repo Dependency Test</s> · Deprecated</h2>
       </div>
@@ -1810,7 +1831,7 @@
       </div>
     </section>
 
-    <section class="card preprocessing-layout ngc-comparison-layout" aria-labelledby="ngc-validation-heading">
+    <section class="card section-green preprocessing-layout ngc-comparison-layout" aria-labelledby="ngc-validation-heading">
       <div class="preprocessing-title">
         <h2 id="ngc-validation-heading">NGC Validation Path</h2>
       </div>
@@ -1953,7 +1974,7 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="vitl-resolution-test-heading">
+    <section class="card section-green" aria-labelledby="vitl-resolution-test-heading">
       <h2 id="vitl-resolution-test-heading">Vit-L 32 iters FS resolution test</h2>
       <p class="note">Fixed-resolution TensorRT analysis builds for the ViT-L, 32-iteration FoundationStereo ONNX exports.</p>
       <div class="ngc-comparison-grid">
@@ -2033,7 +2054,7 @@
     </section>
 
 
-    <section class="card" aria-labelledby="resolution-analysis-heading">
+    <section class="card section-green" aria-labelledby="resolution-analysis-heading">
       <p class="bottleneck-kicker">Profile finding</p>
       <h2 id="resolution-analysis-heading">Why the smaller 576 × 960 engine is slower and uses more memory</h2>
       <p class="note">This is a model-graph and precision effect, not an inverse resolution-scaling effect. ViT-S does reduce feature-encoder time, but the deployable v2.0 AHCF path dominates the end-to-end result.</p>
@@ -2063,7 +2084,7 @@
     </section>
 
 
-    <section class="card bottleneck-card" aria-labelledby="bottleneck-heading">
+    <section class="card section-green bottleneck-card" aria-labelledby="bottleneck-heading">
       <p class="bottleneck-kicker">Four suspects</p>
       <h2 id="bottleneck-heading" class="bottleneck-heading">The Real Culprit?</h2>
       <p class="bottleneck-question">Feature encode, AHCF, GRU iterations, or disparity upsampling?</p>
@@ -2125,9 +2146,9 @@ D = 192 / 4 = 48</code></pre>
         <p>The local FoundationStereo implementation applies <a href="https://github.com/smd-ai/FS_Engine/blob/main/FoundationStereo/core/foundation_stereo.py#L80" target="_blank" rel="noopener noreferrer"><code>conv_patch(kernel=4, stride=4)</code></a> before attention. The corresponding 800 attention input is only <code>[3,000, 12, 28]</code> FP16, and its full pyramid-attention path uses about <strong>1.04 ms</strong>.</p>
     </section>
 
-    <section class="card" aria-labelledby="attention-axis-heading">
-      <p class="bottleneck-kicker" style="color: #dc2626; font-weight: 900; letter-spacing: 0.12em;">BUG FOUND</p>
-      <h2 id="attention-axis-heading" style="color: #dc2626; font-size: clamp(2rem, 4vw, 3.4rem);">Attention-axis issue</h2>
+    <section class="card section-green" aria-labelledby="attention-axis-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">BUG FOUND</p>
+      <h2 id="attention-axis-heading" style="font-size: clamp(2rem, 4vw, 3.4rem);">Attention-axis issue</h2>
       <p>The local <code>FlashMultiheadAttention</code> reshapes Q/K/V as <code>[B, L, heads, head_dim]</code> and passes them directly to PyTorch <code>scaled_dot_product_attention</code> (SDPA). However, SDPA expects the head dimension before the sequence dimension: <code>[B, heads, L, head_dim]</code>.</p>
       <p>As documented in <a href="https://github.com/NVlabs/FoundationStereo/issues/239" target="_blank" rel="noopener noreferrer">FoundationStereo Issue #239</a>, this likely originated when the implementation changed from <code>flash_attn_func</code> to PyTorch SDPA without changing tensor layout. Under the current layout, SDPA interprets <code>heads = 4</code> as the sequence length, computing <code>4 × 4</code> cross-head attention rather than the intended disparity-axis attention.</p>
       <pre><code>current:  [B, D, heads, head_dim] → score [B, D, 4, 4]
@@ -2152,9 +2173,9 @@ intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
       </div>
     </section>
 
-    <section class="card" aria-labelledby="bug-fixed-heading">
-      <p class="bottleneck-kicker" style="color: #16a34a; font-weight: 900; letter-spacing: 0.12em;">BUG FIXED</p>
-      <h2 id="bug-fixed-heading" style="color: #16a34a; font-size: clamp(2rem, 4vw, 3.4rem);">Fixes applied in <code>core/submodule.py</code></h2>
+    <section class="card section-green" aria-labelledby="bug-fixed-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">BUG FIXED</p>
+      <h2 id="bug-fixed-heading" style="font-size: clamp(2rem, 4vw, 3.4rem);">Fixes applied in <code>core/submodule.py</code></h2>
       <p>All four corrections below are now present in the local source and are included when exporting the new attention-axis-fixed ONNX and TensorRT engine.</p>
       <h3>1. Flash attention: heads / sequence dimensions swapped; mask ignored</h3>
       <p><strong>Before</strong></p>
@@ -2178,9 +2199,9 @@ intended: [B, heads, D, head_dim] → score [B, heads, D, D]</code></pre>
       <pre><code>self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)&#10;if self.norm_layer is not None:&#10;  self.bn1 = norm_layer(planes)&#10;self.relu = nn.ReLU(inplace=True)&#10;self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, stride=1, bias=bias, padding=padding)</code></pre>
     </section>
 
-    <section class="card" aria-labelledby="cost-volume-plugin-heading" style="border-left: 5px solid #16a34a; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
-      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">COMPLETED · GWC PLUGIN SINGLE ENGINE</p>
-      <h2 id="cost-volume-plugin-heading" style="color: #166534; font-size: clamp(1.8rem, 3.5vw, 3rem);">GWC Volume TensorRT Plugin</h2>
+    <section class="card section-green" aria-labelledby="cost-volume-plugin-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">COMPLETED · GWC PLUGIN SINGLE ENGINE</p>
+      <h2 id="cost-volume-plugin-heading" style="font-size: clamp(1.8rem, 3.5vw, 3rem);">GWC Volume TensorRT Plugin</h2>
       <p class="deployment-summary">The Python <code>build_gwc_volume(...)</code> call has been replaced with a dedicated TensorRT plugin. The projected concatenation volume and final channel concatenation remain native TensorRT operations.</p>
       <p><a href="#forward-cost">View the earlier AHCF / cost-volume step</a></p>
       <h3 id="gwc-python-operation">Python operation replaced</h3>
@@ -2386,8 +2407,8 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
 
     </section>
 
-    <section class="card" aria-labelledby="post-fix-results-heading">
-      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">POST-FIX VALIDATION</p>
+    <section class="card section-green" aria-labelledby="post-fix-results-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">POST-FIX VALIDATION</p>
       <h2 id="post-fix-results-heading">Post-Fix Inference Result Comparison</h2>
       <p class="deployment-summary">Mesh areas after the applied PyTorch and TensorRT fixes. Each chart compares PyTorch <code>2048 × 2448</code>, TensorRT <code>800 × 960</code> attention-axis-fixed, and TensorRT <code>800 × 960</code> GWC Plugin V3 results across Tests 1–10. Bar labels are rounded <code>cm²</code> values.</p>
       <div class="comparison-result-grid">
@@ -2410,9 +2431,9 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
       </div>
     </section>
 
-    <section class="card" aria-labelledby="performance-improvement-heading" style="border-left: 5px solid #16a34a; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
-      <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">COMPLETED PERFORMANCE IMPROVEMENT</p>
-      <h2 id="performance-improvement-heading" style="color: #166534;">Post-Fix Inference Performance</h2>
+    <section class="card section-green" aria-labelledby="performance-improvement-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">COMPLETED PERFORMANCE IMPROVEMENT</p>
+      <h2 id="performance-improvement-heading">Post-Fix Inference Performance</h2>
       <p class="deployment-summary">The current fixed-shape inference path substantially reduces both end-to-end inference time and peak GPU memory use.</p>
       <div class="performance-improvement-grid">
         <article class="performance-improvement-card">
@@ -2428,9 +2449,9 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
       </div>
     </section>
 
-    <section class="card" aria-labelledby="build-new-engine-heading" style="border-left: 5px solid #2563eb; background: linear-gradient(135deg, #ffffff, #edf4ff);">
-      <p class="bottleneck-kicker" style="color: #1849a9; font-weight: 900; letter-spacing: 0.12em;">DEPLOYMENT WORKFLOW</p>
-      <h2 id="build-new-engine-heading" style="color: #1849a9; font-size: clamp(1.8rem, 3.5vw, 3rem);">How to Build a New TensorRT Engine</h2>
+    <section class="card section-green" aria-labelledby="build-new-engine-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">DEPLOYMENT WORKFLOW</p>
+      <h2 id="build-new-engine-heading" style="font-size: clamp(1.8rem, 3.5vw, 3rem);">How to Build a New TensorRT Engine</h2>
       <div class="engine-build-steps">
         <article class="engine-build-step">
           <h3>1. Download the Plugin-Ready ONNX Model</h3>
@@ -2456,9 +2477,9 @@ TensorRT builder chooses GPU tactics and serializes one .engine</code></pre>
       </div>
     </section>
 
-    <section class="card" aria-labelledby="cpp-engine-usage-heading" style="border-left: 5px solid #7c3aed; background: linear-gradient(135deg, #ffffff, #f5f3ff);">
-      <p class="bottleneck-kicker" style="color: #6d28d9; font-weight: 900; letter-spacing: 0.12em;">C++ RUNTIME</p>
-      <h2 id="cpp-engine-usage-heading" style="color: #5b21b6;">C++ Engine Usage</h2>
+    <section class="card section-green" aria-labelledby="cpp-engine-usage-heading">
+      <p class="bottleneck-kicker" style="font-weight: 900; letter-spacing: 0.12em;">C++ RUNTIME</p>
+      <h2 id="cpp-engine-usage-heading">C++ Engine Usage</h2>
 
       <article class="engine-build-step" aria-labelledby="load-plugin-engine-heading">
         <h3 id="load-plugin-engine-heading">1. Load a TensorRT Engine with the GWC Plugin</h3>
@@ -2826,9 +2847,9 @@ cmake --build cpp/build --target fs_gui --parallel
       </div>
     </section>
 
-    <section class="card" aria-labelledby="windows-transition-heading">
-      <h2 id="windows-transition-heading" style="font-size: clamp(1.8rem, 3.5vw, 3rem);">Windows Transition</h2>
-      <article class="engine-build-step" aria-labelledby="windows-cuda12-trt10-heading">
+    <section class="card" aria-labelledby="windows-transition-heading" style="border-left: 5px solid #eab308; background: linear-gradient(135deg, #ffffff, #fef9c3);">
+      <h2 id="windows-transition-heading" style="color: #a16207; font-size: clamp(1.8rem, 3.5vw, 3rem);">Windows Transition</h2>
+      <article class="engine-build-step" aria-labelledby="windows-cuda12-trt10-heading" style="border-color: #fde047; background: #fefce8;">
         <h3 id="windows-cuda12-trt10-heading" style="color: var(--muted);"><s>Try CUDA 12.9 + TensorRT 10.14 · Archived</s></h3>
         <p>Tested CUDA 12.9 with TensorRT 10.14 in an Ubuntu 24.04 Docker container as an initial compatibility check for the Windows transition. The <a href="#forward-gru" title="Context + iterative GRU refinement">GRU</a> returned <code>NaN</code> values after the second iteration.</p>
         <p><strong>Investigation:</strong> the failure was traced to <code>AveragePool</code> in the <a href="#forward-gru" title="Context + iterative GRU refinement">GRU</a> path, with <a href="https://github.com/NVIDIA/TensorRT/issues/4821">NVIDIA/TensorRT issue #4821</a> identified as the suspected underlying bug. That report describes an AveragePool failure at the batch boundary <code>N = 65536</code> on an RTX 5090 with CUDA 12.9; the issue remained open as of September 22, 2026.</p>
@@ -2840,6 +2861,10 @@ cmake --build cpp/build --target fs_gui --parallel
           <li><strong>TensorRT:</strong> 11.2.1.2, built for CUDA 13.3.</li>
         </ul>
       </article>
+    </section>
+
+    <section class="card" aria-labelledby="vit-fiew-views-photogrammetry-heading" style="border-left: 5px solid #eab308; background: linear-gradient(135deg, #ffffff, #fef9c3);">
+      <h2 id="vit-fiew-views-photogrammetry-heading" style="color: #a16207; font-size: clamp(1.8rem, 3.5vw, 3rem);">Vit fiew views photogrammetry</h2>
     </section>
 
   </main>

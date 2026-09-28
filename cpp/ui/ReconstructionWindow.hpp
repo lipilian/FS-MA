@@ -52,7 +52,7 @@ private:
     StereoImageView *left_, *right_, *depth_left_, *depth_map_;
     MaskEditor* mask_;
     QPushButton *save_selected_, *save_all_, *browse_save_;
-    QCheckBox *save_images_, *save_calibration_, *save_mask_, *save_mesh_;
+    QCheckBox *save_images_, *save_calibration_, *save_mask_, *save_mesh_, *save_depth_;
     QLineEdit* save_directory_;
     QLabel* save_calibration_name_;
     MeshView* mesh_view_;

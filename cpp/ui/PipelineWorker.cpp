@@ -454,7 +454,7 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
 void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOptions options,
                                  const QImage& selection, SharedMesh mesh, bool overwrite, SharedGPUMesh gpu_mesh) {
     if (!frame_ || state_.live) throw std::runtime_error("Capture or import a frozen pair before saving.");
-    if (!options.images && !options.calibration && !options.mask && !options.mesh)
+    if (!options.images && !options.calibration && !options.mask && !options.mesh && !options.depth)
         throw std::runtime_error("Select at least one item to save.");
     const QDir dir(directory);
     if (directory.trimmed().isEmpty() || !dir.exists()) throw std::runtime_error("Choose an existing output directory.");
@@ -463,6 +463,8 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
         throw std::runtime_error("No valid calibration snapshot is available.");
     if (options.mask && (selection.isNull() || selection.size()!=QSize(frame_->rectified_left().cols,frame_->rectified_left().rows)))
         throw std::runtime_error("Confirm a full-resolution mask before saving it.");
+    if (options.depth && (!state_.depth_ready || mesh_xyz_.empty() || mesh_xyz_.type()!=CV_32FC3))
+        throw std::runtime_error("Reconstruct depth before saving it.");
     if (options.mesh) {
         const bool current_cpu=mesh && mesh==latest_mesh_ && !mesh->triangles.empty();
         const bool current_gpu=gpu_mesh && gpu_mesh==latest_gpu_mesh_.lock() && gpu_mesh->stats.triangle_count;
@@ -473,6 +475,7 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     if (options.images) names << "left.png" << "right.png";
     if (options.calibration) names << state_.calibration_filename;
     if (options.mask) names << "mask.png";
+    if (options.depth) names << "depth.tiff";
     if (options.mesh) names << "mesh.ply";
     for (const auto& name:names) {
         const QFileInfo destination(dir.filePath(name));
@@ -506,6 +509,17 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     });
     if (options.mask) queue("mask.png",[&](auto& file) {
         if (!selection.convertToFormat(QImage::Format_Grayscale8).save(&file,"PNG")) throw std::runtime_error("Cannot encode mask.png");
+    });
+    if (options.depth) queue("depth.tiff",[&](auto& file) {
+        // Reuse the filtered CPU XYZ snapshot downloaded for the depth display.
+        cv::Mat depth;
+        cv::extractChannel(mesh_xyz_,depth,2);
+        std::vector<unsigned char> encoded;
+        if (!cv::imencode(".tiff",depth,encoded,{cv::IMWRITE_TIFF_COMPRESSION,1}))
+            throw std::runtime_error("Cannot encode depth.tiff");
+        const auto bytes=static_cast<qint64>(encoded.size());
+        if (file.write(reinterpret_cast<const char*>(encoded.data()),bytes)!=bytes)
+            throw std::runtime_error("Cannot write depth.tiff");
     });
     if (options.mesh) queue("mesh.ply",[&](auto& file) {
         if (mesh->colors.size()!=mesh->vertices.size()) throw std::runtime_error("Mesh colour count does not match vertices");
