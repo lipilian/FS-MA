@@ -15,7 +15,8 @@ struct CameraFrame {
 struct StereoCameraPair {
     CameraFrame left;
     CameraFrame right;
-    // A software pair from independent continuous streams, NOT hardware synchronized.
+    // Synchronization depends on the source: Sentech uses independent streams;
+    // RealSense uses the left/right IR frames from one device frameset.
 };
 
 class IStereoSource {

@@ -13,7 +13,10 @@ struct ReconstructionSaveOptions {
     bool images{true}, calibration{true}, mask{true}, mesh{true}, depth{true};
 };
 
+enum class CameraMode { Sentech, RealSenseD435 };
+
 struct PipelineState {
+    CameraMode camera_mode{CameraMode::Sentech};
     bool connected{false}, live{false}, has_pair{false}, has_rectified{false}, gpu_ready{false}, depth_ready{false}, engine_ready{false};
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
     QString engine{"Not initialized"}, engine_path;
@@ -33,7 +36,7 @@ public:
     void execute(const std::function<void(PipelineWorker&)>& action);
     void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {});
     void importCapture(const QString& directory, bool use_capture_calibration);
-    void connectCameras();
+    void connectCameras(CameraMode mode = CameraMode::Sentech);
     void disconnectCameras();
     void setLive(bool enabled);
     void setPreviewRectified(bool enabled);
@@ -71,6 +74,10 @@ private:
     ConfirmedCalibration confirmed_;
     QString confirmed_path_;
     SharedStereoSource source_;
+    StereoCalibration camera_calibration_;
+    cv::Size camera_size_;
+    QString camera_calibration_description_, camera_calibration_filename_;
+    QByteArray camera_calibration_json_;
     const double exposure_us_; // Requested setting handed off by calibration; also used on reconnect.
     std::shared_ptr<std::atomic_bool> cancel_;
     QTimer* timer_;

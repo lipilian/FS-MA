@@ -37,6 +37,7 @@ private:
     SharedGPUMesh gpu_mesh_result_;
     bool gpu_upload_pending_{false};
     bool busy_{false}, closing_{false}, allow_close_{false};
+    bool preview_rectified_{true}; // User preference for cameras requiring software rectification.
     QElapsedTimer elapsed_;
     QImage raw_left_, raw_right_, rectified_left_, rectified_right_, live_left_, live_right_;
     QPushButton *import_, *camera_, *preview_, *capture_, *run_, *finish_draw_, *clear_, *build_mesh_cpu_, *build_mesh_gpu_, *next_;
@@ -57,4 +58,5 @@ private:
     QLabel* save_calibration_name_;
     MeshView* mesh_view_;
     QComboBox* mesh_mode_;
+    QComboBox* camera_mode_;
 };

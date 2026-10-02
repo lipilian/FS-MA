@@ -115,7 +115,24 @@ StereoFrame::StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
     right_ = right_rgb.clone();
 }
 
+StereoFrame::StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
+                         const StereoCameraParameters& camera) {
+    validate_images(left_rgb, right_rgb);
+    if (!std::isfinite(camera.fx) || camera.fx <= 0.0 ||
+        !std::isfinite(camera.fy) || camera.fy <= 0.0 ||
+        !std::isfinite(camera.cx) || !std::isfinite(camera.cy) ||
+        !std::isfinite(camera.baseline_meters) || camera.baseline_meters <= 0.0F) {
+        throw std::invalid_argument("Rectified camera requires finite intrinsics and positive focal lengths and baseline");
+    }
+    rectified_input_camera_ = camera;
+    left_ = left_rgb.clone();
+    right_ = right_rgb.clone();
+    rectified_left_ = left_;
+    rectified_right_ = right_;
+}
+
 void StereoFrame::rectify() {
+    if (input_is_rectified()) return;
     const cv::Size image_size = left_.size();
     cv::stereoRectify(k1_, d1_, k2_, d2_, image_size,
                       right_to_left_rotation_, right_to_left_translation_,
@@ -136,6 +153,7 @@ void StereoFrame::rectify() {
 }
 
 StereoCameraParameters StereoFrame::rectified_camera_parameters() const {
+    if (rectified_input_camera_) return *rectified_input_camera_;
     if (p1_.empty() || p2_.empty() || p2_.at<double>(0, 0) == 0.0) {
         throw std::runtime_error("Rectification has not completed or has invalid projection matrices");
     }
