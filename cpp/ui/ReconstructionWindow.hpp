@@ -36,6 +36,7 @@ private:
     SharedMesh mesh_result_;
     SharedGPUMesh gpu_mesh_result_;
     bool gpu_upload_pending_{false};
+    QString render_error_;
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
     QImage rectified_left_, rectified_right_, live_left_, live_right_, depth_image_;

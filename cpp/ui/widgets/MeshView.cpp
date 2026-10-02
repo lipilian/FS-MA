@@ -37,6 +37,7 @@ class MeshCanvas : public QOpenGLWidget {
     }
     void setGPUMesh(SharedGPUMesh mesh) {
         mesh_.reset(); gpu_mesh_=std::move(mesh);
+        if (gpu_mesh_ && gpu_mesh_->point_cloud) mode_=0;
         dirty_=true; failed_=false; announce_gpu_=true;
         resetView();
     }
@@ -330,7 +331,7 @@ void main() {
     void uploadGPU() {
         QElapsedTimer elapsed; elapsed.start();
         const auto& frame=*gpu_mesh_;
-        if (!frame.buffer || !frame.stats.triangle_count || !frame.stream || !frame.stream_owner)
+        if (!frame.buffer || !(frame.point_cloud ? frame.stats.point_count : frame.stats.triangle_count) || !frame.stream || !frame.stream_owner)
             throw std::runtime_error("Incomplete GPU mesh result");
         unsigned int count=0; int devices[8];
         cudaCheck(cudaGLGetDevices(&count,devices,8,cudaGLDeviceListAll),"find CUDA device for OpenGL");
@@ -371,7 +372,8 @@ void main() {
         }
         count_=int(frame.buffer->vertex_slots());
         buffer_.release(); dirty_=false;
-        emit owner_->log(QString("GPU mesh → OpenGL: %1 ms (VBO setup + device copy + handoff; excludes drawing)").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
+        emit owner_->log(QString("GPU %1 → OpenGL: %2 ms (VBO setup + device copy + handoff; excludes drawing)")
+            .arg(frame.point_cloud ? "point cloud" : "mesh").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
     }
     void upload() {
         unregisterInterop();

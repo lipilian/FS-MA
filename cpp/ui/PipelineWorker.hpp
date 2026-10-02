@@ -22,6 +22,9 @@ struct PipelineState {
     QString engine{"Not initialized"}, engine_path;
     QString calibration_filename{"calibration.json"};
     bool sam_ready{false};
+    int progress{0};
+    QString progress_stage{"Ready to capture"};
+    bool action_failed{false};
     quint64 image_id{0};
     std::optional<fs::MeshCamera> live_camera, image_camera;
 };
@@ -40,6 +43,8 @@ public:
     void disconnectCameras();
     void setLive(bool enabled);
     void freeze();
+    void captureAndReconstruct(float minimum, float maximum, bool denoise = true,
+                               float max_neighbor_distance_m = 0.01F);
     void reconstruct(float minimum, float maximum, const QImage& selection_mask,
                      bool denoise = true, float max_neighbor_distance_m = 0.01F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
@@ -68,6 +73,8 @@ private:
     QString liveStatus() const;
     void emitPreview();
     void checkpoint() const;
+    void reportProgress(int percent, const QString& stage);
+    void buildPointCloud(const cv::Mat& selection);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
                  QString calibration_filename, QByteArray calibration_json);
     ConfirmedCalibration confirmed_;

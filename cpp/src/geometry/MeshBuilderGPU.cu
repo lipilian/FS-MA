@@ -58,6 +58,7 @@ __device__ MeshGPUStats empty_stats() {
 }
 __device__ void merge_stats(MeshGPUStats& a, const MeshGPUStats& b) {
     a.area_m2+=b.area_m2; a.triangle_count+=b.triangle_count;
+    a.point_count+=b.point_count;
     for (int c=0;c<3;++c) { a.low[c]=fminf(a.low[c],b.low[c]); a.high[c]=fmaxf(a.high[c],b.high[c]); }
 }
 __global__ void build_cells(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUStats* partials,
@@ -102,6 +103,31 @@ __global__ void build_cells(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUSt
     }
     if (tid==0) partials[blockIdx.y*gridDim.x+blockIdx.x]=values[0];
 }
+__global__ void build_points(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUStats* partials) {
+    const int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y*blockDim.y+threadIdx.y;
+    const int tid=threadIdx.y*side+threadIdx.x;
+    MeshGPUStats stats=empty_stats();
+    if (x<in.width && y<in.height) {
+        const int id=y*in.width+x, plane=in.width*in.height;
+        const float3 p=make_float3(in.xyz[3*id],in.xyz[3*id+1],in.xyz[3*id+2]);
+        vertices[id]={};
+        if (in.mask[id] && valid(p)) {
+            vertices[id]={p.x,p.y,p.z,in.rgb[id]/255.f,in.rgb[plane+id]/255.f,in.rgb[2*plane+id]/255.f};
+            stats.point_count=1;
+            stats.low[0]=stats.high[0]=p.x;
+            stats.low[1]=stats.high[1]=p.y;
+            stats.low[2]=stats.high[2]=p.z;
+        }
+    }
+    __shared__ MeshGPUStats values[threads];
+    values[tid]=stats;
+    __syncthreads();
+    for (int stride=threads/2; stride>0; stride/=2) {
+        if (tid<stride) merge_stats(values[tid],values[tid+stride]);
+        __syncthreads();
+    }
+    if (tid==0) partials[blockIdx.y*gridDim.x+blockIdx.x]=values[0];
+}
 __global__ void reduce_stats(const MeshGPUStats* partials, int size, MeshGPUStats* total) {
     const int tid=threadIdx.x;
     MeshGPUStats stats=empty_stats();
@@ -113,7 +139,7 @@ __global__ void reduce_stats(const MeshGPUStats* partials, int size, MeshGPUStat
         if (tid<stride) merge_stats(values[tid],values[tid+stride]);
         __syncthreads();
     }
-    if (tid==0) *total=values[0].triangle_count ? values[0] : MeshGPUStats{};
+    if (tid==0) *total=(values[0].triangle_count || values[0].point_count) ? values[0] : MeshGPUStats{};
 }
 } // namespace
 struct MeshGPUBuffer::Impl {
@@ -125,6 +151,33 @@ MeshGPUBuffer::MeshGPUBuffer() : impl_(std::make_unique<Impl>()) {}
 MeshGPUBuffer::~MeshGPUBuffer() = default;
 const MeshGPUVertex* MeshGPUBuffer::vertices() const { return impl_->vertices.data; }
 std::size_t MeshGPUBuffer::vertex_slots() const { return impl_->slots; }
+
+MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output) {
+    output.impl_->slots=0;
+    if (!inputs.xyz || !inputs.rgb || !inputs.mask || !inputs.stream || inputs.width<1 || inputs.height<1 ||
+        std::size_t(inputs.width)*inputs.height>std::size_t(std::numeric_limits<int>::max()/3))
+        throw std::invalid_argument("GPU point cloud needs aligned device XYZ, RGB and mask, positive dimensions and the FS stream");
+    const dim3 block(side,side), grid((inputs.width+side-1)/side,(inputs.height+side-1)/side);
+    auto& storage=*output.impl_;
+    const std::size_t slots=std::size_t(inputs.width)*inputs.height;
+    storage.vertices.reserve(slots);
+    storage.partials.reserve(grid.x*grid.y);
+    storage.total.reserve(1);
+    MeshGPUStats result;
+    try {
+        build_points<<<grid,block,0,inputs.stream>>>(inputs,storage.vertices.data,storage.partials.data);
+        checked(cudaGetLastError(), "launch GPU point cloud");
+        reduce_stats<<<1,threads,0,inputs.stream>>>(storage.partials.data,grid.x*grid.y,storage.total.data);
+        checked(cudaGetLastError(), "launch GPU point cloud reduction");
+        checked(cudaMemcpyAsync(&result,storage.total.data,sizeof(result),cudaMemcpyDeviceToHost,inputs.stream), "download GPU point cloud statistics");
+        checked(cudaStreamSynchronize(inputs.stream), "complete GPU point cloud");
+    } catch (...) {
+        cudaStreamSynchronize(inputs.stream);
+        throw;
+    }
+    storage.slots=slots;
+    return result;
+}
 
 MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
                             double max_edge_m, double max_depth_jump_m) {
