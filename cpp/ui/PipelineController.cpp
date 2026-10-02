@@ -20,7 +20,8 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     connect(worker_, &PipelineWorker::actionFinished, this, [this] {
         const bool initialized = initializing_; initializing_ = false;
         busy_ = false; emit busyChanged(false);
-        if (initialized && !stopping_) emit initializationFinished(state_.engine_ready, state_.status);
+        if (initialized && !stopping_)
+            emit initializationFinished(!state_.action_failed && state_.engine_ready && state_.sam_ready && state_.ma_ready, state_.status);
     });
     connect(worker_, &PipelineWorker::stopped, &thread_, &QThread::quit, Qt::DirectConnection);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
@@ -34,10 +35,11 @@ void PipelineController::submit(std::function<void(PipelineWorker&)> action) {
     auto* worker = worker_;
     QMetaObject::invokeMethod(worker, [worker, action = std::move(action)] { worker->execute(action); }, Qt::QueuedConnection);
 }
-void PipelineController::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
+void PipelineController::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder,
+                                    const QString& ma_engine) {
     if (busy_ || stopping_) return;
     initializing_ = true;
-    submit([engine_path,sam_encoder,sam_decoder](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder); });
+    submit([engine_path,sam_encoder,sam_decoder,ma_engine](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder,ma_engine); });
 }
 quint64 PipelineController::requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts) {
     const quint64 revision = mask_request_->fetch_add(1)+1;

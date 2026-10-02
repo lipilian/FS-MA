@@ -1,6 +1,7 @@
 #pragma once
 #include "CalibrationWorker.hpp"
 #include "fs/inference/FS.hpp"
+#include "fs/inference/MA-VGGT.hpp"
 #include "fs/inference/SamSegmenter.hpp"
 #include "fs/geometry/MeshBuilder.hpp"
 #include <atomic>
@@ -32,7 +33,8 @@ struct PipelineState {
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
     QString engine{"Not initialized"}, engine_path;
     QString calibration_filename{"calibration.json"};
-    bool sam_ready{false};
+    bool sam_ready{false}, ma_ready{false};
+    QString ma_engine_path;
     int progress{0};
     QString progress_stage{"Ready to capture"};
     bool action_failed{false};
@@ -48,7 +50,8 @@ public:
     PipelineWorker(ConfirmedCalibration calibration, QString path, SharedStereoSource source,
                    std::shared_ptr<std::atomic_bool> cancel, double exposure_us = SentechStereoOptions{}.exposure_us);
     void execute(const std::function<void(PipelineWorker&)>& action);
-    void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {});
+    void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {},
+                    const QString& ma_engine = {});
     void importCapture(const QString& directory, bool use_capture_calibration);
     void connectCameras(CameraMode mode = CameraMode::Sentech);
     void disconnectCameras();
@@ -111,6 +114,7 @@ private:
     int capture_slot_{0}; // Retake replaces this slot; Capture more selects the next slot.
     std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
+    std::unique_ptr<fs::MA_VGGT> ma_;
     // Owned snapshots from the depth display download; CPU meshing and depth export reuse these.
     cv::Mat mesh_xyz_, mesh_mask_, mesh_rgb_;
     QByteArray calibration_json_;

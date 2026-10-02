@@ -184,12 +184,14 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
     }
     publish(); emit actionFinished();
 }
-void PipelineWorker::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
+void PipelineWorker::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder,
+                                const QString& ma_engine) {
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
-    fs_.reset(); sam_.reset(); state_.sam_ready = false;
+    ma_.reset(); fs_.reset(); sam_.reset(); gpu_mesh_.reset();
+    state_.sam_ready = false; state_.ma_ready = false; state_.ma_engine_path.clear();
     QElapsedTimer elapsed; elapsed.start();
     try {
         state_.engine = "Initializing…";
@@ -203,32 +205,43 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
         checkpoint();
         state_.status = "Checking that GPU initialization has completed…"; publish();
         next->synchronize(); checkpoint();
-        const auto samPath = [&](const QString& specified, const QString& name) {
+        const auto modelPath = [&](const QString& specified, const QStringList& names, const QString& model) {
             if (!specified.isEmpty()) return QFileInfo(specified).absoluteFilePath();
             for (const auto& base : {QFileInfo(state_.engine_path).absolutePath(), QDir::currentPath()+"/onnx",
                                     QCoreApplication::applicationDirPath()+"/../../onnx"}) {
-                const QFileInfo candidate(QDir(base).filePath(name));
-                if (candidate.isFile()) return candidate.absoluteFilePath();
+                for (const auto& name:names) {
+                    const QFileInfo candidate(QDir(base).filePath(name));
+                    if (candidate.isFile()) return candidate.absoluteFilePath();
+                }
             }
-            throw std::runtime_error(("SAM engine not found: " + name + ". Choose both SAM engines in the splash.").toStdString());
+            throw std::runtime_error((model+" engine not found: "+names.back()+". Choose its engine in the loading window.").toStdString());
         };
-        const auto encoder = samPath(sam_encoder,"sam2.1_hiera_large.encoder.engine");
-        const auto decoder = samPath(sam_decoder,"sam2.1_hiera_large.decoder.engine");
+        const auto encoder = modelPath(sam_encoder,{"sam2.1_hiera_large.encoder.engine"},"SAM encoder");
+        const auto decoder = modelPath(sam_decoder,{"sam2.1_hiera_large.decoder.engine"},"SAM decoder");
+        state_.ma_engine_path = modelPath(ma_engine,{"MapAnything/onnx/mapanything_dynamic_raw_bf16.engine",
+                                                     "mapanything_dynamic_raw_bf16.engine"},"MapAnything");
         state_.status = "Loading SAM 2.1 Hiera Large encoder / decoder and allocating contexts, GPU features and prompt buffers…";
         publish(); checkpoint();
         auto sam = std::make_unique<fs::SamSegmenter>(); sam->loadEngines(encoder.toStdString(),decoder.toStdString());
         checkpoint();
         emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
-        sam_ = std::move(sam); state_.sam_ready = true;
+        state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
+        auto ma = std::make_unique<fs::MA_VGGT>(next);
+        ma->loadEngine(state_.ma_engine_path.toStdString());
+        checkpoint();
+        emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
+                 "Shares the FS CUDA stream; MA inference buffers are deferred.\n"+state_.ma_engine_path);
+        sam_ = std::move(sam); ma_ = std::move(ma);
+        state_.sam_ready = true; state_.ma_ready = true;
         fs_ = std::move(next);
         state_.engine_ready = true;
         state_.engine = "Ready · 960 × 800 · " + QFileInfo(state_.engine_path).fileName();
-        state_.status = "FoundationStereo and SAM 2.1 are ready. Import a capture directory or preview the cameras.";
+        state_.status = "FoundationStereo, SAM 2.1 and MapAnything are loaded. Import a capture directory or preview the cameras.";
         if (source_ && source_->running()) {
             state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
             state_.status = liveStatus();
         }
-        emit log(QString("FoundationStereo initialized in %1 ms · engine, context, GPU I/O / XYZ, pinned host and CPU resize buffers ready.").arg(elapsed.elapsed()));
+        emit log(QString("FS + SAM 2.1 + MapAnything initialization completed in %1 ms.").arg(elapsed.elapsed()));
         emit log("Confirmed calibration: " + confirmed_path_);
     } catch (...) {
         state_.engine = "Initialization failed · check the engine, GPU and TensorRT compatibility";
@@ -744,5 +757,6 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
 }
 void PipelineWorker::shutdown() {
     disconnectCameras(); captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    latest_gpu_mesh_.reset(); gpu_mesh_.reset(); sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
+    latest_gpu_mesh_.reset(); gpu_mesh_.reset(); ma_.reset(); state_.ma_ready = false;
+    sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }
