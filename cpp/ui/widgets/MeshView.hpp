@@ -1,6 +1,7 @@
 #pragma once
 #include "fs/geometry/MeshBuilder.hpp"
 #include <QSurfaceFormat>
+#include <QImage>
 #include <QWidget>
 #include <memory>
 #include "GPUMeshFrame.hpp"
@@ -16,7 +17,10 @@ class MeshView : public QWidget {
     void setGPUMesh(SharedGPUMesh mesh);
     void setMode(int mode);
     void resetView();
-    void setCameraVisible(bool visible);
+    void setRightCameraVisible(bool visible);
+    void setCamera(const std::optional<fs::MeshCamera>& camera);
+    void setCameraImage(QImage image);
+    void setRightCameraImage(QImage image);
 
   signals:
     void gpuMeshPresented(SharedGPUMesh mesh);

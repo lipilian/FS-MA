@@ -12,17 +12,10 @@ void StereoImageView::paintEvent(QPaintEvent*) {
     const QRect viewport(8, 44, width() - 16, height() - 52);
     if (image_.isNull()) {
         p.setPen(QColor("#74869e"));
-        p.drawText(viewport, Qt::AlignCenter, empty_text_);
+        p.drawText(viewport, Qt::AlignCenter, "Waiting for camera\nConnect to start the stereo preview");
     } else {
         const QSize size = image_.size().scaled(viewport.size(), Qt::KeepAspectRatio);
         const QRect target(viewport.center() - QPoint(size.width()/2, size.height()/2), size);
         p.setRenderHint(QPainter::SmoothPixmapTransform); p.drawImage(target, image_);
-        if (epilines_) {
-            p.setClipRect(target); p.setPen(QPen(QColor(80, 230, 190, 170), 1));
-            for (int row = 1; row < 12; ++row) {
-                const int y = target.top() + target.height() * row / 12;
-                p.drawLine(target.left(), y, target.right(), y);
-            }
-        }
     }
 }

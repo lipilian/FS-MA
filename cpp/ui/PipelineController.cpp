@@ -12,7 +12,7 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     });
     connect(worker_, &PipelineWorker::images, this, &PipelineController::images);
     connect(worker_, &PipelineWorker::preview, this, &PipelineController::preview);
-    connect(worker_, &PipelineWorker::depthImages, this, &PipelineController::depthImages);
+    connect(worker_, &PipelineWorker::depthImage, this, &PipelineController::depthImage);
     connect(worker_, &PipelineWorker::meshReady, this, &PipelineController::meshReady);
     connect(worker_, &PipelineWorker::gpuMeshReady, this, &PipelineController::gpuMeshReady);
     connect(worker_, &PipelineWorker::maskReady, this, &PipelineController::maskReady);
@@ -38,12 +38,6 @@ void PipelineController::initialize(const QString& engine_path, const QString& s
     if (busy_ || stopping_) return;
     initializing_ = true;
     submit([engine_path,sam_encoder,sam_decoder](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder); });
-}
-void PipelineController::setPreviewRectified(bool enabled) {
-    if (stopping_) return;
-    auto* worker = worker_;
-    // A display preference must not be dropped by the task busy guard.
-    QMetaObject::invokeMethod(worker, [worker, enabled] { worker->setPreviewRectified(enabled); }, Qt::QueuedConnection);
 }
 quint64 PipelineController::requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts) {
     const quint64 revision = mask_request_->fetch_add(1)+1;
