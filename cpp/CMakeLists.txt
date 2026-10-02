@@ -51,6 +51,7 @@ add_library(fs_core STATIC
     src/geometry/MeshBuilder.cpp
     src/geometry/MeshBuilderGPU.cu
     src/inference/FS.cpp
+    src/inference/MA-VGGT.cpp
     src/inference/SamSegmenter.cpp
     src/inference/PostProcessing.cu
     src/core/Logger.cpp
@@ -143,10 +144,18 @@ if(FS_BUILD_DESKTOP)
     include(cmake/Desktop.cmake)
 endif()
 
-option(FS_BUILD_TESTS "Build GPU geometry regression tests (requires a CUDA device)" OFF)
+option(FS_BUILD_TESTS "Build GPU geometry and engine regression tests (requires a CUDA device)" OFF)
 if(FS_BUILD_TESTS)
     enable_testing()
     add_executable(fs_gpu_point_cloud_test tests/GPUPointCloudTest.cpp)
     target_link_libraries(fs_gpu_point_cloud_test PRIVATE fs_core)
     add_test(NAME gpu_point_cloud COMMAND fs_gpu_point_cloud_test)
+    add_executable(fs_ma_engine_test tests/MAEngineTest.cpp)
+    target_link_libraries(fs_ma_engine_test PRIVATE fs_core)
+    set(MA_TEST_ENGINE "${CMAKE_CURRENT_SOURCE_DIR}/../onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.engine")
+    set(MA_TEST_OTHER_ENGINE "${CMAKE_CURRENT_SOURCE_DIR}/../onnx/sam2.1_hiera_large.encoder.engine")
+    if(EXISTS "${MA_TEST_ENGINE}" AND EXISTS "${MA_TEST_OTHER_ENGINE}")
+        add_test(NAME ma_engine_loader COMMAND fs_ma_engine_test "${MA_TEST_ENGINE}" "${MA_TEST_OTHER_ENGINE}")
+        set_tests_properties(ma_engine_loader PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
+    endif()
 endif()

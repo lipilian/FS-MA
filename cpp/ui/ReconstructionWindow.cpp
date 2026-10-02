@@ -51,7 +51,8 @@ QDoubleSpinBox* decimal(double value, double minimum, double maximum, const QStr
 }
 ReconstructionWindow::ReconstructionWindow(PipelineController& controller, ConfirmedCalibration calibration, const QString& path)
     : controller_(controller), state_(controller.state()) {
-    if (!state_.engine_ready || !state_.sam_ready) throw std::logic_error("Reconstruction window requires initialized FoundationStereo and SAM sessions.");
+    if (!state_.engine_ready || !state_.sam_ready || !state_.ma_ready)
+        throw std::logic_error("Reconstruction window requires loaded FoundationStereo, SAM and MapAnything sessions.");
     setObjectName("reconstructionWindow"); setWindowTitle("FoundationStereo · Reconstruction"); resize(1500, 950); setMinimumSize(1120, 740);
     setStyleSheet(R"(
         QMainWindow, QWidget#root { background: #f3f6fa; color: #20314a; }

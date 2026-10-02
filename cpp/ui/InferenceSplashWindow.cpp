@@ -26,7 +26,7 @@ QLabel* label(const QString& text) {
 }
 InferenceSplashWindow::InferenceSplashWindow() : QWidget(nullptr, Qt::Dialog) {
     setObjectName("inferenceSplashWindow"); setWindowTitle("FoundationStereo · Preparing reconstruction");
-    resize(760, 520); setMinimumSize(640, 460);
+    resize(820, 650); setMinimumSize(700, 600);
     setStyleSheet(R"(
         QWidget#inferenceSplashWindow { background: #f3f6fa; }
         QWidget { color: #20314a; font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -43,22 +43,23 @@ InferenceSplashWindow::InferenceSplashWindow() : QWidget(nullptr, Qt::Dialog) {
     )");
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(28,24,28,24); layout->setSpacing(14);
     auto* step = label("CALIBRATION  ✓     →     PREPARING INFERENCE     →     RECONSTRUCTION"); step->setObjectName("step"); layout->addWidget(step);
-    auto* title = label("Preparing FoundationStereo + SAM 2.1"); title->setObjectName("title"); layout->addWidget(title);
-    layout->addWidget(label("The reconstruction workspace will open when both models and their inference buffers are ready."));
+    auto* title = label("Preparing FoundationStereo + SAM 2.1 + MapAnything"); title->setObjectName("title"); layout->addWidget(title);
+    layout->addWidget(label("The reconstruction workspace will open when all three models have loaded successfully."));
     auto* path = new QHBoxLayout;
     engine_ = new QLineEdit(defaultEngine()); engine_->setObjectName("splashEnginePath"); path->addWidget(engine_,1);
     browse_ = new QPushButton("Choose engine…"); browse_->setObjectName("splashBrowseEngine"); path->addWidget(browse_); layout->addLayout(path);
-    const auto samRow = [&](const QString& title, const QString& relative, const char* object_name, QLineEdit*& field, QPushButton*& browse) {
+    const auto engineRow = [&](const QString& title, const QString& relative, const char* object_name, QLineEdit*& field, QPushButton*& browse) {
         layout->addWidget(label(title)); auto* row = new QHBoxLayout;
         field = new QLineEdit(defaultEngine(relative)); field->setObjectName(object_name); row->addWidget(field,1);
         browse = new QPushButton("Choose engine…"); row->addWidget(browse); layout->addLayout(row);
-        connect(browse,&QPushButton::clicked,this,[this,field] {
-            const auto path=QFileDialog::getOpenFileName(this,"Choose SAM TensorRT engine",field->text(),"TensorRT engine (*.engine *.plan)");
+        connect(browse,&QPushButton::clicked,this,[this,field,title] {
+            const auto path=QFileDialog::getOpenFileName(this,"Choose "+title+" TensorRT engine",field->text(),"TensorRT engine (*.engine *.plan)");
             if (!path.isEmpty()) field->setText(path);
         });
     };
-    samRow("SAM 2.1 encoder","onnx/sam2.1_hiera_large.encoder.engine","splashSamEncoder",sam_encoder_,browse_sam_encoder_);
-    samRow("SAM 2.1 decoder","onnx/sam2.1_hiera_large.decoder.engine","splashSamDecoder",sam_decoder_,browse_sam_decoder_);
+    engineRow("SAM 2.1 encoder","onnx/sam2.1_hiera_large.encoder.engine","splashSamEncoder",sam_encoder_,browse_sam_encoder_);
+    engineRow("SAM 2.1 decoder","onnx/sam2.1_hiera_large.decoder.engine","splashSamDecoder",sam_decoder_,browse_sam_decoder_);
+    engineRow("MapAnything","onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.engine","splashMaEngine",ma_engine_,browse_ma_engine_);
     status_ = label("Waiting to initialize…"); status_->setObjectName("loadingStatus"); status_->setMinimumHeight(72); layout->addWidget(status_,1);
     progress_ = new QProgressBar; progress_->setTextVisible(false); layout->addWidget(progress_);
     auto* footer = new QHBoxLayout;
@@ -66,7 +67,7 @@ InferenceSplashWindow::InferenceSplashWindow() : QWidget(nullptr, Qt::Dialog) {
     retry_ = new QPushButton("Retry initialization"); retry_->setObjectName("retryInitialization"); retry_->hide(); footer->addWidget(retry_);
     cancel_ = new QPushButton("Cancel and exit"); cancel_->setObjectName("cancelInitialization"); footer->addWidget(cancel_); layout->addLayout(footer);
     connect(cancel_, &QPushButton::clicked, this, &QWidget::close);
-    connect(retry_, &QPushButton::clicked, this, [this] { emit retryRequested(enginePath(),samEncoderPath(),samDecoderPath()); });
+    connect(retry_, &QPushButton::clicked, this, [this] { emit retryRequested(enginePath(),samEncoderPath(),samDecoderPath(),maEnginePath()); });
     connect(browse_, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this,"Choose TensorRT engine",enginePath(),"TensorRT engine (*.engine *.plan);;All files (*)");
         if (!path.isEmpty()) engine_->setText(path);
@@ -79,8 +80,9 @@ InferenceSplashWindow::InferenceSplashWindow() : QWidget(nullptr, Qt::Dialog) {
 QString InferenceSplashWindow::enginePath() const { return engine_->text().trimmed(); }
 QString InferenceSplashWindow::samEncoderPath() const { return sam_encoder_->text().trimmed(); }
 QString InferenceSplashWindow::samDecoderPath() const { return sam_decoder_->text().trimmed(); }
+QString InferenceSplashWindow::maEnginePath() const { return ma_engine_->text().trimmed(); }
 void InferenceSplashWindow::startLoading() {
-    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,browse_sam_encoder_,browse_sam_decoder_}) w->setEnabled(false);
+    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_engine_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_engine_}) w->setEnabled(false);
     loading_ = true; elapsed_.start(); engine_->setEnabled(false); browse_->setEnabled(false); retry_->hide();
     progress_->setRange(0,0); status_->setText("Creating FS and preparing the inference engine…"); elapsed_label_->setText("Starting…");
 }
@@ -91,12 +93,12 @@ void InferenceSplashWindow::showFailure(const QString& message) {
     status_->setText("Initialization failed\n" + message);
     elapsed_label_->setText("Choose a compatible engine and retry, or exit.");
     engine_->setEnabled(true); browse_->setEnabled(true); retry_->show();
-    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,browse_sam_encoder_,browse_sam_decoder_}) w->setEnabled(true);
+    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_engine_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_engine_}) w->setEnabled(true);
 }
 void InferenceSplashWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }
     event->ignore(); if (closing_) return;
-    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,browse_sam_encoder_,browse_sam_decoder_}) w->setEnabled(false);
+    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_engine_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_engine_}) w->setEnabled(false);
     closing_ = true; engine_->setEnabled(false); browse_->setEnabled(false); retry_->setEnabled(false); cancel_->setEnabled(false);
     status_->setText("Closing · waiting for initialization to finish safely and releasing GPU / cameras…"); emit closeRequested();
 }

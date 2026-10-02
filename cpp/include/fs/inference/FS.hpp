@@ -39,6 +39,9 @@ public:
     void loadEngine(const std::filesystem::path& engine_path);
     bool isEngineLoaded() const noexcept { return engine_ != nullptr && execution_context_ != nullptr; }
 
+    /** Borrow the FS-owned stream. Keep this FS instance alive and serialize all users. */
+    cudaStream_t stream() const noexcept { return stream_; }
+
     /** Scale rectified intrinsics to the fixed TensorRT input grid and retain the baseline in metres. */
     void set_model_camera_parameters(const StereoCameraParameters& rectified_camera_parameters,
                                      const cv::Size& rectified_image_size);
