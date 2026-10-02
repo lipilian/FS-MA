@@ -5,7 +5,9 @@
 #include <QMouseEvent>
 #include <QOpenGLBuffer>
 #include <QOpenGLContext>
-#include <QOpenGLFunctions_2_1>
+#include <QOpenGLFunctions_4_5_Core>
+#include <QOpenGLVersionFunctionsFactory>
+#include <QOpenGLVertexArrayObject>
 #include <QElapsedTimer>
 #include <cuda_gl_interop.h>
 #include <limits>
@@ -17,15 +19,12 @@
 #include <algorithm>
 #include <cmath>
 
-class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions_2_1 {
+class MeshCanvas : public QOpenGLWidget {
   public:
     explicit MeshCanvas(MeshView *parent)
         : QOpenGLWidget(parent), owner_(parent), buffer_(QOpenGLBuffer::VertexBuffer) {
         setMinimumSize(260, 240);
-        QSurfaceFormat requested;
-        requested.setVersion(2, 1);
-        requested.setDepthBufferSize(24);
-        setFormat(requested);
+        setFormat(MeshView::surfaceFormat());
     }
     ~MeshCanvas() override { cleanup(); }
     void setMesh(std::shared_ptr<const fs::MeshResult> mesh) {
@@ -58,32 +57,53 @@ class MeshCanvas : public QOpenGLWidget, protected QOpenGLFunctions_2_1 {
 
   protected:
     void initializeGL() override {
-        initializeOpenGLFunctions();
-        glEnable(GL_DEPTH_TEST);
+        ready_ = false;
+        gl_ = nullptr;
+        if (error_label_) error_label_->hide();
         connect(
             context(), &QOpenGLContext::aboutToBeDestroyed, this,
             [this] { cleanup(); }, Qt::DirectConnection);
+        const auto actual = context()->format();
+        if (context()->isOpenGLES() || actual.majorVersion() < 4 ||
+            (actual.majorVersion() == 4 && actual.minorVersion() < 6) ||
+            actual.profile() != QSurfaceFormat::CoreProfile) {
+            failInitialization(QString("The 3D renderer requires OpenGL 4.6 Core; received %1.%2 (profile %3).")
+                                   .arg(actual.majorVersion()).arg(actual.minorVersion())
+                                   .arg(int(actual.profile())));
+            return;
+        }
+        // Qt's versioned wrappers end at 4.5. These core functions are also
+        // available in 4.6; the context and shaders explicitly require 4.6.
+        // Reacquire the context-owned wrapper after every context recreation.
+        gl_ = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_4_5_Core>(context());
+        if (!gl_) {
+            failInitialization("Unable to initialize OpenGL core functions.");
+            return;
+        }
+        gl_->glEnable(GL_DEPTH_TEST);
         program_ = std::make_unique<QOpenGLShaderProgram>();
         const char *vertex = R"(
-#version 120
-attribute vec3 position;
-attribute vec3 color;
+#version 460 core
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 color;
 uniform mat4 matrix;
 uniform bool deviceMesh;
 uniform vec3 center;
 uniform float scale;
-varying vec3 tint;
-varying vec3 point;
+out vec3 tint;
+out vec3 point;
 void main() {
     point=position;
     vec3 p=deviceMesh ? (position-center)/scale*vec3(1.0,-1.0,-1.0) : position;
     gl_Position=deviceMesh && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
+    gl_PointSize=1.0;
     tint=color;
 })";
         const char *fragment = R"(
-#version 120
-varying vec3 tint;
-varying vec3 point;
+#version 460 core
+in vec3 tint;
+in vec3 point;
+layout(location = 0) out vec4 fragmentColor;
 uniform bool shaded;
 uniform bool wireframe;
 void main() {
@@ -92,31 +112,41 @@ void main() {
         vec3 n=cross(dFdx(point),dFdy(point));
         light=0.45+0.55*abs(n.z)/max(length(n),1e-20);
     }
-    gl_FragColor=vec4(wireframe ? vec3(0.0) : tint*light,1.0);
+    fragmentColor=vec4(wireframe ? vec3(0.0) : tint*light,1.0);
 })";
         if (!program_->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex) ||
             !program_->addShaderFromSourceCode(QOpenGLShader::Fragment,
                                                fragment) ||
             !program_->link()) {
-            auto *error =
-                new QLabel("Unable to initialize the 3D renderer", this);
-            error->setStyleSheet("color: white;");
-            error->adjustSize();
-            error->show();
-            program_.reset();
-            emit owner_->renderFailed("Unable to initialize the 3D renderer.");
+            failInitialization(QString("Unable to compile/link the OpenGL 4.6 shaders: %1").arg(program_->log()));
             return;
         }
-        buffer_.create();
+        if (!buffer_.create() || !vao_.create() || !buffer_.bind()) {
+            failInitialization("Unable to create the OpenGL vertex buffer/array.");
+            return;
+        }
+        vao_.bind();
+        gl_->glEnableVertexAttribArray(0);
+        gl_->glEnableVertexAttribArray(1);
+        gl_->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+        gl_->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                                  reinterpret_cast<const void *>(3 * sizeof(float)));
+        vao_.release();
+        buffer_.release();
+        ready_ = true;
         dirty_ = true; failed_=false; announce_gpu_=bool(gpu_mesh_);
+        emit owner_->log(QString("3D renderer: OpenGL %1 (Core), %2")
+                             .arg(QString::fromLatin1(reinterpret_cast<const char *>(gl_->glGetString(GL_VERSION))))
+                             .arg(QString::fromLatin1(reinterpret_cast<const char *>(gl_->glGetString(GL_RENDERER)))));
     }
     void resizeGL(int width, int height) override {
-        glViewport(0, 0, width, height);
+        if (gl_) gl_->glViewport(0, 0, width, height);
     }
     void paintGL() override {
-        glClearColor(.067f, .11f, .17f, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (!program_ || failed_ || (!gpu_mesh_ && (!mesh_ || mesh_->vertices.empty()))) return;
+        if (!gl_) return;
+        gl_->glClearColor(.067f, .11f, .17f, 1);
+        gl_->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (!ready_ || failed_ || (!gpu_mesh_ && (!mesh_ || mesh_->vertices.empty()))) return;
         if (dirty_) {
             try { if (gpu_mesh_) uploadGPU(); else upload(); }
             catch (const std::exception& e) {
@@ -149,30 +179,21 @@ void main() {
         program_->setUniformValue("scale",scale_);
         program_->setUniformValue("shaded",bool(gpu_mesh_) && mode_==1);
         program_->setUniformValue("wireframe",bool(gpu_mesh_) && mode_==2);
-        buffer_.bind();
-        const int pos = program_->attributeLocation("position"),
-                  col = program_->attributeLocation("color");
-        program_->enableAttributeArray(pos);
-        program_->enableAttributeArray(col);
-        program_->setAttributeBuffer(pos, GL_FLOAT, 0, 3, 6 * sizeof(float));
-        program_->setAttributeBuffer(col, GL_FLOAT, 3 * sizeof(float), 3,
-                                     6 * sizeof(float));
-        if (gpu_mesh_ && mode_==2) glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-        glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
-        if (gpu_mesh_ && mode_==2) glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+        vao_.bind();
+        if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
+        gl_->glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
+        if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         if (camera_visible_ && camera_count_>0) {
             program_->setUniformValue("deviceMesh",false);
             program_->setUniformValue("shaded",false);
             program_->setUniformValue("wireframe",false);
-            glDrawArrays(GL_LINES,count_,camera_count_);
+            gl_->glDrawArrays(GL_LINES,count_,camera_count_);
         }
-        program_->disableAttributeArray(pos);
-        program_->disableAttributeArray(col);
-        buffer_.release();
+        vao_.release();
         program_->release();
         if (announce_gpu_ && gpu_mesh_) {
             announce_gpu_=false;
-            const auto error=glGetError();
+            const auto error=gl_->glGetError();
             if (error!=GL_NO_ERROR) {
                 failed_=true;
                 emit owner_->renderFailed(QString("OpenGL mesh draw failed (error %1).").arg(error));
@@ -200,19 +221,32 @@ void main() {
     }
 
   private:
+    void failInitialization(const QString &message) {
+        program_.reset();
+        if (!error_label_) {
+            error_label_ = new QLabel("Unable to initialize the 3D renderer (OpenGL 4.6 Core required)", this);
+            error_label_->setStyleSheet("color: white;");
+            error_label_->adjustSize();
+        }
+        error_label_->show();
+        emit owner_->renderFailed(message);
+    }
     void cleanup() {
+        ready_ = false;
         if (context()) {
             makeCurrent();
             if (interop_) {
                 cudaSetDevice(interop_device_);
                 cudaGraphicsUnregisterResource(interop_); interop_=nullptr;
             }
+            vao_.destroy();
             buffer_.destroy();
             program_.reset();
             doneCurrent();
         }
         if (context())
             disconnect(context(), nullptr, this, nullptr);
+        gl_ = nullptr;
     }
     static void cudaCheck(cudaError_t e, const char* operation) {
         if (e!=cudaSuccess) throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(e));
@@ -248,7 +282,7 @@ void main() {
             unregisterInterop();
             cudaCheck(cudaSetDevice(frame.device),"select mesh CUDA device");
             buffer_.allocate(nullptr,int(total));
-            if (glGetError()!=GL_NO_ERROR || buffer_.size()!=int(total)) throw std::runtime_error("Unable to allocate OpenGL mesh buffer");
+            if (gl_->glGetError()!=GL_NO_ERROR || buffer_.size()!=int(total)) throw std::runtime_error("Unable to allocate OpenGL mesh buffer");
             cudaCheck(cudaGraphicsGLRegisterBuffer(&interop_,buffer_.bufferId(),cudaGraphicsRegisterFlagsWriteDiscard),"register OpenGL mesh buffer");
             interop_device_=frame.device;
         }
@@ -385,7 +419,11 @@ void main() {
     QVector3D center_;
     float scale_{1};
     bool failed_{false}, announce_gpu_{false};
+    bool ready_{false};
+    QOpenGLFunctions_4_5_Core *gl_{nullptr}; // Owned by the current QOpenGLContext.
+    QLabel *error_label_{nullptr};
     QOpenGLBuffer buffer_;
+    QOpenGLVertexArrayObject vao_;
     std::unique_ptr<QOpenGLShaderProgram> program_;
     std::shared_ptr<const fs::MeshResult> mesh_;
     bool dirty_{true}, camera_visible_{true};
@@ -394,6 +432,15 @@ void main() {
     float yaw_{}, pitch_{}, zoom_{1};
     QPointF last_, pan_;
 };
+
+QSurfaceFormat MeshView::surfaceFormat() {
+    QSurfaceFormat format;
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(4, 6);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setDepthBufferSize(24);
+    return format;
+}
 
 MeshView::MeshView(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);

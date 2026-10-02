@@ -1,9 +1,11 @@
 #include "DesktopController.hpp"
+#include "widgets/MeshView.hpp"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QMessageBox>
 #include <opencv2/core.hpp>
 int main(int argc, char** argv) {
+    QSurfaceFormat::setDefaultFormat(MeshView::surfaceFormat());
     QApplication app(argc, argv);
     app.setApplicationName("fs_gui"); app.setApplicationVersion("0.1");
     app.setOrganizationName("FS_Engine"); app.setStyle("Fusion");
