@@ -10,6 +10,7 @@ struct GPUMeshFrame {
     std::shared_ptr<const fs::MeshGPUBuffer> buffer;
     fs::MeshGPUStats stats;
     fs::MeshCamera camera;
+    bool point_cloud{false}; // One GPU vertex slot per pixel, rendered with GL_POINTS.
     cudaStream_t stream{nullptr};
     int device{0};
     std::shared_ptr<const void> stream_owner;

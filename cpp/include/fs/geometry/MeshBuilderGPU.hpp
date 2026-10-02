@@ -24,13 +24,14 @@ struct MeshGPUVertex { float x, y, z, r, g, b; };
 struct MeshGPUStats {
     double area_m2{0};
     unsigned long long triangle_count{0};
+    unsigned long long point_count{0}; // Valid point-cloud samples; zero for triangle output.
     float low[3]{}, high[3]{}; // Bounds of emitted vertices; zero for an empty mesh.
 };
 
 // Reusable, owned device output and reduction scratch. Does not borrow FS data.
-// Each cell has six vertex slots (two triangles); unused slots are zeroed,
-// forming degenerate triangles. There is no compaction or hole filling.
-// Access only after build_mesh_gpu returns; the next build overwrites the data.
+// Meshes use six slots per cell; point clouds use one slot per pixel. Unused
+// slots are zeroed and clipped by the viewer. No compaction or hole filling.
+// Access only after a build returns; the next build overwrites the data.
 // The viewer copies completed output device-to-device into a registered GL VBO.
 class MeshGPUBuffer {
 public:
@@ -44,6 +45,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     friend MeshGPUStats build_mesh_gpu(const MeshGPUInputs&, MeshGPUBuffer&, double, double);
+    friend MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs&, MeshGPUBuffer&);
 };
 
 // One 16x16-block thread per pixel cell. Four valid corners produce ABD/ADC;
@@ -55,4 +57,7 @@ private:
 MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
                             double max_edge_m = .02,
                             double max_depth_jump_m = .01);
+// Preserve every selected finite XYZ sample with Z>0, including isolated points.
+// XYZ/RGB stay on the device; only point count and bounds are downloaded.
+MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output);
 } // namespace fs

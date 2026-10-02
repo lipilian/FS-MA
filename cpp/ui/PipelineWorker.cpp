@@ -61,7 +61,8 @@ struct PLYVertexHash {
 fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::function<void()>& checkpoint) {
     const auto vertex_count=source.buffer ? source.buffer->vertex_slots() : 0;
     if (!source.buffer || !source.buffer->vertices() || !source.stream || !source.stream_owner ||
-        vertex_count%3 || !source.stats.triangle_count || source.stats.triangle_count>vertex_count/3 ||
+        (source.point_cloud ? !source.stats.point_count || source.stats.point_count>vertex_count
+                            : vertex_count%3 || !source.stats.triangle_count || source.stats.triangle_count>vertex_count/3) ||
         vertex_count>std::size_t(std::numeric_limits<int>::max()))
         throw std::runtime_error("Invalid GPU mesh export source");
     const auto checked=[](cudaError_t e) {
@@ -80,6 +81,24 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
     }
     checkpoint();
     fs::MeshResult mesh;
+    if (source.point_cloud) {
+        mesh.vertices.reserve(source.stats.point_count);
+        mesh.colors.reserve(source.stats.point_count);
+        for (std::size_t i=0; i<vertex_count; ++i) {
+            if (i%4096==0) checkpoint();
+            const auto& v=vertices[i];
+            if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z) || v.z<=0) continue;
+            if (!std::isfinite(v.r) || !std::isfinite(v.g) || !std::isfinite(v.b))
+                throw std::runtime_error("GPU point cloud contains invalid colors");
+            const auto byte=[](float c) { return static_cast<unsigned char>(std::lround(std::clamp(c,0.f,1.f)*255.f)); };
+            mesh.vertices.emplace_back(v.x,v.y,v.z);
+            mesh.colors.emplace_back(byte(v.r),byte(v.g),byte(v.b));
+        }
+        if (mesh.vertices.size()!=source.stats.point_count)
+            throw std::runtime_error("GPU point cloud export count does not match the displayed result");
+        mesh.camera=source.camera;
+        return mesh;
+    }
     mesh.vertices.reserve(source.stats.triangle_count);
     mesh.colors.reserve(source.stats.triangle_count);
     std::unordered_map<PLYVertexKey,int,PLYVertexHash> vertex_indices;
@@ -140,13 +159,27 @@ PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, S
     connect(timer_, &QTimer::timeout, this, &PipelineWorker::poll);
 }
 void PipelineWorker::publish() { emit stateChanged(state_); }
+void PipelineWorker::reportProgress(int percent, const QString& stage) {
+    checkpoint();
+    state_.progress = percent;
+    state_.progress_stage = stage;
+    state_.status = stage;
+    publish();
+}
 void PipelineWorker::checkpoint() const {
     if (cancel_->load()) throw std::runtime_error("Stopped at a safe stage boundary.");
 }
 void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action) {
-    try { checkpoint(); action(*this); }
+    state_.progress = 0; state_.progress_stage = "Working…"; state_.action_failed = false;
+    publish();
+    try {
+        checkpoint(); action(*this); checkpoint();
+        state_.progress = 100; state_.progress_stage = state_.status;
+    }
     catch (const std::exception& e) {
         state_.status = QString::fromUtf8(e.what());
+        state_.action_failed = true;
+        state_.progress_stage = "Failed · " + state_.status;
         emit log(state_.status);
     }
     publish(); emit actionFinished();
@@ -217,7 +250,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     emit images(image(frame_->rectified_left()), image(frame_->rectified_right()));
     const QString preparation = already_rectified ? "rectified by camera"
         : QString("rectified in %1 ms").arg(elapsed.elapsed());
-    state_.status = QString("Pair ready · %1 × %2 · %3. Draw a mask and click Finish draw to continue.")
+    state_.status = QString("Pair ready · %1 × %2 · %3. Reconstruct the full image or optionally select a region.")
         .arg(frame_->left().cols).arg(frame_->left().rows).arg(preparation);
     emit log(state_.input + "\nCalibration: " + state_.calibration + "\n" + state_.status);
 }
@@ -394,6 +427,13 @@ void PipelineWorker::freeze() {
         .arg(fs::calibration::arrival_skew(*latest_) / 1e6, 0, 'f', 1);
     prepare(std::move(frame), input, camera_calibration_description_, camera_calibration_filename_, camera_calibration_json_);
 }
+void PipelineWorker::captureAndReconstruct(float minimum, float maximum, bool denoise,
+                                           float max_neighbor_distance_m) {
+    reportProgress(0, "Capturing and rectifying stereo pair…");
+    freeze();
+    // A new capture always processes the full image, regardless of any previous selection.
+    reconstruct(minimum, maximum, {}, denoise, max_neighbor_distance_m);
+}
 void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& selection_mask,
                                  bool denoise, float max_neighbor_distance_m) {
     if (!state_.engine_ready || !fs_ || !fs_->isEngineLoaded())
@@ -401,30 +441,35 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     if (!frame_ || state_.live) throw std::runtime_error("Import or freeze a stereo pair before reconstruction.");
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum < 0 || maximum <= minimum)
         throw std::runtime_error("Depth range must satisfy 0 ≤ minimum < maximum (metres).");
-    if (selection_mask.isNull() || selection_mask.width()!=frame_->rectified_left().cols ||
-        selection_mask.height()!=frame_->rectified_left().rows)
-        throw std::runtime_error("Confirm a mask aligned with the current rectified left image first.");
+    if (!selection_mask.isNull() && (selection_mask.width()!=frame_->rectified_left().cols ||
+        selection_mask.height()!=frame_->rectified_left().rows))
+        throw std::runtime_error("The mask must be aligned with the current rectified left image.");
     if (!std::isfinite(max_neighbor_distance_m) || max_neighbor_distance_m<=0)
         throw std::runtime_error("Neighbour distance must be positive and finite.");
     state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); publish();
-    checkpoint(); state_.status = "Running FoundationStereo inference…"; publish();
+    reportProgress(10, "Preparing stereo images…");
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
     fs_->prepare_stereo_images(frame_->rectified_left(), frame_->rectified_right());
-    const QImage grayscale=selection_mask.convertToFormat(QImage::Format_Grayscale8);
+    QImage grayscale=selection_mask.convertToFormat(QImage::Format_Grayscale8);
+    if (grayscale.isNull()) {
+        grayscale = QImage(frame_->rectified_left().cols, frame_->rectified_left().rows, QImage::Format_Grayscale8);
+        grayscale.fill(255);
+    }
     const cv::Mat mask(grayscale.height(),grayscale.width(),CV_8UC1,
                        const_cast<uchar*>(grayscale.constBits()),grayscale.bytesPerLine());
     fs_->set_selection_mask(mask); // Also completes the queued input uploads.
     emit log(QString("Input preparation: %1 ms").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
+    reportProgress(25, "Running FoundationStereo inference…");
     // Synchronized wall time: measure this inference only, excluding preparation.
     elapsed.restart();
     fs_->inference(); fs_->synchronize();
     const double inference_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Inference: %1 ms").arg(inference_ms,0,'f',3));
-    checkpoint(); state_.status = "Computing XYZ on GPU…"; publish(); elapsed.restart();
+    reportProgress(65, "Computing valid XYZ on GPU…"); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint();
     if (denoise) {
-        state_.status = "Denoising selected XYZ on GPU…"; publish();
+        reportProgress(75, "Filtering XYZ neighbours on GPU…");
         fs_->denoise_xyz_map(max_neighbor_distance_m,3,2); checkpoint();
     }
     // Both XYZ and denoising APIs synchronize before returning.
@@ -432,7 +477,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     state_.gpu_ready = true;
     emit log(denoise ? QString("Full-image XYZ + selected-region 3 × 3 denoising · %1 m · interior 3 / boundary up to 2 neighbours").arg(max_neighbor_distance_m)
                     : "Full-image XYZ · neighbourhood denoising disabled.");
-    state_.status = "Preparing depth display…"; publish(); elapsed.restart();
+    reportProgress(85, "Preparing depth display…"); elapsed.restart();
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();
     cv::Mat depth, indices, depth_rgb, model_left;
     cv::extractChannel(xyz, depth, 2);
@@ -458,6 +503,30 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     publish(); // Publish readiness before delivering the depth texture.
     emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
+    buildPointCloud(mask);
+}
+void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
+    reportProgress(92, "Building valid point cloud on GPU…");
+    QElapsedTimer elapsed; elapsed.start();
+    const auto inputs=fs_->prepare_gpu_mesh_inputs(selection);
+    // Use FS's filtered device XYZ/RGB directly. The CPU depth snapshot is not
+    // involved in point-cloud construction or the CUDA/OpenGL VBO handoff.
+    if (!gpu_mesh_ || !gpu_mesh_.unique()) gpu_mesh_=std::make_shared<fs::MeshGPUBuffer>();
+    const auto stats=fs::build_point_cloud_gpu(inputs,*gpu_mesh_);
+    checkpoint();
+    if (!stats.point_count) throw std::runtime_error("No valid points remain. Adjust the depth range or neighbour filtering and reconstruct again.");
+    auto cloud=std::make_shared<GPUMeshFrame>();
+    cloud->buffer=gpu_mesh_; cloud->stats=stats; cloud->point_cloud=true;
+    cloud->stream=inputs.stream; cloud->stream_owner=fs_;
+    const auto error=cudaGetDevice(&cloud->device);
+    if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    cloud->camera=meshCamera(*frame_,{inputs.width,inputs.height});
+    latest_gpu_mesh_=cloud;
+    emit log(QString("GPU point cloud: %1 ms · %2 valid points · XYZ/RGB remain on GPU")
+        .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(stats.point_count));
+    reportProgress(95, "Preparing point cloud display…");
+    emit gpuMeshReady(cloud);
+    state_.status=QString("GPU point cloud ready · %1 valid points").arg(stats.point_count);
     emit log(state_.status);
 }
 void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {
@@ -481,14 +550,18 @@ void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {
 void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m, double max_depth_jump_m) {
     if (!state_.depth_ready || !state_.gpu_ready || state_.live || !frame_ || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("Reconstruct depth before preparing a GPU mesh.");
-    if (selection_mask.isNull() || selection_mask.width() != frame_->rectified_left().cols ||
-        selection_mask.height() != frame_->rectified_left().rows)
-        throw std::invalid_argument("GPU mesh requires the confirmed rectified-left mask.");
+    if (!selection_mask.isNull() && (selection_mask.width() != frame_->rectified_left().cols ||
+        selection_mask.height() != frame_->rectified_left().rows))
+        throw std::invalid_argument("GPU mesh requires an aligned rectified-left mask.");
     latest_mesh_.reset(); latest_gpu_mesh_.reset();
     checkpoint();
     state_.status = "Preparing GPU mesh…"; publish();
     QElapsedTimer elapsed; elapsed.start();
-    const QImage grayscale = selection_mask.convertToFormat(QImage::Format_Grayscale8);
+    QImage grayscale = selection_mask.convertToFormat(QImage::Format_Grayscale8);
+    if (grayscale.isNull()) {
+        grayscale = QImage(frame_->rectified_left().cols, frame_->rectified_left().rows, QImage::Format_Grayscale8);
+        grayscale.fill(255);
+    }
     const cv::Mat mask(grayscale.height(), grayscale.width(), CV_8UC1,
                        const_cast<uchar*>(grayscale.constBits()), grayscale.bytesPerLine());
     const auto inputs = fs_->prepare_gpu_mesh_inputs(mask);
@@ -527,8 +600,9 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     if (options.depth && (!state_.depth_ready || mesh_xyz_.empty() || mesh_xyz_.type()!=CV_32FC3))
         throw std::runtime_error("Reconstruct depth before saving it.");
     if (options.mesh) {
-        const bool current_cpu=mesh && mesh==latest_mesh_ && !mesh->triangles.empty();
-        const bool current_gpu=gpu_mesh && gpu_mesh==latest_gpu_mesh_.lock() && gpu_mesh->stats.triangle_count;
+        const bool current_cpu=mesh && mesh==latest_mesh_ && !mesh->vertices.empty();
+        const bool current_gpu=gpu_mesh && gpu_mesh==latest_gpu_mesh_.lock() &&
+            (gpu_mesh->point_cloud ? gpu_mesh->stats.point_count : gpu_mesh->stats.triangle_count);
         if (!state_.depth_ready || (mesh && gpu_mesh) || (!current_cpu && !current_gpu))
             throw std::runtime_error("Generate the current displayed mesh before saving it.");
     }
@@ -550,7 +624,7 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     if (options.mesh && gpu_mesh) {
         QElapsedTimer download; download.start();
         mesh=std::make_shared<fs::MeshResult>(downloadMeshForExport(*gpu_mesh,[this] { checkpoint(); }));
-        emit log(QString("GPU mesh export download + filtering: %1 ms · %2 triangles · %3 unique vertices · RGB uint8 0–255")
+        emit log(QString("GPU geometry export download + filtering: %1 ms · %2 triangles · %3 vertices · RGB uint8 0–255")
             .arg(download.nsecsElapsed()/1e6,0,'f',3).arg(mesh->triangles.size()).arg(mesh->vertices.size()));
     }
     // Encode to temporary files first; each destination is replaced atomically.
