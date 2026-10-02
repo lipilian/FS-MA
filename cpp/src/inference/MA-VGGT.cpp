@@ -29,19 +29,28 @@ nvinfer1::Dims dims(std::initializer_list<int64_t> values) {
 bool equal(nvinfer1::Dims a, nvinfer1::Dims b) {
     return a.nbDims == b.nbDims && a.nbDims >= 0 && std::equal(a.d, a.d + a.nbDims, b.d);
 }
-} // namespace
 
-struct MA_VGGT::Impl {
-    // Reverse destruction releases TensorRT objects before the stream owner.
-    std::shared_ptr<FS> fs;
+struct DeviceFree {
+    void operator()(float* pointer) const noexcept { if (pointer) cudaFree(pointer); }
+};
+using DeviceBuffer = std::unique_ptr<float, DeviceFree>;
+DeviceBuffer allocate(std::size_t elements, const char* name) {
+    void* pointer = nullptr;
+    const auto error = cudaMalloc(&pointer, elements * sizeof(float));
+    if (error != cudaSuccess)
+        throw std::runtime_error(std::string("MapAnything: cannot allocate GPU ") + name + ": " + cudaGetErrorString(error));
+    return DeviceBuffer(static_cast<float*>(pointer));
+}
+
+struct Model {
+    cudaStream_t stream;
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::unique_ptr<nvinfer1::IExecutionContext> context;
 
-    explicit Impl(std::shared_ptr<FS> owner) : fs(std::move(owner)) {
-        require(fs && fs->stream(), "an FS-owned CUDA stream is required");
-    }
-    ~Impl() { cudaStreamSynchronize(fs->stream()); }
+    explicit Model(cudaStream_t shared_stream) : stream(shared_stream) {}
+    // Also complete profile work before destroying an unsuccessful load.
+    ~Model() { cudaStreamSynchronize(stream); }
 
     void tensor(const char* name, nvinfer1::Dims shape, nvinfer1::TensorIOMode mode) const {
         require(engine->getTensorIOMode(name) == mode &&
@@ -51,15 +60,36 @@ struct MA_VGGT::Impl {
                 equal(engine->getTensorShape(name), shape), std::string("incompatible tensor: ") + name);
     }
 };
+} // namespace
+
+struct MA_VGGT::Impl {
+    // Reverse destruction releases context/model, I/O buffers, then FS/stream.
+    std::shared_ptr<FS> fs;
+    DeviceBuffer inputs, depths, poses, scale;
+    std::unique_ptr<Model> model;
+
+    explicit Impl(std::shared_ptr<FS> owner) : fs(std::move(owner)) {
+        require(fs && fs->stream(), "an FS-owned CUDA stream is required");
+        inputs = allocate(kInputElements, "inputs");
+        depths = allocate(kDepthElements, "depths");
+        poses = allocate(kPoseElements, "poses");
+        scale = allocate(kScaleElements, "scale");
+    }
+    ~Impl() { cudaStreamSynchronize(fs->stream()); }
+};
 
 MA_VGGT::MA_VGGT(std::shared_ptr<FS> fs) : impl_(std::make_unique<Impl>(std::move(fs))) {}
 MA_VGGT::~MA_VGGT() = default;
-bool MA_VGGT::isLoaded() const noexcept { return impl_->engine && impl_->context; }
+bool MA_VGGT::isLoaded() const noexcept { return bool(impl_->model); }
 cudaStream_t MA_VGGT::stream() const noexcept { return impl_->fs->stream(); }
+float* MA_VGGT::inputDevice() const noexcept { return impl_->inputs.get(); }
+float* MA_VGGT::depthsDevice() const noexcept { return impl_->depths.get(); }
+float* MA_VGGT::posesDevice() const noexcept { return impl_->poses.get(); }
+float* MA_VGGT::scaleDevice() const noexcept { return impl_->scale.get(); }
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {
     impl_->fs->synchronize();
-    auto next = std::make_unique<Impl>(impl_->fs);
+    auto next = std::make_unique<Model>(stream());
     auto& s = *next;
     auto* active_logger = getLogger();
     s.runtime.reset(nvinfer1::createInferRuntime(active_logger ? *active_logger : logger));
@@ -87,11 +117,16 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
             equal(s.engine->getProfileShape("inputs", 0, Profile::kMAX), dims({kMaxViews, 7, kInputHeight, kInputWidth})),
             "input profile must support exactly 2..5 views at 434x518");
 
-    // We only load the model at this stage. Future inference will provide the
-    // activation workspace and I/O addresses, then enqueue on this same stream.
+    // Future inference will provide activation workspace and enqueue on the
+    // shared stream. I/O storage already exists independently of the engine.
     s.context.reset(s.engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED));
     require(bool(s.context), "cannot create TensorRT context");
     require(s.context->setOptimizationProfileAsync(0, stream()), "cannot select the profile on the FS stream");
+    require(s.context->setTensorAddress("inputs", inputDevice()) &&
+            s.context->setTensorAddress("depths", depthsDevice()) &&
+            s.context->setTensorAddress("poses", posesDevice()) &&
+            s.context->setTensorAddress("scale", scaleDevice()),
+            "cannot bind preallocated GPU I/O buffers");
     for (int views = kMinViews; views <= kMaxViews; ++views) {
         require(s.context->setInputShape("inputs", dims({views, 7, kInputHeight, kInputWidth})), "cannot set view count");
         require(s.context->inferShapes(0, nullptr) == 0 &&
@@ -100,8 +135,8 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
                 equal(s.context->getTensorShape("scale"), dims({1, 1, 1})),
                 "unexpected dynamic output shapes for " + std::to_string(views) + " views");
     }
-    s.fs->synchronize();
-    impl_ = std::move(next);
+    impl_->fs->synchronize();
+    impl_->model = std::move(next);
 }
 
 } // namespace fs

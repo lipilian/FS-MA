@@ -230,7 +230,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
         ma->loadEngine(state_.ma_engine_path.toStdString());
         checkpoint();
         emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
-                 "Shares the FS CUDA stream; MA inference buffers are deferred.\n"+state_.ma_engine_path);
+                 "Shares the FS CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace deferred.\n"+state_.ma_engine_path);
         sam_ = std::move(sam); ma_ = std::move(ma);
         state_.sam_ready = true; state_.ma_ready = true;
         fs_ = std::move(next);
