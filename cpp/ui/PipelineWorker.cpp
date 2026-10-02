@@ -27,6 +27,19 @@ fs::MeshCamera meshCamera(const StereoFrame& frame, cv::Size mesh_size) {
     const double sy=double(mesh_size.height)/frame.rectified_left().rows;
     return {cv::Matx33d(camera.fx*sx,0,camera.cx*sx,0,camera.fy*sy,camera.cy*sy,0,0,1),mesh_size};
 }
+fs::MeshCamera previewCamera(const StereoCalibration& calibration, cv::Size size, bool already_rectified = false) {
+    cv::Mat intrinsics;
+    if (already_rectified) calibration.left_camera_matrix.convertTo(intrinsics, CV_64F);
+    else {
+        cv::Mat r1, r2, p1, p2, q;
+        cv::stereoRectify(calibration.left_camera_matrix, calibration.left_distortion,
+                          calibration.right_camera_matrix, calibration.right_distortion, size,
+                          calibration.right_to_left_rotation, calibration.right_to_left_translation,
+                          r1, r2, p1, p2, q, cv::CALIB_ZERO_DISPARITY);
+        intrinsics = p1(cv::Rect(0, 0, 3, 3));
+    }
+    return {cv::Matx33d(intrinsics), size};
+}
 // Match the values actually written to PLY. Exact XYZ equality preserves nearby
 // distinct samples; including RGB preserves color differences at the same XYZ.
 struct PLYVertexKey {
@@ -119,6 +132,7 @@ PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, S
     if (state_.calibration_filename.isEmpty()) state_.calibration_filename="calibration.json";
     camera_calibration_ = confirmed_->calibration;
     camera_size_ = confirmed_->image_size;
+    state_.live_camera = previewCamera(camera_calibration_, camera_size_);
     camera_calibration_description_ = confirmed_path_;
     camera_calibration_filename_ = state_.calibration_filename;
     camera_calibration_json_ = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
@@ -196,10 +210,11 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     // Commit together only after validation and rectification succeed. Failed imports retain the previous input.
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
     state_.calibration_filename=std::move(calibration_filename); calibration_json_=std::move(calibration_json);
-    state_.has_pair = true; state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); state_.stage = 1;
+    state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
     state_.live = false; latest_.reset();
+    state_.image_camera = meshCamera(*frame_, frame_->rectified_left().size());
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
-    emit images(image(frame_->left()), image(frame_->right()), image(frame_->rectified_left()), image(frame_->rectified_right()));
+    emit images(image(frame_->rectified_left()), image(frame_->rectified_right()));
     const QString preparation = already_rectified ? "rectified by camera"
         : QString("rectified in %1 ms").arg(elapsed.elapsed());
     state_.status = QString("Pair ready · %1 × %2 · %3. Draw a mask and click Finish draw to continue.")
@@ -290,7 +305,9 @@ void PipelineWorker::connectCameras(CameraMode mode) {
         if (filename.isEmpty()) filename = "calibration.json";
         json = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
     }
+    const auto live_camera = previewCamera(calibration, size, mode == CameraMode::RealSenseD435);
     camera_calibration_ = std::move(calibration); camera_size_ = size;
+    state_.live_camera = live_camera;
     camera_calibration_description_ = std::move(description); camera_calibration_filename_ = std::move(filename);
     camera_calibration_json_ = std::move(json);
     // Switching devices or reconnecting can change both the image grid and intrinsics.
@@ -315,20 +332,11 @@ void PipelineWorker::setLive(bool enabled) {
 QString PipelineWorker::liveStatus() const {
     if (state_.camera_mode == CameraMode::RealSenseD435)
         return "D435 · live IR rectified by camera · 960 × 800 center crop · capture to freeze a stereo pair.";
-    return QString("Live %1 · capture to freeze a stereo pair. Independent streams; hold the subject still.")
-        .arg(preview_rectified_ ? "rectified RGB" : "raw RGB");
-}
-void PipelineWorker::setPreviewRectified(bool enabled) {
-    preview_rectified_ = enabled;
-    if (state_.live) { state_.status = liveStatus(); publish(); }
+    return "Live rectified RGB · capture to freeze a stereo pair. Independent streams; hold the subject still.";
 }
 void PipelineWorker::emitPreview() {
     if (state_.camera_mode == CameraMode::RealSenseD435) {
-        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb), true);
-        return;
-    }
-    if (!preview_rectified_) {
-        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb), false);
+        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb));
         return;
     }
     if (preview_left_map_x_.empty()) {
@@ -348,7 +356,7 @@ void PipelineWorker::emitPreview() {
     }
     cv::remap(latest_->left.rgb, preview_left_, preview_left_map_x_, preview_left_map_y_, cv::INTER_LINEAR);
     cv::remap(latest_->right.rgb, preview_right_, preview_right_map_x_, preview_right_map_y_, cv::INTER_LINEAR);
-    emit preview(thumbnail(preview_left_), thumbnail(preview_right_), true);
+    emit preview(thumbnail(preview_left_), thumbnail(preview_right_));
 }
 void PipelineWorker::poll() {
     if (!state_.live) return;
@@ -398,7 +406,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         throw std::runtime_error("Confirm a mask aligned with the current rectified left image first.");
     if (!std::isfinite(max_neighbor_distance_m) || max_neighbor_distance_m<=0)
         throw std::runtime_error("Neighbour distance must be positive and finite.");
-    state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); state_.stage = 1; publish();
+    state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); publish();
     checkpoint(); state_.status = "Running FoundationStereo inference…"; publish();
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
@@ -412,7 +420,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     elapsed.restart();
     fs_->inference(); fs_->synchronize();
     const double inference_ms=elapsed.nsecsElapsed()/1e6;
-    state_.stage = 2; emit log(QString("Inference: %1 ms").arg(inference_ms,0,'f',3));
+    emit log(QString("Inference: %1 ms").arg(inference_ms,0,'f',3));
     checkpoint(); state_.status = "Computing XYZ on GPU…"; publish(); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint();
     if (denoise) {
@@ -421,7 +429,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     }
     // Both XYZ and denoising APIs synchronize before returning.
     const double xyz_ms=elapsed.nsecsElapsed()/1e6;
-    state_.stage = 3; state_.gpu_ready = true;
+    state_.gpu_ready = true;
     emit log(denoise ? QString("Full-image XYZ + selected-region 3 × 3 denoising · %1 m · interior 3 / boundary up to 2 neighbours").arg(max_neighbor_distance_m)
                     : "Full-image XYZ · neighbourhood denoising disabled.");
     state_.status = "Preparing depth display…"; publish(); elapsed.restart();
@@ -441,16 +449,15 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     mesh_xyz_ = xyz; // cv::Mat retains the owned download with no additional copy.
     mesh_rgb_ = model_left;
     cv::resize(mask, mesh_mask_, xyz.size(), 0.0, 0.0, cv::INTER_NEAREST);
-    const QImage left_image=image(model_left), depth_image=image(depth_rgb);
+    const QImage depth_image=image(depth_rgb);
     const double display_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Post processing: %1 ms (XYZ + denoising: %2 ms; XYZ download + depth display: %3 ms)")
         .arg(xyz_ms+display_ms,0,'f',3).arg(xyz_ms,0,'f',3).arg(display_ms,0,'f',3));
-    state_.depth_ready = true; state_.stage = 4;
+    state_.depth_ready = true;
     state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
-    publish(); // Unlock the depth step before delivering its images.
-    emit depthImages(left_image, depth_image, minimum, maximum);
+    publish(); // Publish readiness before delivering the depth texture.
+    emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
-    state_.status = "Reconstruction complete · rectified left image and Jet depth map are ready.";
     emit log(state_.status);
 }
 void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {

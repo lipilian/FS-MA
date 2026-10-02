@@ -17,13 +17,13 @@ enum class CameraMode { Sentech, RealSenseD435 };
 
 struct PipelineState {
     CameraMode camera_mode{CameraMode::Sentech};
-    bool connected{false}, live{false}, has_pair{false}, has_rectified{false}, gpu_ready{false}, depth_ready{false}, engine_ready{false};
+    bool connected{false}, live{false}, has_rectified{false}, gpu_ready{false}, depth_ready{false}, engine_ready{false};
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
     QString engine{"Not initialized"}, engine_path;
     QString calibration_filename{"calibration.json"};
     bool sam_ready{false};
     quint64 image_id{0};
-    int stage{0};
+    std::optional<fs::MeshCamera> live_camera, image_camera;
 };
 Q_DECLARE_METATYPE(PipelineState)
 
@@ -39,7 +39,6 @@ public:
     void connectCameras(CameraMode mode = CameraMode::Sentech);
     void disconnectCameras();
     void setLive(bool enabled);
-    void setPreviewRectified(bool enabled);
     void freeze();
     void reconstruct(float minimum, float maximum, const QImage& selection_mask,
                      bool denoise = true, float max_neighbor_distance_m = 0.01F);
@@ -54,9 +53,9 @@ public:
     void shutdown();
 signals:
     void stateChanged(PipelineState state);
-    void images(QImage raw_left, QImage raw_right, QImage rectified_left, QImage rectified_right);
-    void preview(QImage left, QImage right, bool rectified);
-    void depthImages(QImage rectified_left, QImage depth_rgb, float minimum, float maximum);
+    void images(QImage rectified_left, QImage rectified_right);
+    void preview(QImage rectified_left, QImage rectified_right);
+    void depthImage(QImage depth_rgb, float minimum, float maximum);
     void meshReady(SharedMesh mesh);
     void gpuMeshReady(SharedGPUMesh mesh);
     void maskReady(quint64 image_id, quint64 request_id, QImage mask, QString message);
@@ -83,7 +82,6 @@ private:
     QTimer* timer_;
     QElapsedTimer last_pair_;
     std::optional<StereoCameraPair> latest_;
-    bool preview_rectified_{true};
     cv::Mat preview_left_map_x_, preview_left_map_y_, preview_right_map_x_, preview_right_map_y_;
     cv::Mat preview_left_, preview_right_;
     std::unique_ptr<StereoFrame> frame_;
