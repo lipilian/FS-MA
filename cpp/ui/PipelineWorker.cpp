@@ -1,4 +1,5 @@
 #include "PipelineWorker.hpp"
+#include "fs/capture/RealSenseStereoSource.hpp"
 #include <QDir>
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -116,6 +117,11 @@ PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, S
     state_.calibration = confirmed_path_;
     state_.calibration_filename = QFileInfo(confirmed_path_).fileName();
     if (state_.calibration_filename.isEmpty()) state_.calibration_filename="calibration.json";
+    camera_calibration_ = confirmed_->calibration;
+    camera_size_ = confirmed_->image_size;
+    camera_calibration_description_ = confirmed_path_;
+    camera_calibration_filename_ = state_.calibration_filename;
+    camera_calibration_json_ = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
     timer_->setInterval(100);
     connect(timer_, &QTimer::timeout, this, &PipelineWorker::poll);
 }
@@ -184,7 +190,9 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
 void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
                              QString calibration_filename, QByteArray calibration_json) {
     QElapsedTimer elapsed; elapsed.start();
-    frame->rectify(); checkpoint();
+    const bool already_rectified = frame->input_is_rectified();
+    if (!already_rectified) frame->rectify();
+    checkpoint();
     // Commit together only after validation and rectification succeed. Failed imports retain the previous input.
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
     state_.calibration_filename=std::move(calibration_filename); calibration_json_=std::move(calibration_json);
@@ -192,8 +200,10 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     state_.live = false; latest_.reset();
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
     emit images(image(frame_->left()), image(frame_->right()), image(frame_->rectified_left()), image(frame_->rectified_right()));
-    state_.status = QString("Pair ready · %1 × %2 · rectified in %3 ms. Draw a mask and click Finish draw to continue.")
-        .arg(frame_->left().cols).arg(frame_->left().rows).arg(elapsed.elapsed());
+    const QString preparation = already_rectified ? "rectified by camera"
+        : QString("rectified in %1 ms").arg(elapsed.elapsed());
+    state_.status = QString("Pair ready · %1 × %2 · %3. Draw a mask and click Finish draw to continue.")
+        .arg(frame_->left().cols).arg(frame_->left().rows).arg(preparation);
     emit log(state_.input + "\nCalibration: " + state_.calibration + "\n" + state_.status);
 }
 void PipelineWorker::importCapture(const QString& directory, bool use_capture_calibration) {
@@ -251,14 +261,44 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     if (calibration_filename.isEmpty()) calibration_filename="calibration.json";
     checkpoint(); prepare(std::move(frame), dir.absolutePath(), description, calibration_filename, calibration_json);
 }
-void PipelineWorker::connectCameras() {
-    if (state_.connected) { setLive(true); return; }
-    if (source_) { source_->stop(); source_.reset(); }
-    SentechStereoOptions options;
-    options.left = confirmed_->left_serial; options.right = confirmed_->right_serial; options.exposure_us = exposure_us_;
-    auto next = std::make_shared<SentechStereoSource>(options);
-    state_.status = "Connecting stereo cameras…"; publish();
-    next->start(); source_ = std::move(next); state_.connected = true; setLive(true); timer_->start();
+void PipelineWorker::connectCameras(CameraMode mode) {
+    if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
+    disconnectCameras();
+    state_.status = mode == CameraMode::RealSenseD435 ? "Connecting Intel RealSense D435…" : "Connecting Sentech stereo cameras…";
+    publish();
+    SharedStereoSource next;
+    StereoCalibration calibration;
+    cv::Size size;
+    QString description, filename;
+    QByteArray json;
+    if (mode == CameraMode::RealSenseD435) {
+        auto realsense = std::make_shared<RealSenseStereoSource>();
+        realsense->start();
+        calibration = realsense->calibration(); size = realsense->image_size();
+        description = QString("D435 %1 · factory IR calibration · 1280 × 800 → center crop 960 × 800")
+            .arg(QString::fromStdString(realsense->serial()));
+        filename = "calibration.json";
+        json = QByteArray::fromStdString(realsense->calibration_json());
+        next = std::move(realsense);
+    } else {
+        SentechStereoOptions options;
+        options.left = confirmed_->left_serial; options.right = confirmed_->right_serial; options.exposure_us = exposure_us_;
+        next = std::make_shared<SentechStereoSource>(options);
+        next->start();
+        calibration = confirmed_->calibration; size = confirmed_->image_size;
+        description = confirmed_path_; filename = QFileInfo(confirmed_path_).fileName();
+        if (filename.isEmpty()) filename = "calibration.json";
+        json = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
+    }
+    camera_calibration_ = std::move(calibration); camera_size_ = size;
+    camera_calibration_description_ = std::move(description); camera_calibration_filename_ = std::move(filename);
+    camera_calibration_json_ = std::move(json);
+    // Switching devices or reconnecting can change both the image grid and intrinsics.
+    preview_left_map_x_.release(); preview_left_map_y_.release();
+    preview_right_map_x_.release(); preview_right_map_y_.release();
+    source_ = std::move(next); state_.camera_mode = mode; state_.connected = true;
+    emit log(camera_calibration_description_);
+    setLive(true); timer_->start();
 }
 void PipelineWorker::disconnectCameras() {
     timer_->stop();
@@ -273,6 +313,8 @@ void PipelineWorker::setLive(bool enabled) {
     else state_.status = "Preview paused. Showing the frozen input, if available.";
 }
 QString PipelineWorker::liveStatus() const {
+    if (state_.camera_mode == CameraMode::RealSenseD435)
+        return "D435 · live IR rectified by camera · 960 × 800 center crop · capture to freeze a stereo pair.";
     return QString("Live %1 · capture to freeze a stereo pair. Independent streams; hold the subject still.")
         .arg(preview_rectified_ ? "rectified RGB" : "raw RGB");
 }
@@ -281,23 +323,26 @@ void PipelineWorker::setPreviewRectified(bool enabled) {
     if (state_.live) { state_.status = liveStatus(); publish(); }
 }
 void PipelineWorker::emitPreview() {
+    if (state_.camera_mode == CameraMode::RealSenseD435) {
+        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb), true);
+        return;
+    }
     if (!preview_rectified_) {
         emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb), false);
         return;
     }
     if (preview_left_map_x_.empty()) {
-        // Confirmed calibration and camera dimensions are fixed for this worker.
-        // Match StereoFrame::rectify(), caching maps across frames and reconnects.
-        const auto& c = confirmed_->calibration;
+        // Match StereoFrame::rectify(); maps are invalidated on every connection.
+        const auto& c = camera_calibration_;
         cv::Mat r1, r2, p1, p2, q, lx, ly, rx, ry;
         cv::stereoRectify(c.left_camera_matrix, c.left_distortion,
-                          c.right_camera_matrix, c.right_distortion, confirmed_->image_size,
+                          c.right_camera_matrix, c.right_distortion, camera_size_,
                           c.right_to_left_rotation, c.right_to_left_translation,
                           r1, r2, p1, p2, q, cv::CALIB_ZERO_DISPARITY);
         cv::initUndistortRectifyMap(c.left_camera_matrix, c.left_distortion, r1, p1,
-                                  confirmed_->image_size, CV_32FC1, lx, ly);
+                                  camera_size_, CV_32FC1, lx, ly);
         cv::initUndistortRectifyMap(c.right_camera_matrix, c.right_distortion, r2, p2,
-                                  confirmed_->image_size, CV_32FC1, rx, ry);
+                                  camera_size_, CV_32FC1, rx, ry);
         preview_left_map_x_ = std::move(lx); preview_left_map_y_ = std::move(ly);
         preview_right_map_x_ = std::move(rx); preview_right_map_y_ = std::move(ry);
     }
@@ -313,8 +358,8 @@ void PipelineWorker::poll() {
             if (!source_->running() || last_pair_.elapsed() > 5000) throw std::runtime_error("No stereo pair for 5 seconds. Check cameras and reconnect.");
             return;
         }
-        if (pair->left.rgb.size() != confirmed_->image_size || pair->right.rgb.size() != confirmed_->image_size)
-            throw std::runtime_error("Camera image dimensions do not match the confirmed calibration.");
+        if (pair->left.rgb.size() != camera_size_ || pair->right.rgb.size() != camera_size_)
+            throw std::runtime_error("Camera image dimensions do not match the active camera calibration.");
         last_pair_.restart(); latest_ = std::move(pair);
         emitPreview();
     } catch (const std::exception& e) {
@@ -324,13 +369,22 @@ void PipelineWorker::poll() {
 void PipelineWorker::freeze() {
     if (!state_.live || !latest_ || last_pair_.elapsed() > 1000)
         throw std::runtime_error("No fresh stereo pair. Wait for the live preview and capture again.");
-    auto frame = std::make_unique<StereoFrame>(latest_->left.rgb, latest_->right.rgb, confirmed_->calibration);
-    const QString input = QString("Camera capture · L #%1 / R #%2 · host gap %3 ms")
+    std::unique_ptr<StereoFrame> frame;
+    if (state_.camera_mode == CameraMode::RealSenseD435) {
+        // D435 Y8 streams are already rectified. Keep the cropped SDK intrinsics
+        // and horizontal baseline instead of generating new projection matrices.
+        const auto& k = camera_calibration_.left_camera_matrix;
+        const StereoCameraParameters camera{k.at<double>(0,0), k.at<double>(1,1),
+            k.at<double>(0,2), k.at<double>(1,2),
+            static_cast<float>(std::abs(camera_calibration_.right_to_left_translation.at<double>(0)))};
+        frame = std::make_unique<StereoFrame>(latest_->left.rgb, latest_->right.rgb, camera);
+    } else {
+        frame = std::make_unique<StereoFrame>(latest_->left.rgb, latest_->right.rgb, camera_calibration_);
+    }
+    const QString input = (state_.camera_mode == CameraMode::RealSenseD435 ? "D435 IR · " : "Sentech · ") + QString("Camera capture · L #%1 / R #%2 · host gap %3 ms")
         .arg(latest_->left.frame_id).arg(latest_->right.frame_id)
         .arg(fs::calibration::arrival_skew(*latest_) / 1e6, 0, 'f', 1);
-    const auto filename=QFileInfo(confirmed_path_).fileName();
-    prepare(std::move(frame), input, confirmed_path_, filename.isEmpty() ? "calibration.json" : filename,
-            QByteArray::fromStdString(fs::calibration::serialize(*confirmed_)));
+    prepare(std::move(frame), input, camera_calibration_description_, camera_calibration_filename_, camera_calibration_json_);
 }
 void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& selection_mask,
                                  bool denoise, float max_neighbor_distance_m) {

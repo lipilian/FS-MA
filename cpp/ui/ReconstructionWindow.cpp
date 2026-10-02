@@ -1,4 +1,5 @@
 #include "ReconstructionWindow.hpp"
+#include "fs/capture/RealSenseStereoSource.hpp"
 #include "widgets/MaskEditor.hpp"
 #include "widgets/MeshView.hpp"
 #include "widgets/StereoImageView.hpp"
@@ -21,7 +22,9 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTabBar>
@@ -83,6 +86,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* title = label("Reconstruction workspace"); title->setObjectName("title"); outer->addWidget(title);
     auto* toolbar = new QHBoxLayout;
     import_ = button("Import capture…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
+    camera_mode_ = new QComboBox; camera_mode_->setObjectName("cameraMode");
+    camera_mode_->addItem("Sentech stereo", int(CameraMode::Sentech));
+    camera_mode_->addItem("Intel RealSense D435", int(CameraMode::RealSenseD435));
+    camera_mode_->setToolTip("Sentech: confirmed calibration. D435: factory-calibrated IR pair, center-cropped from 1280 × 800 to 960 × 800. Disconnect before switching.");
+    if (!RealSenseStereoSource::available()) {
+        auto* item = static_cast<QStandardItemModel*>(camera_mode_->model())->item(1);
+        item->setEnabled(false); item->setToolTip("Install librealsense2-dev and rebuild to enable D435 support.");
+    }
+    camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
     preview_ = button("Resume preview", "preview"); capture_ = button("Capture pair", "capturePair");
     run_ = button("Reconstruct", "run"); finish_draw_ = button("Finish draw", "finishDraw");
     build_mesh_cpu_ = button("CPU mesh", "buildMeshCPU");
@@ -91,7 +103,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     next_ = button("Next", "nextStep");
     next_->setToolTip("Complete reconstruction, then continue to 3D browser.");
-    for (auto* b : {import_, camera_, preview_}) toolbar->addWidget(b);
+    toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
+    for (auto* b : {camera_, preview_}) toolbar->addWidget(b);
     toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(next_); toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
@@ -297,7 +310,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(camera_,&QPushButton::clicked,this,[this] {
         const bool connected = state_.connected;
-        controller_.submit([=](auto& w) { if (connected) w.disconnectCameras(); else w.connectCameras(); });
+        const auto mode = static_cast<CameraMode>(camera_mode_->currentData().toInt());
+        live_left_ = {}; live_right_ = {};
+        controller_.submit([=](auto& w) { if (connected) w.disconnectCameras(); else w.connectCameras(mode); });
     });
     connect(preview_,&QPushButton::clicked,this,[this] { const bool live = state_.live; if (!live) { live_left_ = {}; live_right_ = {}; tabs_->setCurrentIndex(0); } controller_.submit([=](auto& w) { w.setLive(!live); }); });
     connect(capture_,&QPushButton::clicked,this,[this] { controller_.submit([](auto& w) { w.freeze(); }); });
@@ -366,10 +381,12 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(denoise_,&QCheckBox::toggled,this,depth_settings_changed);
     connect(neighbor_distance_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(rectified_,&QCheckBox::toggled,this,[this](bool enabled) {
+        preview_rectified_ = enabled;
         live_left_ = {}; live_right_ = {};
         controller_.setPreviewRectified(enabled);
         refresh(); showImages();
     }); connect(epilines_,&QCheckBox::toggled,this,[this] { showImages(); });
+    connect(camera_mode_,&QComboBox::currentIndexChanged,this,[this] { refresh(); showImages(); });
     connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearMask);
     connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
     connect(brush_size_,&QSpinBox::valueChanged,mask_,&MaskEditor::setBrushSize);
@@ -401,6 +418,11 @@ void ReconstructionWindow::refresh() {
     const bool idle = !busy_ && !closing_, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
+    camera_mode_->setEnabled(idle && !state_.connected);
+    if (state_.connected) {
+        const QSignalBlocker blocker(camera_mode_);
+        camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
+    }
     preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview"); capture_->setEnabled(idle && state_.live);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
@@ -411,7 +433,14 @@ void ReconstructionWindow::refresh() {
     const bool depth_valid = minimum_->value() < maximum_->value();
     run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid && mask_->hasSelection());
     run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : !mask_->hasSelection() ? "Click Finish draw in Region measurement first." : "Runs full-image XYZ and optional neighbourhood filtering inside the mask, then displays the Jet depth map.");
-    rectified_->setEnabled(!closing_ && (state_.live || state_.has_pair));
+    const bool realsense = camera_mode_->currentData().toInt() == int(CameraMode::RealSenseD435);
+    {
+        const QSignalBlocker blocker(rectified_);
+        rectified_->setChecked(realsense || preview_rectified_);
+    }
+    rectified_->setEnabled(!closing_ && !realsense && (state_.live || state_.has_pair));
+    rectified_->setToolTip(realsense ? "D435 infrared images are already rectified by the camera."
+                                    : "Preview images with stereo rectification applied.");
     epilines_->setEnabled(!closing_ && rectified_->isChecked() && (state_.live || state_.has_rectified));
     mask_->setEditingEnabled(idle && frozen);
     for (auto* b : {brush_,eraser_}) b->setEnabled(idle && frozen);
@@ -480,6 +509,7 @@ void ReconstructionWindow::refreshWorkflow() {
     build_mesh_cpu_->setVisible(tabs_->currentIndex()==3);
     build_mesh_gpu_->setVisible(tabs_->currentIndex()==3);
     for (auto* b : {import_,camera_,preview_}) b->setVisible(tabs_->currentIndex()==0);
+    camera_mode_->setVisible(tabs_->currentIndex()==0);
 }
 void ReconstructionWindow::showImages() {
     const bool corrected = rectified_->isChecked();

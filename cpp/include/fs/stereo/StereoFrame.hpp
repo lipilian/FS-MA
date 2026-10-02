@@ -3,6 +3,7 @@
 #include "fs/stereo/StereoCalibration.hpp"
 
 #include <filesystem>
+#include <optional>
 
 #include <opencv2/core.hpp>
 
@@ -31,8 +32,17 @@ public:
     StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
                 const StereoCalibration& calibration);
 
-    /** Undistort and rectify both RGB images using cv::CALIB_ZERO_DISPARITY. */
+    /**
+     * Snapshot an already rectified horizontal stereo pair without resampling.
+     * Both images must share these intrinsics; baseline is positive, in metres.
+     * Camera parameters must describe the supplied image grid after any crop.
+     */
+    StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
+                const StereoCameraParameters& rectified_camera);
+
+    /** Undistort and rectify raw inputs; already rectified inputs are unchanged. */
     void rectify();
+    bool input_is_rectified() const { return rectified_input_camera_.has_value(); }
 
     const cv::Mat& left() const { return left_; }
     const cv::Mat& right() const { return right_; }
@@ -42,6 +52,7 @@ public:
     StereoCameraParameters rectified_camera_parameters() const;
 
 private:
+    std::optional<StereoCameraParameters> rectified_input_camera_;
     cv::Mat left_;
     cv::Mat right_;
     cv::Mat k1_;
