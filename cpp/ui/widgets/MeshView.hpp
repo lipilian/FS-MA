@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QWidget>
 #include <memory>
+#include <vector>
 #include "GPUMeshFrame.hpp"
 
 class MeshCanvas;
@@ -15,6 +16,9 @@ class MeshView : public QWidget {
     explicit MeshView(QWidget *parent = nullptr);
     void setMesh(std::shared_ptr<const fs::MeshResult> mesh);
     void setGPUMesh(SharedGPUMesh mesh);
+    // Completed captures remain in the scene while the active input changes.
+    // A generated CPU/GPU mesh can temporarily replace its capture's points.
+    void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden = {});
     void setMode(int mode);
     void resetView();
     void setRightCameraVisible(bool visible);

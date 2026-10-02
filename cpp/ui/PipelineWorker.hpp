@@ -15,7 +15,18 @@ struct ReconstructionSaveOptions {
 
 enum class CameraMode { Sentech, RealSenseD435 };
 
+// Immutable inputs and completed GPU output retained for subsequent multi-view work.
+struct CapturedStereoPair {
+    quint64 image_id{0};
+    std::shared_ptr<const StereoFrame> frame;
+    QString input, calibration_filename;
+    QByteArray calibration_json;
+    SharedGPUMesh point_cloud;
+};
+
 struct PipelineState {
+    static constexpr int kMaxCaptures = 5;
+    int capture_count{0};
     CameraMode camera_mode{CameraMode::Sentech};
     bool connected{false}, live{false}, has_rectified{false}, gpu_ready{false}, depth_ready{false}, engine_ready{false};
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
@@ -42,6 +53,9 @@ public:
     void connectCameras(CameraMode mode = CameraMode::Sentech);
     void disconnectCameras();
     void setLive(bool enabled);
+    void startCapturePreview(bool append);
+    // Read only on the pipeline thread, e.g. inside a serialized controller action.
+    const std::vector<CapturedStereoPair>& capturedPairs() const { return captures_; }
     void freeze();
     void captureAndReconstruct(float minimum, float maximum, bool denoise = true,
                                float max_neighbor_distance_m = 0.01F);
@@ -75,6 +89,7 @@ private:
     void checkpoint() const;
     void reportProgress(int percent, const QString& stage);
     void buildPointCloud(const cv::Mat& selection);
+    void retainCapture(SharedGPUMesh point_cloud);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
                  QString calibration_filename, QByteArray calibration_json);
     ConfirmedCalibration confirmed_;
@@ -91,7 +106,9 @@ private:
     std::optional<StereoCameraPair> latest_;
     cv::Mat preview_left_map_x_, preview_left_map_y_, preview_right_map_x_, preview_right_map_y_;
     cv::Mat preview_left_, preview_right_;
-    std::unique_ptr<StereoFrame> frame_;
+    std::shared_ptr<StereoFrame> frame_;
+    std::vector<CapturedStereoPair> captures_;
+    int capture_slot_{0}; // Retake replaces this slot; Capture more selects the next slot.
     std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
     // Owned snapshots from the depth display download; CPU meshing and depth export reuse these.

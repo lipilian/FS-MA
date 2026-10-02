@@ -186,6 +186,7 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
 }
 void PipelineWorker::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder) {
     // The same worker retains this instance for every subsequent reconstruction.
+    captures_.clear(); capture_slot_=0; state_.capture_count=0;
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
     fs_.reset(); sam_.reset(); state_.sam_ready = false;
@@ -308,6 +309,9 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     }
     if (calibration_filename.isEmpty()) calibration_filename="calibration.json";
     checkpoint(); prepare(std::move(frame), dir.absolutePath(), description, calibration_filename, calibration_json);
+    // A successfully imported input starts a new capture sequence. Failed imports
+    // leave the existing sequence intact.
+    captures_.clear(); capture_slot_=0; state_.capture_count=0;
 }
 void PipelineWorker::connectCameras(CameraMode mode) {
     if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
@@ -361,6 +365,20 @@ void PipelineWorker::setLive(bool enabled) {
     state_.live = enabled; latest_.reset();
     if (enabled) { last_pair_.restart(); state_.status = liveStatus(); }
     else state_.status = "Preview paused. Showing the frozen input, if available.";
+}
+void PipelineWorker::startCapturePreview(bool append) {
+    if (append) {
+        if (captures_.size()>=PipelineState::kMaxCaptures)
+            throw std::runtime_error("Five captures are already complete. Retake the latest pair to replace it.");
+        if (captures_.empty() || captures_.back().image_id!=state_.image_id || !state_.depth_ready)
+            throw std::runtime_error("Reconstruct the current pair before capturing another.");
+    }
+    setLive(true); // Validate camera availability before changing the capture target.
+    if (append) capture_slot_=int(captures_.size());
+    // Retake keeps the current slot, including an unfinished additional capture.
+    // Its previous successful result is retained until the replacement succeeds.
+    state_.status=append ? "Move to the next view, then capture a pair. Earlier captures are retained."
+                         : "Reframe the current view, then capture a replacement pair.";
 }
 QString PipelineWorker::liveStatus() const {
     if (state_.camera_mode == CameraMode::RealSenseD435)
@@ -429,6 +447,8 @@ void PipelineWorker::freeze() {
 }
 void PipelineWorker::captureAndReconstruct(float minimum, float maximum, bool denoise,
                                            float max_neighbor_distance_m) {
+    if (capture_slot_>=PipelineState::kMaxCaptures)
+        throw std::runtime_error("The capture sequence is full.");
     reportProgress(0, "Capturing and rectifying stereo pair…");
     freeze();
     // A new capture always processes the full image, regardless of any previous selection.
@@ -436,6 +456,8 @@ void PipelineWorker::captureAndReconstruct(float minimum, float maximum, bool de
 }
 void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& selection_mask,
                                  bool denoise, float max_neighbor_distance_m) {
+    if (capture_slot_<0 || capture_slot_>int(captures_.size()) || capture_slot_>=PipelineState::kMaxCaptures)
+        throw std::logic_error("Invalid capture sequence slot.");
     if (!state_.engine_ready || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("FoundationStereo must finish splash initialization before reconstruction.");
     if (!frame_ || state_.live) throw std::runtime_error("Import or freeze a stereo pair before reconstruction.");
@@ -521,6 +543,7 @@ void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
     const auto error=cudaGetDevice(&cloud->device);
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     cloud->camera=meshCamera(*frame_,{inputs.width,inputs.height});
+    retainCapture(cloud);
     latest_gpu_mesh_=cloud;
     emit log(QString("GPU point cloud: %1 ms · %2 valid points · XYZ/RGB remain on GPU")
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(stats.point_count));
@@ -528,6 +551,14 @@ void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
     emit gpuMeshReady(cloud);
     state_.status=QString("GPU point cloud ready · %1 valid points").arg(stats.point_count);
     emit log(state_.status);
+}
+void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
+    checkpoint();
+    CapturedStereoPair capture{state_.image_id,frame_,state_.input,state_.calibration_filename,
+                               calibration_json_,std::move(point_cloud)};
+    if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
+    else captures_[capture_slot_]=std::move(capture);
+    state_.capture_count=int(captures_.size());
 }
 void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {
     if (!state_.depth_ready || state_.live || !frame_ || mesh_xyz_.empty() || mesh_mask_.empty())
@@ -712,5 +743,6 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
     }
 }
 void PipelineWorker::shutdown() {
-    disconnectCameras(); latest_gpu_mesh_.reset(); gpu_mesh_.reset(); sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
+    disconnectCameras(); captures_.clear(); capture_slot_=0; state_.capture_count=0;
+    latest_gpu_mesh_.reset(); gpu_mesh_.reset(); sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }
