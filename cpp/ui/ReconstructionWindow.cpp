@@ -93,7 +93,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         item->setEnabled(false); item->setToolTip("Install librealsense2-dev and rebuild to enable D435 support.");
     }
     camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
-    preview_ = button("Resume preview", "preview"); capture_ = button("Capture pair", "capturePair");
+    retake_ = button("Retake", "retake"); capture_more_ = button("Capture more", "captureMore");
+    retake_->setToolTip("Return to preview and replace the latest pair. Earlier captures are retained.");
+    capture_more_->setToolTip("Keep completed captures and preview the next view. Up to five pairs.");
+    capture_ = button("Capture pair", "capturePair");
     capture_->setToolTip("Capture, reconstruct and display all valid points automatically. No mask drawing required.");
     run_ = button("Reconstruct", "run"); finish_draw_ = button("Finish draw", "finishDraw");
     build_mesh_cpu_ = button("CPU mesh", "buildMeshCPU");
@@ -101,7 +104,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     build_mesh_cpu_->setToolTip("Generate a constrained Delaunay mesh on the CPU.");
     build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
-    for (auto* b : {camera_, preview_}) toolbar->addWidget(b);
+    for (auto* b : {camera_, retake_, capture_more_}) toolbar->addWidget(b);
     toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
@@ -229,6 +232,16 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* footer = new QHBoxLayout; status_ = label(""); status_->setObjectName("status"); footer->addWidget(status_,1);
     time_ = label("Idle"); footer->addWidget(time_); auto* show_log = button("Show log"); show_log->setCheckable(true); footer->addWidget(show_log); outer->addLayout(footer);
     log_ = new QPlainTextEdit; log_->setReadOnly(true); log_->setMaximumBlockCount(500); log_->setMaximumHeight(130); log_->hide(); outer->addWidget(log_);
+    auto* capture_slots = new QWidget; capture_slots->setObjectName("captureSlots"); capture_slots->setFixedHeight(4);
+    auto* slots_layout = new QHBoxLayout(capture_slots); slots_layout->setContentsMargins(0,0,0,0); slots_layout->setSpacing(6);
+    for (int i=0; i<PipelineState::kMaxCaptures; ++i) {
+        auto* segment = new QWidget; segment->setObjectName(QString("captureSegment%1").arg(i+1));
+        segment->setFixedHeight(4); segment->setProperty("captured",false);
+        segment->setAccessibleName(QString("Capture %1").arg(i+1));
+        segment->setStyleSheet("background: #dce3ed; border-radius: 2px;");
+        capture_segments_[i]=segment; slots_layout->addWidget(segment,1);
+    }
+    outer->addWidget(capture_slots);
     progress_ = new QProgressBar; progress_->setObjectName("calculationProgress");
     progress_->setRange(0,100); progress_->setValue(0); progress_->setTextVisible(true);
     progress_->setToolTip("Progress updates when each calculation stage completes."); outer->addWidget(progress_);
@@ -237,6 +250,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::log,this,[this](const QString& message) { log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss") + "  " + message); });
     connect(&controller_,&PipelineController::stateChanged,this,[this](PipelineState state) {
         if (state.live || state.image_id != state_.image_id) reconstruction_valid_ = false;
+        if (state.capture_count==0) captured_clouds_.clear();
         state_ = std::move(state); refresh();
     });
     connect(&controller_,&PipelineController::busyChanged,this,[this](bool busy) { busy_ = busy; if (busy) { render_error_.clear(); elapsed_.start(); } else time_->setText(QString("Last task: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); refresh(); });
@@ -259,6 +273,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (closing_ || !reconstruction_valid_) return;
         mesh_result_.reset(); mesh_valid_=false;
         gpu_mesh_result_=std::move(mesh); gpu_upload_pending_=true;
+        if (gpu_mesh_result_->point_cloud && state_.capture_count>0) {
+            captured_clouds_.resize(state_.capture_count);
+            captured_clouds_.back()=gpu_mesh_result_;
+        }
         mesh_mode_->setCurrentIndex(gpu_mesh_result_->point_cloud ? 0 : 1);
         tabs_->setCurrentIndex(SceneTab);
         mesh_view_->setGPUMesh(gpu_mesh_result_); refresh();
@@ -300,7 +318,12 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         live_left_ = {}; live_right_ = {};
         controller_.submit([=](auto& w) { if (connected) w.disconnectCameras(); else w.connectCameras(mode); });
     });
-    connect(preview_,&QPushButton::clicked,this,[this] { const bool live = state_.live; if (!live) { live_left_ = {}; live_right_ = {}; tabs_->setCurrentIndex(SceneTab); } controller_.submit([=](auto& w) { w.setLive(!live); }); });
+    const auto start_capture_preview=[this](bool append) {
+        live_left_={}; live_right_={}; tabs_->setCurrentIndex(SceneTab);
+        controller_.submit([append](auto& worker) { worker.startCapturePreview(append); });
+    };
+    connect(retake_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(false); });
+    connect(capture_more_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(true); });
     connect(capture_,&QPushButton::clicked,this,[this] {
         reconstruction_valid_=false; refresh();
         const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
@@ -404,7 +427,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
 }
 void ReconstructionWindow::refresh() {
     if (!reconstruction_valid_ || !state_.depth_ready) { mesh_valid_=false; gpu_upload_pending_=false; }
-    const bool idle = !busy_ && !closing_, frozen = state_.has_rectified && !state_.live;
+    // Result validity controls processing/export. Completed scene geometry has
+    // its own lifetime and survives preview, new inference and failed retakes.
+    // Update it before controls that can cause a synchronous OpenGL repaint.
+    if (closing_) captured_clouds_.clear();
+    const bool replacement=(mesh_valid_ || gpu_upload_pending_) &&
+        (mesh_result_ || (gpu_mesh_result_ && !gpu_mesh_result_->point_cloud));
+    mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
+        ? captured_clouds_.back() : SharedGPUMesh{});
+    const bool idle = !busy_ && !closing_ && !gpu_upload_pending_, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     camera_mode_->setEnabled(idle && !state_.connected);
@@ -413,7 +444,9 @@ void ReconstructionWindow::refresh() {
         camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
     }
     const bool depth_valid = minimum_->value() < maximum_->value();
-    preview_->setEnabled(idle && state_.connected); preview_->setText(state_.live ? "Pause preview" : "Resume preview");
+    retake_->setEnabled(idle && state_.connected && !state_.live);
+    capture_more_->setEnabled(idle && state_.connected && frozen && reconstruction_valid_ && mesh_valid_ &&
+                              state_.capture_count>0 && state_.capture_count<PipelineState::kMaxCaptures);
     capture_->setEnabled(idle && state_.live && state_.engine_ready && depth_valid);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
@@ -445,6 +478,15 @@ void ReconstructionWindow::refresh() {
         : gpu_upload_pending_ ? "Transferring GPU geometry to OpenGL…" : state_.progress_stage;
     progress_->setValue(progress);
     progress_->setFormat(QString::number(progress) + "% · " + progress_stage);
+    for (int i=0; i<PipelineState::kMaxCaptures; ++i) {
+        const bool captured=i<state_.capture_count;
+        auto* segment=capture_segments_[i];
+        if (segment->property("captured").toBool()!=captured) {
+            segment->setProperty("captured",captured);
+            segment->setStyleSheet(captured ? "background: #8b5cf6; border-radius: 2px;"
+                                           : "background: #dce3ed; border-radius: 2px;");
+        }
+    }
     if (!mesh_valid_ && !gpu_upload_pending_ && (mesh_result_ || gpu_mesh_result_)) {
         mesh_result_.reset(); gpu_mesh_result_.reset(); mesh_view_->setMesh({});
     }
@@ -481,6 +523,9 @@ void ReconstructionWindow::refresh() {
         : result_current ? "Depth ready. Switch the camera image or generate a CPU / GPU mesh."
         : frozen ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
         : "Connect cameras to see the left live image in 3D, or import a capture.");
+    if (!captured_clouds_.empty())
+        scene_status_->setText(scene_status_->text()+QString(" · %1 completed %2 visible")
+            .arg(captured_clouds_.size()).arg(captured_clouds_.size()==1 ? "capture" : "captures"));
     showImages();
 }
 void ReconstructionWindow::refreshWorkspace() {
@@ -494,7 +539,9 @@ void ReconstructionWindow::refreshWorkspace() {
     input_panel_->setVisible(scene);
     mask_panel_->setVisible(!scene);
     depth_panel_->setVisible(scene); geometry_panel_->setVisible(scene); save_panel_->setVisible(scene && frozen);
-    for (auto* b : {import_,camera_,preview_,capture_}) b->setVisible(scene);
+    for (auto* b : {import_,camera_,capture_}) b->setVisible(scene);
+    retake_->setVisible(scene && !state_.live);
+    capture_more_->setVisible(scene && frozen);
     camera_mode_->setVisible(scene);
     finish_draw_->setVisible(!scene);
     run_->setVisible(scene && frozen);
