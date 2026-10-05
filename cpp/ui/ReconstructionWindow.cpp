@@ -250,9 +250,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(show_log,&QPushButton::toggled,this,[show_log](bool shown) { show_log->setText(shown ? "Hide log" : "Show log"); });
     connect(&controller_,&PipelineController::log,this,[this](const QString& message) { log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss") + "  " + message); });
     connect(&controller_,&PipelineController::stateChanged,this,[this](PipelineState state) {
+        const bool just_connected = state.connected && !state_.connected;
         if (state.live || state.image_id != state_.image_id) reconstruction_valid_ = false;
         if (state.capture_count==0) captured_clouds_.clear();
         state_ = std::move(state); refresh();
+        if (just_connected) mesh_view_->resetCaptureView();
     });
     connect(&controller_,&PipelineController::busyChanged,this,[this](bool busy) { busy_ = busy; if (busy) { render_error_.clear(); elapsed_.start(); } else time_->setText(QString("Last task: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); refresh(); });
     connect(&controller_,&PipelineController::images,this,[this](QImage rl,QImage rr) {
@@ -326,6 +328,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(retake_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(false); });
     connect(capture_more_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(true); });
     connect(capture_,&QPushButton::clicked,this,[this] {
+        mesh_view_->preserveView();
         reconstruction_valid_=false; refresh();
         const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
         const bool denoise=denoise_->isChecked();
@@ -520,7 +523,7 @@ void ReconstructionWindow::refresh() {
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "")
         : mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")
         .arg(mesh_result_->vertices.size()).arg(mesh_result_->triangles.size()).arg(mesh_result_->area_m2*1e4,0,'f',2)
-        : state_.live ? "LIVE · Capture a pair to automatically reconstruct the valid point cloud."
+        : state_.live ? "LIVE · Pixel point cloud at 40 cm · Capture a pair to reconstruct depth."
         : result_current ? "Depth ready. Switch the camera image or generate a CPU / GPU mesh."
         : frozen ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
         : "Connect cameras to see the left live image in 3D, or import a capture.");
@@ -559,6 +562,7 @@ void ReconstructionWindow::showImages() {
     const bool show_depth = depth_available && camera_image_mode_->currentIndex()==1;
     const auto camera = state_.live || !state_.has_rectified ? state_.live_camera : state_.image_camera;
     mesh_view_->setCamera(camera);
+    mesh_view_->setLivePreview(state_.live);
     mesh_view_->setCameraImage(show_depth ? depth_image_ : state_.live ? live_left_ : rectified_left_);
     mesh_view_->setRightCameraImage(state_.live ? live_right_ : rectified_right_);
     depth_status_->setVisible(show_depth);
