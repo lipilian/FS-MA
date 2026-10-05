@@ -21,8 +21,12 @@ class MeshView : public QWidget {
     void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden = {});
     void setMode(int mode);
     void resetView();
+    void resetCaptureView();
+    // Keep the current scene framing while Capture replaces preview geometry.
+    void preserveView();
     void setRightCameraVisible(bool visible);
     void setCamera(const std::optional<fs::MeshCamera>& camera);
+    void setLivePreview(bool enabled);
     void setCameraImage(QImage image);
     void setRightCameraImage(QImage image);
 

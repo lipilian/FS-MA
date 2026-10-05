@@ -136,11 +136,6 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
     mesh.area_m2=source.stats.area_m2;
     return mesh;
 }
-QImage thumbnail(const cv::Mat& rgb) {
-    cv::Mat small;
-    cv::resize(rgb, small, {}, std::min(1.0, 960.0 / rgb.cols), std::min(1.0, 960.0 / rgb.cols));
-    return image(small);
-}
 }
 PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, SharedStereoSource source,
                                std::shared_ptr<std::atomic_bool> cancel, double exposure_us)
@@ -400,7 +395,7 @@ QString PipelineWorker::liveStatus() const {
 }
 void PipelineWorker::emitPreview() {
     if (state_.camera_mode == CameraMode::RealSenseD435) {
-        emit preview(thumbnail(latest_->left.rgb), thumbnail(latest_->right.rgb));
+        emit preview(image(latest_->left.rgb), image(latest_->right.rgb));
         return;
     }
     if (preview_left_map_x_.empty()) {
@@ -420,7 +415,8 @@ void PipelineWorker::emitPreview() {
     }
     cv::remap(latest_->left.rgb, preview_left_, preview_left_map_x_, preview_left_map_y_, cv::INTER_LINEAR);
     cv::remap(latest_->right.rgb, preview_right_, preview_right_map_x_, preview_right_map_y_, cv::INTER_LINEAR);
-    emit preview(thumbnail(preview_left_), thumbnail(preview_right_));
+    // Preserve every rectified pixel for the GPU's fixed-depth preview grid.
+    emit preview(image(preview_left_), image(preview_right_));
 }
 void PipelineWorker::poll() {
     if (!state_.live) return;
