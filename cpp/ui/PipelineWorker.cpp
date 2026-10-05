@@ -382,10 +382,18 @@ void PipelineWorker::startCapturePreview(bool append) {
             throw std::runtime_error("Reconstruct the current pair before capturing another.");
     }
     setLive(true); // Validate camera availability before changing the capture target.
+    const bool clear_single_view = !append && captures_.size()==1;
     if (append) capture_slot_=int(captures_.size());
-    // Retake keeps the current slot, including an unfinished additional capture.
-    // Its previous successful result is retained until the replacement succeeds.
+    else if (clear_single_view) {
+        captures_.clear(); capture_slot_=0; state_.capture_count=0;
+        state_.gpu_ready=false; state_.depth_ready=false;
+        latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
+        mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
+    }
+    // Multi-view retakes keep the current slot (including an unfinished extra
+    // capture) and retain completed views until a replacement succeeds.
     state_.status=append ? "Move to the next view, then capture a pair. Earlier captures are retained."
+                         : clear_single_view ? "Previous reconstruction cleared. Reframe and capture a new pair."
                          : "Reframe the current view, then capture a replacement pair.";
 }
 QString PipelineWorker::liveStatus() const {

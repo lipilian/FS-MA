@@ -95,7 +95,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     }
     camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
     retake_ = button("Retake", "retake"); capture_more_ = button("Capture more", "captureMore");
-    retake_->setToolTip("Return to preview and replace the latest pair. Earlier captures are retained.");
+    retake_->setToolTip("Return to preview. A single view's reconstruction is cleared; with multiple views, completed captures are retained until the replacement succeeds.");
     capture_more_->setToolTip("Keep completed captures and preview the next view. Up to five pairs.");
     capture_ = button("Capture pair", "capturePair");
     capture_->setToolTip("Capture, reconstruct and display all valid points automatically. No mask drawing required.");
