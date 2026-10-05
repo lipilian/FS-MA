@@ -145,7 +145,6 @@ layout(location = 1) in vec3 color;
 uniform mat4 matrix;
 uniform bool deviceMesh;
 uniform bool previewPoints;
-uniform float previewOffset;
 uniform sampler2D cameraImage;
 uniform vec3 center;
 uniform float scale;
@@ -154,8 +153,7 @@ out vec3 point;
 out vec2 uv;
 void main() {
     point=position;
-    vec3 world=position+vec3(previewPoints ? previewOffset : 0.0,0.0,0.0);
-    vec3 p=deviceMesh ? (world-center)/scale*vec3(1.0,-1.0,-1.0) : position;
+    vec3 p=deviceMesh ? (position-center)/scale*vec3(1.0,-1.0,-1.0) : position;
     gl_Position=deviceMesh && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
     gl_PointSize=1.0;
     tint=color;
@@ -331,7 +329,7 @@ void main() {
         gl_->glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         vao_.release();
-        if (live_preview_ && preview_count_ > 0) {
+        if (live_preview_ && preview_count_ > 0 && !camera_images_[0].isNull() && texture_sizes_[0] == preview_size_) {
             program_->setUniformValue("deviceMesh",true);
             program_->setUniformValue("shaded",false);
             program_->setUniformValue("wireframe",false);
@@ -339,14 +337,10 @@ void main() {
             program_->setUniformValue("previewPoints",true);
             program_->setUniformValue("cameraImage",0);
             preview_vao_.bind();
-            for (int camera=0; camera<(right_camera_visible_ ? 2 : 1); ++camera) {
-                if (camera_images_[camera].isNull() || texture_sizes_[camera] != preview_size_) continue;
-                // The optional right image remains a side-by-side comparison.
-                program_->setUniformValue("previewOffset",camera * preview_right_offset_);
-                gl_->glActiveTexture(GL_TEXTURE0);
-                gl_->glBindTexture(GL_TEXTURE_2D,textures_[camera]);
-                gl_->glDrawArrays(GL_POINTS,0,preview_count_);
-            }
+            // Only the left image supplies the fixed-depth preview points.
+            gl_->glActiveTexture(GL_TEXTURE0);
+            gl_->glBindTexture(GL_TEXTURE_2D,textures_[0]);
+            gl_->glDrawArrays(GL_POINTS,0,preview_count_);
             preview_vao_.release();
             gl_->glBindTexture(GL_TEXTURE_2D,0);
             program_->setUniformValue("previewPoints",false);
@@ -499,7 +493,7 @@ void main() {
                 const float height=float(camera->image_size.height*z/k(1,1));
                 center_=QVector3D(float((camera->image_size.width*.5-k(0,2))*z/k(0,0)),
                                   float((camera->image_size.height*.5-k(1,2))*z/k(1,1)),z*.8f);
-                if (right_camera_visible_) center_.setX(center_.x()+width*.6f);
+                if (right_camera_visible_ && !live_preview_) center_.setX(center_.x()+width*.6f);
                 scale_=std::max({width,height,z*1.6f});
             }
             return;
@@ -685,7 +679,6 @@ void main() {
         preview_size_=size;
         preview_camera_=camera;
         preview_count_=int(count);
-        preview_right_offset_=float(camera->image_size.width*kPreviewDepth/k(0,0))*1.2f;
         preview_geometry_dirty_=false;
         emit owner_->log(QString("GPU preview: cached %1 × %2 points at 0.40 m; subsequent frames update color only.")
                              .arg(size.width()).arg(size.height()));
@@ -701,13 +694,11 @@ void main() {
         if (live_preview_ && validCamera(metadata)) {
             const auto& k=metadata->intrinsics;
             const auto size=metadata->image_size;
-            const float right_offset=float(size.width*kPreviewDepth/k(0,0))*1.2f;
-            for (int camera=0; camera<(right_camera_visible_ ? 2 : 1); ++camera)
-                for (int u : {0,size.width}) for (int v : {0,size.height}) {
-                    const cv::Vec3f world(float((u-k(0,2))*kPreviewDepth/k(0,0))+camera*right_offset,
-                                         float((v-k(1,2))*kPreviewDepth/k(1,1)),kPreviewDepth);
-                    camera_radius_=std::max(camera_radius_,float(cv::norm((world-center)/scale_)));
-                }
+            for (int u : {0,size.width}) for (int v : {0,size.height}) {
+                const cv::Vec3f world(float((u-k(0,2))*kPreviewDepth/k(0,0)),
+                                     float((v-k(1,2))*kPreviewDepth/k(1,1)),kPreviewDepth);
+                camera_radius_=std::max(camera_radius_,float(cv::norm((world-center)/scale_)));
+            }
         }
         // Keep each completed capture's frustum even when live calibration or
         // the active input changes. Poses are still local camera coordinates;
@@ -825,7 +816,6 @@ void main() {
     std::optional<fs::MeshCamera> preview_camera_;
     QSize preview_size_;
     int preview_count_{};
-    float preview_right_offset_{};
     bool live_preview_{false}, preview_geometry_dirty_{true};
     std::optional<fs::MeshCamera> camera_;
     std::array<QImage, 2> camera_images_;
