@@ -160,7 +160,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     mesh_mode_=new QComboBox; mesh_mode_->addItems({"Point cloud","Mesh","Wireframe"}); mesh_mode_->setCurrentIndex(0); mesh_mode_->setObjectName("meshMode");
     auto* reset=button("Reset view","resetMeshView");
     auto* show_right_camera=new QCheckBox("Show right camera"); show_right_camera->setObjectName("showRightCamera");
-    show_right_camera->setToolTip("Show the rectified right image beside the left camera, with the same image-plane size.");
+    show_right_camera->setToolTip("Show only the rectified right image beside the left camera, with the same image-plane size.");
     scene_controls->addWidget(camera_image_mode_); scene_controls->addWidget(show_right_camera);
     scene_controls->addWidget(mesh_mode_); scene_controls->addWidget(reset); scene_controls->addStretch();
     scene_layout->addLayout(scene_controls);
