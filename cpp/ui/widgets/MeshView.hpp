@@ -24,6 +24,7 @@ class MeshView : public QWidget {
     void resetCaptureView();
     // Keep the current scene framing while Capture replaces preview geometry.
     void preserveView();
+    void setProcessing(bool processing);
     void setRightCameraVisible(bool visible);
     void setCamera(const std::optional<fs::MeshCamera>& camera);
     void setLivePreview(bool enabled);

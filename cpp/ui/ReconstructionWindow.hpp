@@ -38,6 +38,7 @@ private:
     SharedGPUMesh gpu_mesh_result_;
     std::vector<SharedGPUMesh> captured_clouds_;
     bool gpu_upload_pending_{false};
+    bool capture_processing_{false};
     QString render_error_;
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
