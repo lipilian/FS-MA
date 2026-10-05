@@ -256,7 +256,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         state_ = std::move(state); refresh();
         if (just_connected) mesh_view_->resetCaptureView();
     });
-    connect(&controller_,&PipelineController::busyChanged,this,[this](bool busy) { busy_ = busy; if (busy) { render_error_.clear(); elapsed_.start(); } else time_->setText(QString("Last task: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); refresh(); });
+    connect(&controller_,&PipelineController::busyChanged,this,[this](bool busy) {
+        busy_ = busy;
+        if (busy) { render_error_.clear(); elapsed_.start(); }
+        else {
+            time_->setText(QString("Last task: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1));
+            if (capture_processing_ && (state_.action_failed || !gpu_upload_pending_)) {
+                capture_processing_=false; mesh_view_->setProcessing(false);
+            }
+        }
+        refresh();
+    });
     connect(&controller_,&PipelineController::images,this,[this](QImage rl,QImage rr) {
         rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
         reconstruction_valid_=false; mask_->setImage(rectified_left_); save_mask_->setChecked(false); tabs_->setCurrentIndex(SceneTab);
@@ -286,9 +296,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(mesh_view_,&MeshView::gpuMeshPresented,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_ || mesh!=gpu_mesh_result_) return;
+        capture_processing_=false; mesh_view_->setProcessing(false);
         gpu_upload_pending_=false; mesh_valid_=true; refresh();
     },Qt::QueuedConnection); // Updating the progress bar may repaint; wait until paintGL returns.
     connect(mesh_view_,&MeshView::renderFailed,this,[this](const QString& message) {
+        capture_processing_=false; mesh_view_->setProcessing(false);
         render_error_=message; gpu_upload_pending_=false; mesh_valid_=false; refresh();
         scene_status_->setText(message); status_->setText(message);
         log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss")+"  "+message);
@@ -329,6 +341,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(capture_more_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(true); });
     connect(capture_,&QPushButton::clicked,this,[this] {
         mesh_view_->preserveView();
+        capture_processing_=true; mesh_view_->setProcessing(true);
         reconstruction_valid_=false; refresh();
         const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
         const bool denoise=denoise_->isChecked();
@@ -514,7 +527,8 @@ void ReconstructionWindow::refresh() {
         (!save_mesh_->isChecked() || (mesh_valid_ && (mesh_result_ || gpu_mesh_result_)));
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
     save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && (mesh_result_ || gpu_mesh_result_) && !save_directory_->text().isEmpty());
-    scene_status_->setText(point_cloud ? QString("%1 point cloud · %2 valid points%3")
+    scene_status_->setText(capture_processing_ ? "Processing · Reconstructing the captured point cloud…"
+        : point_cloud ? QString("%1 point cloud · %2 valid points%3")
         .arg(gpu_mesh_result_ ? "GPU" : "RGB")
         .arg(gpu_mesh_result_ ? gpu_mesh_result_->stats.point_count : mesh_result_->vertices.size())
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "")
@@ -570,6 +584,7 @@ void ReconstructionWindow::showImages() {
 void ReconstructionWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }
     event->ignore(); if (closing_) return;
+    capture_processing_=false; mesh_view_->setProcessing(false);
     closing_ = true; gpu_upload_pending_=false; mesh_valid_=false; mask_request_id_=controller_.requestMask(state_.image_id,{}); refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
 }
 void ReconstructionWindow::allowClose() { allow_close_ = true; close(); }
