@@ -1,9 +1,11 @@
 #include "fs/inference/MA-VGGT.hpp"
 #include "fs/inference/MAPreprocessing.hpp"
+#include "fs/stereo/StereoFrame.hpp"
 
 #include <NvInfer.h>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -154,10 +156,19 @@ float* MA_VGGT::depthsDevice() const noexcept { return impl_->depths.get(); }
 float* MA_VGGT::posesDevice() const noexcept { return impl_->poses.get(); }
 float* MA_VGGT::scaleDevice() const noexcept { return impl_->scale.get(); }
 
-void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb) {
+void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera) {
     require(view_index >= 0 && view_index < kMaxViews, "RGB view index must be in 0..4");
     require(!rectified_rgb.empty() && rectified_rgb.type() == CV_8UC3,
             "RGB upload requires a nonempty CV_8UC3 RGB image");
+    const double scale_x = double(kInputWidth) / rectified_rgb.cols;
+    const double scale_y = double(kInputHeight) / rectified_rgb.rows;
+    const float fx = float(camera.fx * scale_x), fy = float(camera.fy * scale_y);
+    // The notebook's OpenCV -> COLMAP -> OpenCV pixel-center adjustment,
+    // adapted to independent X/Y resize scales with no crop or crop offset.
+    const float cx = float((camera.cx + 0.5) * scale_x - 0.5);
+    const float cy = float((camera.cy + 0.5) * scale_y - 0.5);
+    require(std::isfinite(fx) && fx > 0.0F && std::isfinite(fy) && fy > 0.0F &&
+            std::isfinite(cx) && std::isfinite(cy), "RGB upload requires valid resized camera intrinsics");
     auto& upload = impl_->color_upload;
     cv::resize(rectified_rgb, upload.resized, cv::Size(kInputWidth, kInputHeight),
                0.0, 0.0, cv::INTER_LANCZOS4);
@@ -174,8 +185,8 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb) {
             destination[2 * kColorPlane + offset] = float(row[x][2]);
         }
     }
-    float* rgb = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
-    checkCuda(cudaMemcpyAsync(rgb, destination, kColorElements * sizeof(float), cudaMemcpyHostToDevice, stream()),
+    float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    checkCuda(cudaMemcpyAsync(view_input, destination, kColorElements * sizeof(float), cudaMemcpyHostToDevice, stream()),
               "cannot upload RGB input");
     const auto error = cudaEventRecord(upload.done, stream());
     // If recording fails, finish the copy before the staging buffer can be reused.
@@ -185,9 +196,10 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb) {
     }
     upload.pending = true;
     // Same-stream ordering starts this kernel after H2D, without a CPU wait.
-    // The event above protects only host staging; the kernel uses device RGB.
-    checkCuda(ma_preprocessing::normalize_dinov2_rgb(rgb, kInputWidth, kInputHeight, stream()),
-              "cannot launch DINOv2 RGB normalization");
+    // The event above protects only host staging; the kernel uses device input.
+    checkCuda(ma_preprocessing::prepare_rgb_and_rays(view_input, kInputWidth, kInputHeight,
+                                                    fx, fy, cx, cy, stream()),
+              "cannot launch RGB normalization and camera rays");
 }
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {
