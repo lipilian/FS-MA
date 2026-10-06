@@ -5,13 +5,11 @@
 #include <filesystem>
 #include <memory>
 
-class FS;
-
 namespace fs {
 
 // MapAnything dynamic RAW engine (the MA-VGGT integration entry point).
-// Calls must be serialized with FS on the pipeline thread. Keeps FS alive and
-// borrows its CUDA stream; never creates or destroys a separate stream.
+// Owns a non-blocking CUDA stream independently of FS. Calls on this instance
+// must be serialized on the pipeline thread.
 class MA_VGGT {
 public:
     static constexpr int kMinViews = 2;
@@ -25,8 +23,8 @@ public:
     static constexpr std::size_t kIOBytes =
         (kInputElements + kDepthElements + kPoseElements + kScaleElements) * sizeof(float);
 
-    // Allocate all four FP32 I/O buffers once, with capacity for V=5.
-    explicit MA_VGGT(std::shared_ptr<FS> fs);
+    // Create the stream and allocate all four FP32 I/O buffers once for V=5.
+    MA_VGGT();
     ~MA_VGGT();
     MA_VGGT(const MA_VGGT&) = delete;
     MA_VGGT& operator=(const MA_VGGT&) = delete;
@@ -37,11 +35,12 @@ public:
     // previous model; both successful and failed reloads preserve I/O addresses.
     void loadEngine(const std::filesystem::path& path);
     bool isLoaded() const noexcept;
-    cudaStream_t stream() const noexcept;
+    cudaStream_t stream() const noexcept; // Borrowed handle; do not destroy.
 
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;
-    // queue accesses on stream(), serialized with FS and model loading.
+    // queue accesses on stream(), serialized with model loading. Access from
+    // another stream requires explicit synchronization by the caller.
     float* inputDevice() const noexcept;  // [5,7,434,518]
     float* depthsDevice() const noexcept; // [5,6,434,518]
     float* posesDevice() const noexcept;  // [5,7]
