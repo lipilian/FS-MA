@@ -221,11 +221,11 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
         checkpoint();
         emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
         state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
-        auto ma = std::make_unique<fs::MA_VGGT>(next);
+        auto ma = std::make_unique<fs::MA_VGGT>();
         ma->loadEngine(state_.ma_engine_path.toStdString());
         checkpoint();
         emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
-                 "Shares the FS CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace deferred.\n"+state_.ma_engine_path);
+                 "Owns an independent non-blocking CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace deferred.\n"+state_.ma_engine_path);
         sam_ = std::move(sam); ma_ = std::move(ma);
         state_.sam_ready = true; state_.ma_ready = true;
         fs_ = std::move(next);

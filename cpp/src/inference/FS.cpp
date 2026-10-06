@@ -213,6 +213,7 @@ void FS::loadEngine(const std::filesystem::path& engine_path) {
         execution_context_.reset();
         throw;
     }
+    std::cout << "[FS] CUDA stream: independent, non-blocking" << std::endl;
 }
 
 void FS::allocate_input_buffers() {
