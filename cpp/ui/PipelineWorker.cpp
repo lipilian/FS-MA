@@ -225,7 +225,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
         ma->loadEngine(state_.ma_engine_path.toStdString());
         checkpoint();
         emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
-                 "Owns an independent non-blocking CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace deferred.\n"+state_.ma_engine_path);
+                 "Owns an independent non-blocking CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace allocated on first inference.\n"+state_.ma_engine_path);
         sam_ = std::move(sam); ma_ = std::move(ma);
         state_.sam_ready = true; state_.ma_ready = true;
         fs_ = std::move(next);
@@ -320,6 +320,7 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     // A successfully imported input starts a new capture sequence. Failed imports
     // leave the existing sequence intact.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
+    if (ma_) ma_->resetInputs();
 }
 void PipelineWorker::connectCameras(CameraMode mode) {
     if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
@@ -386,6 +387,7 @@ void PipelineWorker::startCapturePreview(bool append) {
     if (append) capture_slot_=int(captures_.size());
     else if (clear_single_view) {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
+        if (ma_) ma_->resetInputs();
         state_.gpu_ready=false; state_.depth_ready=false;
         latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
         mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
@@ -553,6 +555,22 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
     buildPointCloud(mask);
+    // A successful cloud build retains this capture (or replaces its retake
+    // slot), so use the committed view count rather than capture_slot_ + 1.
+    const int views = int(captures_.size());
+    if (views >= fs::MA_VGGT::kMinViews) {
+        reportProgress(97, QString("Running MapAnything inference on %1 views…").arg(views));
+        elapsed.restart();
+        ma_->inference(views);
+        ma_->synchronize();
+        checkpoint();
+        emit log(QString("MA inference complete · %1 views · %2 ms · raw depths/poses/scale on GPU · independent stream")
+            .arg(views).arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
+        state_.status = QString("Capture complete · MapAnything inference finished for %1 views.").arg(views);
+        publish();
+    } else {
+        emit log("MA input ready for view 1 · inference starts at 2 views.");
+    }
 }
 void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
     reportProgress(92, "Building valid point cloud on GPU…");

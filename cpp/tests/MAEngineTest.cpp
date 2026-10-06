@@ -2,6 +2,7 @@
 #include "fs/inference/MA-VGGT.hpp"
 
 #include <opencv2/imgproc.hpp>
+#include <algorithm>
 #include <chrono>
 #include <array>
 #include <cmath>
@@ -31,7 +32,7 @@ bool deviceAllocation(const float* pointer) {
     checked(error);
     return attributes.type == cudaMemoryTypeDevice;
 }
-template<class Action> void rejects(Action action, const char* expected) {
+template<class Action> void rejects(Action action, const std::string& expected) {
     try { action(); }
     catch (const std::runtime_error& error) {
         require(std::string(error.what()).find(expected) != std::string::npos, "Unexpected error");
@@ -234,6 +235,70 @@ void checkDepthUploads(fs::MA_VGGT& model) {
     checkContents();
 }
 
+void checkInference(fs::MA_VGGT& model) {
+    constexpr std::size_t plane = std::size_t{fs::MA_VGGT::kInputHeight} * fs::MA_VGGT::kInputWidth;
+    const auto pointers = devicePointers(model);
+    const StereoCameraParameters camera{540, 525, 310.5, 235.25, 0};
+    model.resetInputs();
+    rejects([&] { model.inference(1); }, "2..5 views");
+    rejects([&] { model.inference(6); }, "2..5 views");
+    rejects([&] { model.inference(2); }, "view 1");
+    rejects([&] { model.uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
+
+    const auto run = [&](int views) {
+        const std::array<std::size_t, 3> capacities{fs::MA_VGGT::kDepthElements, fs::MA_VGGT::kPoseElements, 1};
+        const std::array<std::size_t, 3> counts{std::size_t(views) * 6 * plane, std::size_t(views) * 7, 1};
+        for (int i = 0; i < 3; ++i)
+            checked(cudaMemsetAsync(pointers[i + 1], 0xff, capacities[i] * sizeof(float), model.stream()));
+        // Queue directly after input preparation; inference must order itself
+        // after the RGB/ray/distance kernels on the MA-owned stream.
+        const auto start = std::chrono::steady_clock::now();
+        model.inference(views);
+        model.synchronize();
+        std::cout << "MA inference V=" << views << ": "
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
+                  << " ms\n";
+        require(devicePointers(model) == pointers, "Inference replaced persistent I/O allocations");
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (int tensor = 0; tensor < 3; ++tensor) {
+            std::vector<float> output(capacities[tensor]);
+            checked(cudaMemcpy(output.data(), pointers[tensor + 1], output.size() * sizeof(float), cudaMemcpyDeviceToHost));
+            for (std::size_t i = 0; i < output.size(); ++i) {
+                std::uint32_t bits{};
+                std::memcpy(&bits, &output[i], sizeof(bits));
+                if (i < counts[tensor]) {
+                    require(std::isfinite(output[i]), "MA inference did not produce finite raw outputs for every active view");
+                    hash = (hash ^ bits) * 1099511628211ULL;
+                } else {
+                    require(bits == 0xffffffffU, "Inference wrote outside its active view count");
+                }
+            }
+        }
+        return hash;
+    };
+    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+        cv::Mat rgb(480, 640, CV_8UC3);
+        for (int y = 0; y < rgb.rows; ++y) {
+            auto* row = rgb.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < rgb.cols; ++x)
+                row[x] = cv::Vec3b((x + v * 19) % 256, (y * 2 + v * 11) % 256, (x + y + v * 7) % 256);
+        }
+        model.uploadColor(v, rgb, camera);
+        rejects([&] { model.inference(std::max(2, v + 1)); }, "view " + std::to_string(v + 1));
+        model.uploadDepth(v, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.35 + v * 0.02)));
+        if (v == 0) rejects([&] { model.inference(2); }, "view 2");
+        else run(v + 1);
+    }
+    // Verify a second enqueue safely handles a still-pending context and a
+    // shrinking shape, without reallocating the I/O or consuming trailing views.
+    model.inference(5);
+    const auto before = run(2);
+    model.uploadColor(1, cv::Mat(480, 640, CV_8UC3, cv::Scalar(190, 50, 70)), camera);
+    rejects([&] { model.inference(2); }, "view 2"); // Retake must replace depth too.
+    model.uploadDepth(1, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.55)));
+    require(run(2) != before, "Retake input did not affect MA outputs");
+}
+
 struct TempDirectory {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
         ("fs_ma_engine_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -250,6 +315,7 @@ int main(int argc, char** argv) {
         std::ofstream(empty).close();
         // MA can be constructed without FS and owns a non-blocking stream.
         auto model = std::make_unique<fs::MA_VGGT>();
+        rejects([&] { model->inference(2); }, "Load an engine");
         rejects([&] { model->uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
         const auto ma_stream = model->stream();
         require(!model->isLoaded() && ma_stream, "Incorrect initial model or stream");
@@ -302,6 +368,8 @@ int main(int argc, char** argv) {
         checkBuffers();
         checkColorUploads(*model);
         checkDepthUploads(*model);
+        checkInference(*model);
+        model->inference(2); // Destruction must drain inference before freeing workspace and I/O.
         model.reset();
         for (const auto* pointer : pointers)
             require(!deviceAllocation(pointer), "Destructor retained a GPU I/O allocation");
@@ -326,7 +394,7 @@ int main(int argc, char** argv) {
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view Lanczos4 uploads with fused GPU DINOv2 normalization/unit camera rays and metric ray distance, pixel-center resize geometry, retake updates, invalid depth/ringing cleanup, channel isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
+        std::cout << "PASS: persistent GPU I/O, engine reload/error handling, Lanczos4 RGB/ray/distance preparation, invalid depth cleanup, real V=2..5 MA inference, shrinking shapes, Retake readiness/output updates, output bounds, GPU buffer release with pending inference, independent streams and FS/MA lifetimes\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

@@ -57,10 +57,23 @@ public:
     // views are preserved. Source storage may be reused when this returns.
     void uploadDepth(int view_index, const cv::Mat& depth_z);
 
+    // Forget prepared slots when starting a new capture sequence.
+    void resetInputs() noexcept;
+
+    // Enqueue the first view_count complete slots (2..5) on our stream, after
+    // their queued RGB/ray/depth preparation. Allocates the engine's maximum
+    // activation workspace on first use and reuses it thereafter. A preceding
+    // inference is completed before modifying the context's dynamic shape.
+    // Retaking RGB invalidates that slot's depth until uploadDepth is called.
+    void inference(int view_count);
+    void synchronize();
+
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;
     // queue accesses on stream(), serialized with model loading. Access from
     // another stream requires explicit synchronization by the caller.
+    // After inference + synchronize, the first V entries hold RAW model heads
+    // (before MapAnything output adaptors); a later inference replaces them.
     float* inputDevice() const noexcept;  // [5,7,434,518]
     float* depthsDevice() const noexcept; // [5,6,434,518]
     float* posesDevice() const noexcept;  // [5,7]
