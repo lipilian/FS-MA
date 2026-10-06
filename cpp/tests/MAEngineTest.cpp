@@ -4,6 +4,7 @@
 #include <opencv2/imgproc.hpp>
 #include <chrono>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -42,6 +43,7 @@ void checkColorUploads(fs::MA_VGGT& model) {
     constexpr int h = fs::MA_VGGT::kInputHeight, w = fs::MA_VGGT::kInputWidth;
     constexpr std::size_t plane = std::size_t{h} * w;
     constexpr std::uint32_t untouched = 0x3f3f3f3fU;
+    constexpr std::array<double, 3> mean{0.485, 0.456, 0.406}, stddev{0.229, 0.224, 0.225};
     std::array<cv::Mat, fs::MA_VGGT::kMaxViews> expected;
     const auto* input = model.inputDevice();
     checked(cudaMemsetAsync(model.inputDevice(), 0x3f, fs::MA_VGGT::kInputElements * sizeof(float), model.stream()));
@@ -57,8 +59,9 @@ void checkColorUploads(fs::MA_VGGT& model) {
                     for (int x = 0; x < w; ++x) {
                         const auto offset = (v * 7 + c) * plane + y * w + x;
                         if (c < 3 && !expected[v].empty()) {
-                            require(actual[offset] == float(expected[v].at<cv::Vec3b>(y, x)[c]),
-                                    "Uploaded RGB differs from raw FP32 CHW Lanczos4 resize (crop, normalization, channel order or slot mismatch)");
+                            const double reference = (double(expected[v].at<cv::Vec3b>(y, x)[c]) / 255.0 - mean[c]) / stddev[c];
+                            require(std::abs(double(actual[offset]) - reference) <= 1e-6,
+                                    "GPU RGB differs from Lanczos4 resize + DINOv2 normalization (channel order, slot or repeated normalization mismatch)");
                         } else {
                             std::uint32_t bits{};
                             std::memcpy(&bits, &actual[offset], sizeof(bits));
@@ -90,10 +93,12 @@ void checkColorUploads(fs::MA_VGGT& model) {
     checkContents();
 
     // Retake the last view; all earlier views and all geometry must survive.
-    const cv::Mat replacement(700, 300, CV_8UC3, cv::Scalar(12, 34, 250));
-    expected.back() = cv::Mat(h, w, CV_8UC3, cv::Scalar(12, 34, 250));
+    const cv::Mat replacement(700, 300, CV_8UC3, cv::Scalar(0, 127, 255));
+    expected.back() = cv::Mat(h, w, CV_8UC3, cv::Scalar(0, 127, 255));
     model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement);
     checkContents();
+    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement);
+    checkContents(); // Re-upload starts from raw RGB; it must not normalize twice.
     rejects([&] { model.uploadColor(-1, replacement); }, "view index");
     rejects([&] { model.uploadColor(fs::MA_VGGT::kMaxViews, replacement); }, "view index");
     rejects([&] { model.uploadColor(0, cv::Mat{}); }, "CV_8UC3");
@@ -190,7 +195,7 @@ int main(int argc, char** argv) {
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view raw FP32 Lanczos4 RGB uploads and retake isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
+        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view FP32 Lanczos4 RGB uploads with GPU DINOv2 normalization and retake isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

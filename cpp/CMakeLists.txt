@@ -52,6 +52,7 @@ add_library(fs_core STATIC
     src/geometry/MeshBuilderGPU.cu
     src/inference/FS.cpp
     src/inference/MA-VGGT.cpp
+    src/inference/MAPreprocessing.cu
     src/inference/SamSegmenter.cpp
     src/inference/PostProcessing.cu
     src/core/Logger.cpp

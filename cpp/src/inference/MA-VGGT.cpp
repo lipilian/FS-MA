@@ -1,4 +1,5 @@
 #include "fs/inference/MA-VGGT.hpp"
+#include "fs/inference/MAPreprocessing.hpp"
 
 #include <NvInfer.h>
 #include <opencv2/imgproc.hpp>
@@ -173,8 +174,8 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb) {
             destination[2 * kColorPlane + offset] = float(row[x][2]);
         }
     }
-    checkCuda(cudaMemcpyAsync(inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane,
-                              destination, kColorElements * sizeof(float), cudaMemcpyHostToDevice, stream()),
+    float* rgb = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    checkCuda(cudaMemcpyAsync(rgb, destination, kColorElements * sizeof(float), cudaMemcpyHostToDevice, stream()),
               "cannot upload RGB input");
     const auto error = cudaEventRecord(upload.done, stream());
     // If recording fails, finish the copy before the staging buffer can be reused.
@@ -183,6 +184,10 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb) {
         checkCuda(error, "cannot record RGB upload completion");
     }
     upload.pending = true;
+    // Same-stream ordering starts this kernel after H2D, without a CPU wait.
+    // The event above protects only host staging; the kernel uses device RGB.
+    checkCuda(ma_preprocessing::normalize_dinov2_rgb(rgb, kInputWidth, kInputHeight, stream()),
+              "cannot launch DINOv2 RGB normalization");
 }
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {
