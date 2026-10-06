@@ -1,5 +1,6 @@
 #include "fs/inference/FS.hpp"
 #include "fs/inference/MA-VGGT.hpp"
+#include "fs/inference/MAPostprocessing.hpp"
 
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
@@ -235,11 +236,32 @@ void checkDepthUploads(fs::MA_VGGT& model) {
     checkContents();
 }
 
+void checkCameraPoseDecoding() {
+    // A non-identity first camera must stay in the predicted world: 90 degrees
+    // about Z and translation (2,4,6) m after applying exp(log(2)).
+    const float r = std::sqrt(0.5F);
+    std::array<float,14> raw{1,2,3,0,0,3*r,3*r, -.5F,1,.25F,0,0,0,-2};
+    const auto poses = fs::ma_postprocessing::camera_poses(raw.data(),2,std::log(2.0F));
+    const cv::Matx44d first(0,-1,0,2, 1,0,0,4, 0,0,1,6, 0,0,0,1);
+    const cv::Matx44d second(1,0,0,-1, 0,1,0,2, 0,0,1,.5, 0,0,0,1);
+    require(cv::norm(poses[0]-first) < 1e-6 && cv::norm(poses[1]-second) < 1e-6,
+            "Pose decoding changed MA's world frame, quaternion order or metric scale");
+    const auto clamped = fs::ma_postprocessing::camera_poses(raw.data(),2,-100.0F);
+    require(std::abs(clamped[0](0,3)-1e-8) < 1e-14, "MA scale minimum differs from Python adaptor");
+    rejects([&] { fs::ma_postprocessing::camera_poses(raw.data(),1,0); }, "2..5 views");
+    rejects([&] { fs::ma_postprocessing::camera_poses(raw.data(),2,1000); }, "scale");
+    raw[0] = std::numeric_limits<float>::quiet_NaN();
+    rejects([&] { fs::ma_postprocessing::camera_poses(raw.data(),2,0); }, "pose");
+    raw[0] = 1; raw[5] = 0; raw[6] = 0;
+    rejects([&] { fs::ma_postprocessing::camera_poses(raw.data(),2,0); }, "quaternion");
+}
+
 void checkInference(fs::MA_VGGT& model) {
     constexpr std::size_t plane = std::size_t{fs::MA_VGGT::kInputHeight} * fs::MA_VGGT::kInputWidth;
     const auto pointers = devicePointers(model);
     const StereoCameraParameters camera{540, 525, 310.5, 235.25, 0};
     model.resetInputs();
+    rejects([&] { model.downloadCameraPoses(); }, "inference outputs");
     rejects([&] { model.inference(1); }, "2..5 views");
     rejects([&] { model.inference(6); }, "2..5 views");
     rejects([&] { model.inference(2); }, "view 1");
@@ -274,6 +296,22 @@ void checkInference(fs::MA_VGGT& model) {
                 }
             }
         }
+        const auto cameras = model.downloadCameraPoses();
+        require(int(cameras.size()) == views, "Camera download has the wrong view count");
+        std::array<float,fs::MA_VGGT::kPoseElements> raw_poses{};
+        float raw_scale{};
+        checked(cudaMemcpy(raw_poses.data(),model.posesDevice(),views*7*sizeof(float),cudaMemcpyDeviceToHost));
+        checked(cudaMemcpy(&raw_scale,model.scaleDevice(),sizeof(float),cudaMemcpyDeviceToHost));
+        const float scale = std::max(std::exp(raw_scale),1e-8F);
+        for (int v = 0; v < views; ++v) {
+            const auto& pose = cameras[v];
+            for (int c = 0; c < 3; ++c)
+                require(pose(c,3) == raw_poses[v*7+c]*scale, "Camera positions were rebased or use the wrong scale");
+            const cv::Matx33d rotation(pose(0,0),pose(0,1),pose(0,2),pose(1,0),pose(1,1),pose(1,2),
+                                      pose(2,0),pose(2,1),pose(2,2));
+            require(cv::norm(rotation.t()*rotation-cv::Matx33d::eye()) < 1e-6 &&
+                    std::abs(cv::determinant(rotation)-1) < 1e-6, "Invalid predicted camera rotation");
+        }
         return hash;
     };
     for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
@@ -294,6 +332,7 @@ void checkInference(fs::MA_VGGT& model) {
     model.inference(5);
     const auto before = run(2);
     model.uploadColor(1, cv::Mat(480, 640, CV_8UC3, cv::Scalar(190, 50, 70)), camera);
+    rejects([&] { model.downloadCameraPoses(); }, "inference outputs");
     rejects([&] { model.inference(2); }, "view 2"); // Retake must replace depth too.
     model.uploadDepth(1, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.55)));
     require(run(2) != before, "Retake input did not affect MA outputs");
@@ -310,6 +349,7 @@ struct TempDirectory {
 int main(int argc, char** argv) {
     try {
         require(argc == 3, "Usage: fs_ma_engine_test MA.engine SAM_encoder.engine");
+        checkCameraPoseDecoding();
         TempDirectory temp;
         const auto missing = temp.path / "missing.engine", empty = temp.path / "empty.engine";
         std::ofstream(empty).close();
@@ -394,7 +434,7 @@ int main(int argc, char** argv) {
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: persistent GPU I/O, engine reload/error handling, Lanczos4 RGB/ray/distance preparation, invalid depth cleanup, real V=2..5 MA inference, shrinking shapes, Retake readiness/output updates, output bounds, GPU buffer release with pending inference, independent streams and FS/MA lifetimes\n";
+        std::cout << "PASS: persistent GPU I/O, engine reload/error handling, Lanczos4 RGB/ray/distance preparation, invalid depth cleanup, real V=2..5 MA inference, camera pose decoding in the predicted world (first pose preserved), shrinking shapes, Retake readiness/output updates, output bounds, GPU buffer release with pending inference, independent streams and FS/MA lifetimes\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

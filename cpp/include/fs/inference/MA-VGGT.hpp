@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <opencv2/core/matx.hpp>
+#include <vector>
 
 namespace cv { class Mat; }
 struct StereoCameraParameters;
@@ -67,6 +69,11 @@ public:
     // Retaking RGB invalidates that slot's depth until uploadDepth is called.
     void inference(int view_count);
     void synchronize();
+
+    // Download only the latest V poses and scalar scale (at most 144 bytes),
+    // synchronizing our stream, then decode metric camera-to-world matrices.
+    // Preserves the model's world frame, including the first camera's pose.
+    std::vector<cv::Matx44d> downloadCameraPoses();
 
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;

@@ -1,5 +1,6 @@
 #include "fs/inference/MA-VGGT.hpp"
 #include "fs/inference/MAPreprocessing.hpp"
+#include "fs/inference/MAPostprocessing.hpp"
 #include "fs/stereo/StereoFrame.hpp"
 
 #include <NvInfer.h>
@@ -135,6 +136,7 @@ struct Model {
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     int64_t workspace_bytes{};
     bool inference_pending{false};
+    int output_views{0};
 
     explicit Model(cudaStream_t ma_stream) : stream(ma_stream) {}
     // Also complete profile work before destroying an unsuccessful load.
@@ -212,6 +214,7 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const St
     float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
     impl_->rays_ready[view_index] = false;
     impl_->depth_ready[view_index] = false;
+    if (impl_->model) impl_->model->output_views = 0;
     upload.enqueue(view_input, kColorElements, stream());
     // Same-stream ordering starts this kernel after H2D, without a CPU wait.
     // The event above protects only host staging; the kernel uses device input.
@@ -242,6 +245,7 @@ void MA_VGGT::uploadDepth(int view_index, const cv::Mat& depth_z) {
     std::memcpy(upload.host.get(), upload.resized.ptr<float>(), kColorPlane * sizeof(float));
     float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
     impl_->depth_ready[view_index] = false;
+    if (impl_->model) impl_->model->output_views = 0;
     upload.enqueue(view_input + 6 * kColorPlane, kColorPlane, stream());
     // Same-stream ordering waits for both this H2D and the earlier ray kernel.
     checkCuda(ma_preprocessing::prepare_ray_distance(view_input, kInputWidth, kInputHeight, stream()),
@@ -252,6 +256,7 @@ void MA_VGGT::uploadDepth(int view_index, const cv::Mat& depth_z) {
 void MA_VGGT::resetInputs() noexcept {
     impl_->rays_ready.fill(false);
     impl_->depth_ready.fill(false);
+    if (impl_->model) impl_->model->output_views = 0;
 }
 
 void MA_VGGT::inference(int view_count) {
@@ -278,13 +283,33 @@ void MA_VGGT::inference(int view_count) {
             equal(s.context->getTensorShape("poses"), dims({view_count, 7})) &&
             equal(s.context->getTensorShape("scale"), dims({1, 1, 1})), "unexpected inference output shapes");
     // Even a failed enqueue may have submitted work that must be drained.
+    s.output_views = 0;
     s.inference_pending = true;
     require(s.context->enqueueV3(stream()), "TensorRT enqueueV3 failed");
+    s.output_views = view_count;
 }
 
 void MA_VGGT::synchronize() {
     impl_->stream.synchronize();
     if (impl_->model) impl_->model->inference_pending = false;
+}
+
+std::vector<cv::Matx44d> MA_VGGT::downloadCameraPoses() {
+    require(impl_->model && impl_->model->output_views >= kMinViews, "Camera poses require current inference outputs");
+    const int views = impl_->model->output_views;
+    std::array<float, kPoseElements> poses{};
+    float scale{};
+    try {
+        checkCuda(cudaMemcpyAsync(poses.data(), posesDevice(), std::size_t(views) * 7 * sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream()), "cannot download predicted camera poses");
+        checkCuda(cudaMemcpyAsync(&scale, scaleDevice(), sizeof(scale), cudaMemcpyDeviceToHost, stream()),
+                  "cannot download predicted camera scale");
+        synchronize();
+    } catch (...) {
+        cudaStreamSynchronize(stream()); // Keep host destinations alive until queued copies finish.
+        throw;
+    }
+    return ma_postprocessing::camera_poses(poses.data(), views, scale);
 }
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {

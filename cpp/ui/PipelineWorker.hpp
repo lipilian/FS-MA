@@ -40,6 +40,7 @@ struct PipelineState {
     bool action_failed{false};
     quint64 image_id{0};
     std::optional<fs::MeshCamera> live_camera, image_camera;
+    SharedPredictedCameras predicted_cameras;
 };
 Q_DECLARE_METATYPE(PipelineState)
 

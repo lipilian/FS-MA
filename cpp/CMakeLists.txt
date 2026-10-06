@@ -53,6 +53,7 @@ add_library(fs_core STATIC
     src/inference/FS.cpp
     src/inference/MA-VGGT.cpp
     src/inference/MAPreprocessing.cu
+    src/inference/MAPostprocessing.cpp
     src/inference/SamSegmenter.cpp
     src/inference/PostProcessing.cu
     src/core/Logger.cpp

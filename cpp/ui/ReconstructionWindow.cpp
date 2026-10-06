@@ -448,6 +448,7 @@ void ReconstructionWindow::refresh() {
     // its own lifetime and survives preview, new inference and failed retakes.
     // Update it before controls that can cause a synchronous OpenGL repaint.
     if (closing_) captured_clouds_.clear();
+    mesh_view_->setPredictedCameras(closing_ ? SharedPredictedCameras{} : state_.predicted_cameras);
     const bool replacement=(mesh_valid_ || gpu_upload_pending_) &&
         (mesh_result_ || (gpu_mesh_result_ && !gpu_mesh_result_->point_cloud));
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
