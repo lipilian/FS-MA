@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -45,6 +46,8 @@ void checkColorUploads(fs::MA_VGGT& model) {
     constexpr std::uint32_t untouched = 0x3f3f3f3fU;
     constexpr std::array<double, 3> mean{0.485, 0.456, 0.406}, stddev{0.229, 0.224, 0.225};
     std::array<cv::Mat, fs::MA_VGGT::kMaxViews> expected;
+    std::array<StereoCameraParameters, fs::MA_VGGT::kMaxViews> cameras{};
+    std::array<cv::Size, fs::MA_VGGT::kMaxViews> source_sizes{};
     const auto* input = model.inputDevice();
     checked(cudaMemsetAsync(model.inputDevice(), 0x3f, fs::MA_VGGT::kInputElements * sizeof(float), model.stream()));
 
@@ -62,10 +65,26 @@ void checkColorUploads(fs::MA_VGGT& model) {
                             const double reference = (double(expected[v].at<cv::Vec3b>(y, x)[c]) / 255.0 - mean[c]) / stddev[c];
                             require(std::abs(double(actual[offset]) - reference) <= 1e-6,
                                     "GPU RGB differs from Lanczos4 resize + DINOv2 normalization (channel order, slot or repeated normalization mismatch)");
+                        } else if (c < 6 && !expected[v].empty()) {
+                            // Independently map the target pixel center back into
+                            // the source image and unproject with its original K.
+                            const double source_x = (x + 0.5) * source_sizes[v].width / w - 0.5;
+                            const double source_y = (y + 0.5) * source_sizes[v].height / h - 0.5;
+                            const double rx = (source_x - cameras[v].cx) / cameras[v].fx;
+                            const double ry = (source_y - cameras[v].cy) / cameras[v].fy;
+                            const double norm = std::sqrt(rx * rx + ry * ry + 1.0);
+                            const double reference = (c == 3 ? rx : c == 4 ? ry : 1.0) / norm;
+                            require(std::abs(double(actual[offset]) - reference) <= 1e-6,
+                                    "GPU ray differs from source-camera unprojection (resize, pixel center, calibration or channel mismatch)");
+                            if (c == 3) {
+                                const double dx = actual[offset], dy = actual[offset + plane], dz = actual[offset + 2 * plane];
+                                require(dz > 0 && std::abs(std::sqrt(dx * dx + dy * dy + dz * dz) - 1.0) <= 1e-6,
+                                        "Camera ray must be a forward-facing unit vector");
+                            }
                         } else {
                             std::uint32_t bits{};
                             std::memcpy(&bits, &actual[offset], sizeof(bits));
-                            require(bits == untouched, "Color upload overwrote geometry channels or another view");
+                            require(bits == untouched, "View preparation overwrote depth or another view");
                         }
                     }
                 }
@@ -86,23 +105,40 @@ void checkColorUploads(fs::MA_VGGT& model) {
                 row[x] = cv::Vec3b((x + v * 17) % 256, (y * 3 + v * 29) % 256, (x + y * 2 + v * 43) % 256);
         }
         cv::resize(rgb, expected[v], cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
-        model.uploadColor(v, rgb);
+        cameras[v] = {460.0 + v * 70, 530.0 + v * 23, source_w * 0.43 + v * 7, source_h * 0.61 - v * 3, 0};
+        source_sizes[v] = rgb.size();
+        model.uploadColor(v, rgb, cameras[v]);
         rgb.setTo(cv::Scalar::all(0));
         if (v == 0) checkContents(); // Includes all untouched future slots.
     }
     checkContents();
 
-    // Retake the last view; all earlier views and all geometry must survive.
+    // Retake with a new image size and calibration. Earlier views and all
+    // depth values must survive; new rays must use the replacement camera.
     const cv::Mat replacement(700, 300, CV_8UC3, cv::Scalar(0, 127, 255));
     expected.back() = cv::Mat(h, w, CV_8UC3, cv::Scalar(0, 127, 255));
-    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement);
+    cameras.back() = {630, 410, 149.5, 349.5, 0};
+    source_sizes.back() = replacement.size();
+    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement, cameras.back());
     checkContents();
-    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement);
+    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement, cameras.back());
     checkContents(); // Re-upload starts from raw RGB; it must not normalize twice.
-    rejects([&] { model.uploadColor(-1, replacement); }, "view index");
-    rejects([&] { model.uploadColor(fs::MA_VGGT::kMaxViews, replacement); }, "view index");
-    rejects([&] { model.uploadColor(0, cv::Mat{}); }, "CV_8UC3");
-    rejects([&] { model.uploadColor(0, cv::Mat(h, w, CV_32FC3)); }, "CV_8UC3");
+    cameras.back().cx += 13;
+    cameras.back().fy *= 0.8;
+    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement, cameras.back());
+    checkContents(); // Same image size must not retain stale rays after K changes.
+    rejects([&] { model.uploadColor(-1, replacement, cameras.back()); }, "view index");
+    rejects([&] { model.uploadColor(fs::MA_VGGT::kMaxViews, replacement, cameras.back()); }, "view index");
+    rejects([&] { model.uploadColor(0, cv::Mat{}, cameras.back()); }, "CV_8UC3");
+    rejects([&] { model.uploadColor(0, cv::Mat(h, w, CV_32FC3), cameras.back()); }, "CV_8UC3");
+    auto invalid = cameras.back(); invalid.fx = 0;
+    rejects([&] { model.uploadColor(0, replacement, invalid); }, "intrinsics");
+    invalid = cameras.back(); invalid.fy = -1;
+    rejects([&] { model.uploadColor(0, replacement, invalid); }, "intrinsics");
+    invalid = cameras.back(); invalid.cx = std::numeric_limits<double>::quiet_NaN();
+    rejects([&] { model.uploadColor(0, replacement, invalid); }, "intrinsics");
+    invalid = cameras.back(); invalid.cy = std::numeric_limits<double>::infinity();
+    rejects([&] { model.uploadColor(0, replacement, invalid); }, "intrinsics");
     checkContents();
 }
 
@@ -191,11 +227,11 @@ int main(int argc, char** argv) {
         checked(cudaStreamSynchronize(final_stream));
         // Destruction also drains queued work before releasing buffers/stream.
         checked(cudaMemsetAsync(model->depthsDevice(), 0, elements[1]*sizeof(float), final_stream));
-        model->uploadColor(0, cv::Mat(50, 80, CV_8UC3, cv::Scalar(5, 20, 240)));
+        model->uploadColor(0, cv::Mat(50, 80, CV_8UC3, cv::Scalar(5, 20, 240)), {60, 55, 39.5, 24.5, 0});
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view FP32 Lanczos4 RGB uploads with GPU DINOv2 normalization and retake isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
+        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view Lanczos4 uploads with fused GPU DINOv2 normalization/unit camera rays, pixel-center resize geometry, retake calibration updates, depth isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

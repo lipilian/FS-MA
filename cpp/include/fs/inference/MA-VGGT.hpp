@@ -6,6 +6,7 @@
 #include <memory>
 
 namespace cv { class Mat; }
+struct StereoCameraParameters;
 
 namespace fs {
 
@@ -41,11 +42,13 @@ public:
 
     // Resize a rectified CV_8UC3 RGB image directly to 518x434 on the CPU with
     // INTER_LANCZOS4 (no crop), pack raw FP32 CHW, then enqueue H2D followed by
-    // in-place DINOv2 RGB normalization on stream(). Writes only channels 0..2
-    // of view_index (0..4); replacing a view leaves other slots and geometry
-    // channels unchanged. No inference or CPU wait for the current GPU work.
+    // DINOv2 RGB normalization and unit camera rays in one kernel on stream().
+    // camera must describe rectified_rgb (baseline unused). Intrinsics are
+    // scaled per axis; principal points use (c+0.5)*scale-0.5 for pixel centers.
+    // Writes channels 0..5 of view_index (0..4); other slots and depth channel 6
+    // stay unchanged. No inference or CPU wait for the current GPU work.
     // Owns the pinned staging memory until the upload completes.
-    void uploadColor(int view_index, const cv::Mat& rectified_rgb);
+    void uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera);
 
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;

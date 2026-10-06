@@ -502,12 +502,12 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     fs_->set_selection_mask(mask); // Also completes the queued input uploads.
     emit log(QString("Input preparation: %1 ms").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
     reportProgress(25, "Running FoundationStereo inference…");
-    // Submit FS first so MA's CPU resize/packing, H2D and GPU normalization can
+    // Submit FS first so MA's CPU resize/packing, H2D and GPU RGB/ray preparation can
     // overlap inference. Keep capture slots stable when replacing a retake.
     elapsed.restart();
     fs_->inference();
-    ma_->uploadColor(capture_slot_, frame_->rectified_left());
-    emit log(QString("MA RGB upload + DINOv2 normalization queued · view %1 · 518 × 434 · FP32 CHW · Lanczos4 resize · independent stream")
+    ma_->uploadColor(capture_slot_, frame_->rectified_left(), frame_->rectified_camera_parameters());
+    emit log(QString("MA RGB upload + DINOv2 normalization + unit camera rays queued · view %1 · 518 × 434 · FP32 CHW · Lanczos4 resize · independent stream")
         .arg(capture_slot_ + 1));
     fs_->synchronize();
     const double inference_ms=elapsed.nsecsElapsed()/1e6;
