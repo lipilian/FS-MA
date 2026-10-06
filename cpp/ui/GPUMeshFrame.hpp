@@ -14,6 +14,7 @@ struct GPUMeshFrame {
     cudaStream_t stream{nullptr};
     int device{0};
     std::shared_ptr<const void> stream_owner;
+    quint64 image_id{0}; // Match MA poses to the capture, including retakes.
 };
 using SharedGPUMesh = std::shared_ptr<const GPUMeshFrame>;
 Q_DECLARE_METATYPE(SharedGPUMesh)
@@ -23,5 +24,6 @@ Q_DECLARE_METATYPE(SharedGPUMesh)
 struct PredictedCameraFrame {
     fs::MeshCamera camera;
     cv::Matx44d camera_to_world;
+    quint64 image_id{0};
 };
 using SharedPredictedCameras = std::shared_ptr<const std::vector<PredictedCameraFrame>>;
