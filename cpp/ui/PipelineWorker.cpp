@@ -169,7 +169,9 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
     publish();
     try {
         checkpoint(); action(*this); checkpoint();
-        state_.progress = 100; state_.progress_stage = state_.status;
+        const bool first_preview=state_.live && !state_.has_rectified && captures_.empty();
+        state_.progress = first_preview ? 0 : 100;
+        state_.progress_stage = first_preview ? "Ready to capture view 1" : state_.status;
     }
     catch (const std::exception& e) {
         state_.status = QString::fromUtf8(e.what());
@@ -400,6 +402,26 @@ void PipelineWorker::startCapturePreview(bool append) {
     state_.status=append ? "Move to the next view, then capture a pair. Earlier captures are retained."
                          : clear_single_view ? "Previous reconstruction cleared. Reframe and capture a new pair."
                          : "Reframe the current view, then capture a replacement pair.";
+}
+void PipelineWorker::cleanCaptures() {
+    setLive(true); // Check the live source before discarding the current sequence.
+    captures_.clear(); capture_slot_=0; state_.capture_count=0;
+    state_.predicted_cameras.reset();
+    frame_.reset(); state_.image_camera.reset();
+    state_.has_rectified=false; state_.gpu_ready=false; state_.depth_ready=false;
+    latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
+    mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
+    if (ma_) ma_->resetInputs();
+    if (sam_) sam_->clearImage();
+    ++state_.image_id; // Reject results and mask requests belonging to the old input.
+    calibration_json_.clear();
+    state_.input="No stereo pair captured";
+    state_.calibration=camera_calibration_description_;
+    state_.calibration_filename=camera_calibration_filename_;
+    state_.progress=0; state_.progress_stage="Ready to capture view 1";
+    state_.status="Captures cleared. Live preview · ready to capture view 1.";
+    timer_->start();
+    emit log(state_.status);
 }
 QString PipelineWorker::liveStatus() const {
     if (state_.camera_mode == CameraMode::RealSenseD435)

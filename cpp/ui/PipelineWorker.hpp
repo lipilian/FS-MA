@@ -58,6 +58,7 @@ public:
     void disconnectCameras();
     void setLive(bool enabled);
     void startCapturePreview(bool append);
+    void cleanCaptures();
     // Read only on the pipeline thread, e.g. inside a serialized controller action.
     const std::vector<CapturedStereoPair>& capturedPairs() const { return captures_; }
     void freeze();

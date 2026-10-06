@@ -95,6 +95,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     }
     camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
     retake_ = button("Retake", "retake"); capture_more_ = button("Capture more", "captureMore");
+    clean_ = button("Clean", "cleanCaptures");
+    clean_->setToolTip("Clear all captured views and reconstruction results, then return to live preview for the first capture.");
     retake_->setToolTip("Return to preview. A single view's reconstruction is cleared; with multiple views, completed captures are retained until the replacement succeeds.");
     capture_more_->setToolTip("Keep completed captures and preview the next view. Up to five pairs.");
     capture_ = button("Capture pair", "capturePair");
@@ -105,7 +107,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     build_mesh_cpu_->setToolTip("Generate a constrained Delaunay mesh on the CPU.");
     build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
-    for (auto* b : {camera_, retake_, capture_more_}) toolbar->addWidget(b);
+    for (auto* b : {camera_, retake_, capture_more_, clean_}) toolbar->addWidget(b);
     toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
@@ -251,10 +253,23 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::log,this,[this](const QString& message) { log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss") + "  " + message); });
     connect(&controller_,&PipelineController::stateChanged,this,[this](PipelineState state) {
         const bool just_connected = state.connected && !state_.connected;
+        const bool clean_preview = state.live && !state.has_rectified && state.image_id!=state_.image_id;
         if (state.live || state.image_id != state_.image_id) reconstruction_valid_ = false;
         if (state.capture_count==0) captured_clouds_.clear();
-        state_ = std::move(state); refresh();
-        if (just_connected) mesh_view_->resetCaptureView();
+        state_ = std::move(state);
+        if (clean_preview) {
+            capture_processing_=false; mesh_view_->setProcessing(false);
+            mesh_valid_=false; gpu_upload_pending_=false;
+            mesh_result_.reset(); gpu_mesh_result_.reset(); mesh_view_->setMesh({});
+            rectified_left_={}; rectified_right_={}; live_left_={}; live_right_={}; depth_image_={};
+            render_error_.clear();
+            mask_request_id_=controller_.requestMask(state_.image_id,{});
+            const QSignalBlocker blocker(mask_);
+            mask_->setImage({});
+            tabs_->setCurrentIndex(SceneTab);
+        }
+        refresh();
+        if (just_connected || clean_preview) mesh_view_->resetCaptureView();
     });
     connect(&controller_,&PipelineController::busyChanged,this,[this](bool busy) {
         busy_ = busy;
@@ -339,6 +354,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     };
     connect(retake_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(false); });
     connect(capture_more_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(true); });
+    connect(clean_,&QPushButton::clicked,this,[this] {
+        mask_request_id_=controller_.requestMask(state_.image_id,{});
+        controller_.submit([](auto& worker) { worker.cleanCaptures(); });
+    });
     connect(capture_,&QPushButton::clicked,this,[this] {
         mesh_view_->preserveView();
         capture_processing_=true; mesh_view_->setProcessing(true);
@@ -463,6 +482,7 @@ void ReconstructionWindow::refresh() {
     }
     const bool depth_valid = minimum_->value() < maximum_->value();
     retake_->setEnabled(idle && state_.connected && !state_.live);
+    clean_->setEnabled(idle && state_.connected && (state_.has_rectified || state_.capture_count>0));
     capture_more_->setEnabled(idle && state_.connected && frozen && reconstruction_valid_ && mesh_valid_ &&
                               state_.capture_count>0 && state_.capture_count<PipelineState::kMaxCaptures);
     capture_->setEnabled(idle && state_.live && state_.engine_ready && depth_valid);
@@ -558,7 +578,7 @@ void ReconstructionWindow::refreshWorkspace() {
     input_panel_->setVisible(scene);
     mask_panel_->setVisible(!scene);
     depth_panel_->setVisible(scene); geometry_panel_->setVisible(scene); save_panel_->setVisible(scene && frozen);
-    for (auto* b : {import_,camera_,capture_}) b->setVisible(scene);
+    for (auto* b : {import_,camera_,capture_,clean_}) b->setVisible(scene);
     retake_->setVisible(scene && !state_.live);
     capture_more_->setVisible(scene && frozen);
     camera_mode_->setVisible(scene);
