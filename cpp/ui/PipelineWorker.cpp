@@ -527,6 +527,9 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();
     cv::Mat depth, indices, depth_rgb, model_left;
     cv::extractChannel(xyz, depth, 2);
+    ma_->uploadDepth(capture_slot_, depth);
+    emit log(QString("MA metric ray distance queued · view %1 · 518 × 434 · FP32 channel 6 · Lanczos4 depth resize")
+        .arg(capture_slot_ + 1));
     // Fixed metric range from this run, never per-image min/max normalization.
     depth.convertTo(indices, CV_8U, 255.0 / (maximum - minimum), -255.0 * minimum / (maximum - minimum));
     cv::applyColorMap(indices, depth_rgb, cv::COLORMAP_JET);

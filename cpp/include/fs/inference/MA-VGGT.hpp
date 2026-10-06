@@ -50,6 +50,13 @@ public:
     // Owns the pinned staging memory until the upload completes.
     void uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera);
 
+    // After uploadColor for this slot, resize aligned CV_32FC1 metric Z-depth
+    // directly to 518x434 with INTER_LANCZOS4 (no crop). Invalid source depths
+    // become zero before resize. Enqueue pinned H2D and a pixel kernel on our
+    // stream to write metric ray distance into channel 6; RGB/rays and other
+    // views are preserved. Source storage may be reused when this returns.
+    void uploadDepth(int view_index, const cv::Mat& depth_z);
+
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;
     // queue accesses on stream(), serialized with model loading. Access from
