@@ -60,6 +60,13 @@ class MeshCanvas : public QOpenGLWidget {
         if (!gpu_mesh_) dirty_ = true;
         update();
     }
+    void setPredictedCameras(SharedPredictedCameras cameras) {
+        if (predicted_cameras_ == cameras) return;
+        predicted_cameras_ = std::move(cameras);
+        camera_dirty_ = true;
+        if (predicted_cameras_) preserveView();
+        update();
+    }
     void setCamera(const std::optional<fs::MeshCamera>& camera) {
         if (camera_.has_value() == camera.has_value() &&
             (!camera || (camera_->image_size == camera->image_size && camera_->intrinsics == camera->intrinsics))) return;
@@ -392,7 +399,7 @@ void main() {
             program_->setUniformValue("deviceMesh",false);
             program_->setUniformValue("shaded",false);
             program_->setUniformValue("wireframe",false);
-            for (int camera = 0; camera < (right_camera_visible_ ? 2 : 1); ++camera) {
+            for (int camera = 0; camera < camera_image_count_; ++camera) {
                 if (!displayCameraImage(camera).isNull()) {
                     gl_->glActiveTexture(GL_TEXTURE0);
                     gl_->glBindTexture(GL_TEXTURE_2D,textures_[camera]);
@@ -737,6 +744,7 @@ void main() {
         const auto metadata = activeCamera();
         const cv::Vec3f center(center_.x(), center_.y(), center_.z());
         auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_);
+        camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
         // The original image remains on the short camera frustum. Also fit the
         // separate 40 cm point plane, without extending/moving that image.
         if ((live_preview_ || processing_) && validCamera(metadata)) {
@@ -748,16 +756,25 @@ void main() {
                 camera_radius_=std::max(camera_radius_,float(cv::norm((world-center)/scale_)));
             }
         }
-        // Keep each completed capture's frustum even when live calibration or
-        // the active input changes. Poses are still local camera coordinates;
-        // multi-view registration will supply their transforms separately.
+        // Predicted cameras use MA's own world frame, with no reference-view
+        // rebasing. Append only blue line vertices, never image triangles.
         std::vector<float> lines;
-        for (const auto& frame:captured_clouds_) {
-            if (!frame) continue;
-            int count=0; float radius=0;
-            const auto captured=cameraData(frame->camera,center,scale_,count,radius);
-            lines.insert(lines.end(),captured.begin(),captured.begin()+count*6);
-            camera_radius_=std::max(camera_radius_,radius);
+        if (predicted_cameras_) {
+            for (const auto& frame:*predicted_cameras_) {
+                int count=0; float radius=0;
+                const auto predicted=cameraData(frame.camera,center,scale_,count,radius,
+                    frame.camera_to_world,cv::Vec3f(.10f,.45f,1.f),false);
+                lines.insert(lines.end(),predicted.begin(),predicted.end());
+                camera_radius_=std::max(camera_radius_,radius);
+            }
+        } else {
+            for (const auto& frame:captured_clouds_) {
+                if (!frame) continue;
+                int count=0; float radius=0;
+                const auto captured=cameraData(frame->camera,center,scale_,count,radius);
+                lines.insert(lines.end(),captured.begin(),captured.begin()+count*6);
+                camera_radius_=std::max(camera_radius_,radius);
+            }
         }
         data.insert(data.begin(),lines.begin(),lines.end());
         camera_count_+=int(lines.size()/6);
@@ -767,7 +784,9 @@ void main() {
         camera_dirty_ = false;
     }
     std::vector<float> cameraData(const std::optional<fs::MeshCamera>& metadata, cv::Vec3f center, float scale,
-                                  int& line_count, float& radius) {
+                                  int& line_count, float& radius,
+                                  const cv::Matx44d& pose = cv::Matx44d::eye(),
+                                  const cv::Vec3f& color = cv::Vec3f(1.f,.65f,.12f), bool textured = true) {
         std::vector<float> data;
         line_count = 0;
         radius = .87f; // Radius of the mesh's normalized bounding box.
@@ -798,11 +817,16 @@ void main() {
                 // This preview spacing does not represent the rig's baseline.
                 const float right_offset = (corners[1][0] - corners[0][0]) * 1.2f;
                 if (!hasMesh()) radius = 0;
-                const auto add_camera = [&](cv::Vec3f world) {
+                const auto to_world = [&](cv::Vec3f local) {
+                    const auto world = pose * cv::Vec4d(local[0],local[1],local[2],1);
+                    return cv::Vec3f(float(world[0]),float(world[1]),float(world[2]));
+                };
+                const auto add_camera = [&](cv::Vec3f local) {
+                    const auto world = to_world(local);
                     const auto p = (world - center) / scale;
                     radius = std::max(radius, float(cv::norm(p)));
                     data.insert(data.end(),
-                                {p[0], -p[1], -p[2], 1.f, .65f, .12f});
+                                {p[0], -p[1], -p[2], color[0], color[1], color[2]});
                 };
                 const auto line = [&](cv::Vec3f a, cv::Vec3f b) {
                     add_camera(a);
@@ -823,12 +847,13 @@ void main() {
                 line(corners[0], up);
                 line(up, corners[1]);
                 line_count = int(data.size() / 6);
+                if (!textured) return data;
                 // QImage row zero is the image top. Upload unchanged and give
                 // the upper frustum corners v=0 to avoid a vertical flip.
                 const float uv[][2] = {{0,0}, {1,0}, {1,1}, {0,1}};
                 for (int camera=0; camera<(right_camera_visible_ ? 2 : 1); ++camera)
                     for (int i : {0,1,2,0,2,3}) {
-                        const auto world = corners[i] + cv::Vec3f(camera * right_offset,0,0);
+                        const auto world = to_world(corners[i] + cv::Vec3f(camera * right_offset,0,0));
                         const auto p = (world - center) / scale;
                         radius = std::max(radius,float(cv::norm(p)));
                         data.insert(data.end(), {p[0], -p[1], -p[2], uv[i][0], uv[i][1], 0.f});
@@ -840,6 +865,7 @@ void main() {
     MeshView* owner_;
     SharedGPUMesh gpu_mesh_;
     std::vector<SharedGPUMesh> captured_clouds_;
+    SharedPredictedCameras predicted_cameras_;
     SharedGPUMesh hidden_capture_;
     std::vector<std::unique_ptr<CloudResource>> cloud_resources_;
     bool captures_dirty_{true};
@@ -880,7 +906,7 @@ void main() {
     std::unique_ptr<QOpenGLShaderProgram> program_;
     std::shared_ptr<const fs::MeshResult> mesh_;
     bool dirty_{true}, right_camera_visible_{false};
-    int mode_{1}, count_{}, camera_count_{};
+    int mode_{1}, count_{}, camera_count_{}, camera_image_count_{};
     float camera_radius_{};
     // Behind the camera, above and to its right, looking into the scene.
     static constexpr float kCaptureYaw = -33.6f, kCapturePitch = 40.f;
@@ -919,6 +945,9 @@ void MeshView::setGPUMesh(SharedGPUMesh mesh) {
 }
 void MeshView::setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden) {
     if (canvas_) canvas_->setCapturedClouds(std::move(clouds),std::move(hidden));
+}
+void MeshView::setPredictedCameras(SharedPredictedCameras cameras) {
+    if (canvas_) canvas_->setPredictedCameras(std::move(cameras));
 }
 void MeshView::setMode(int mode) {
     if (canvas_)

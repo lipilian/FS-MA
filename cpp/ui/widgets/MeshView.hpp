@@ -19,6 +19,7 @@ class MeshView : public QWidget {
     // Completed captures remain in the scene while the active input changes.
     // A generated CPU/GPU mesh can temporarily replace its capture's points.
     void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden = {});
+    void setPredictedCameras(SharedPredictedCameras cameras);
     void setMode(int mode);
     void resetView();
     void resetCaptureView();
