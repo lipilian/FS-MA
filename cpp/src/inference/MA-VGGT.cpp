@@ -131,7 +131,10 @@ struct Model {
     cudaStream_t stream;
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
+    DeviceBuffer workspace; // Outlives the context that borrows it.
     std::unique_ptr<nvinfer1::IExecutionContext> context;
+    int64_t workspace_bytes{};
+    bool inference_pending{false};
 
     explicit Model(cudaStream_t ma_stream) : stream(ma_stream) {}
     // Also complete profile work before destroying an unsuccessful load.
@@ -156,6 +159,7 @@ struct MA_VGGT::Impl {
     InputUpload depth_upload{CV_32FC1, kColorPlane};
     cv::Mat valid_depth;
     std::array<bool, kMaxViews> rays_ready{};
+    std::array<bool, kMaxViews> depth_ready{};
     std::unique_ptr<Model> model;
 
     Impl() {
@@ -206,6 +210,8 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const St
         }
     }
     float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    impl_->rays_ready[view_index] = false;
+    impl_->depth_ready[view_index] = false;
     upload.enqueue(view_input, kColorElements, stream());
     // Same-stream ordering starts this kernel after H2D, without a CPU wait.
     // The event above protects only host staging; the kernel uses device input.
@@ -235,10 +241,50 @@ void MA_VGGT::uploadDepth(int view_index, const cv::Mat& depth_z) {
     upload.wait();
     std::memcpy(upload.host.get(), upload.resized.ptr<float>(), kColorPlane * sizeof(float));
     float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    impl_->depth_ready[view_index] = false;
     upload.enqueue(view_input + 6 * kColorPlane, kColorPlane, stream());
     // Same-stream ordering waits for both this H2D and the earlier ray kernel.
     checkCuda(ma_preprocessing::prepare_ray_distance(view_input, kInputWidth, kInputHeight, stream()),
               "cannot launch Z-depth to ray-distance conversion");
+    impl_->depth_ready[view_index] = true;
+}
+
+void MA_VGGT::resetInputs() noexcept {
+    impl_->rays_ready.fill(false);
+    impl_->depth_ready.fill(false);
+}
+
+void MA_VGGT::inference(int view_count) {
+    require(view_count >= kMinViews && view_count <= kMaxViews, "Inference requires 2..5 views");
+    require(isLoaded(), "Load an engine before inference");
+    for (int view = 0; view < view_count; ++view)
+        require(impl_->rays_ready[view] && impl_->depth_ready[view],
+                "Inference requires RGB, rays and depth for view " + std::to_string(view + 1));
+    auto& s = *impl_->model;
+    // TensorRT context state must not change while its previous enqueue runs.
+    // Current input preparation is already ordered on this same stream.
+    if (s.inference_pending) synchronize();
+    if (!s.workspace && s.workspace_bytes > 0) {
+        s.workspace = allocate((static_cast<std::size_t>(s.workspace_bytes) + sizeof(float) - 1) / sizeof(float),
+                               "activation workspace");
+        std::cout << "[MA-VGGT] Activation workspace allocated once for V=2..5: " << s.workspace_bytes
+                  << " bytes (" << double(s.workspace_bytes) / (1024.0 * 1024.0) << " MiB)\n" << std::flush;
+    }
+    s.context->setDeviceMemoryV2(s.workspace.get(), s.workspace_bytes);
+    require(s.context->setInputShape("inputs", dims({view_count, 7, kInputHeight, kInputWidth})),
+            "cannot set inference view count");
+    require(s.context->inferShapes(0, nullptr) == 0 &&
+            equal(s.context->getTensorShape("depths"), dims({view_count, 6, kInputHeight, kInputWidth})) &&
+            equal(s.context->getTensorShape("poses"), dims({view_count, 7})) &&
+            equal(s.context->getTensorShape("scale"), dims({1, 1, 1})), "unexpected inference output shapes");
+    // Even a failed enqueue may have submitted work that must be drained.
+    s.inference_pending = true;
+    require(s.context->enqueueV3(stream()), "TensorRT enqueueV3 failed");
+}
+
+void MA_VGGT::synchronize() {
+    impl_->stream.synchronize();
+    if (impl_->model) impl_->model->inference_pending = false;
 }
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {
@@ -275,8 +321,8 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
             equal(s.engine->getProfileShape("inputs", 0, Profile::kMAX), dims({kMaxViews, 7, kInputHeight, kInputWidth})),
             "input profile must support exactly 2..5 views at 434x518");
 
-    // Future inference will provide activation workspace and enqueue on the
-    // MA-owned stream. I/O storage already exists independently of the engine.
+    // Allocate activation workspace lazily on first inference. I/O storage
+    // already exists independently of the engine and remains bound on reload.
     s.context.reset(s.engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED));
     require(bool(s.context), "cannot create TensorRT context");
     require(s.context->setOptimizationProfileAsync(0, stream()), "cannot select the profile on the MA stream");
@@ -295,6 +341,7 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
     }
     const auto context_memory_bytes = s.engine->getDeviceMemorySizeV2();
     require(context_memory_bytes >= 0, "cannot query TensorRT context device-memory requirement");
+    s.workspace_bytes = context_memory_bytes;
     impl_->stream.synchronize();
     impl_->model = std::move(next);
 
@@ -317,7 +364,7 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
               << "  max=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kMAX)) << '\n'
               << "[MA-VGGT] TensorRT context device-memory requirement: " << context_memory_bytes
               << " bytes (" << double(context_memory_bytes) / kBytesPerMiB
-              << " MiB); user-managed activation workspace not allocated\n"
+              << " MiB); allocated on first inference and reused\n"
               << "[MA-VGGT] Preallocated GPU I/O (V=" << kMaxViews << "): " << kIOBytes
               << " bytes (" << double(kIOBytes) / kBytesPerMiB << " MiB)\n"
               << "[MA-VGGT] CUDA stream: independent, non-blocking\n" << std::flush;
