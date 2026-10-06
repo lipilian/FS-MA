@@ -569,17 +569,17 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         checkpoint();
         emit log(QString("MA inference complete · %1 views · %2 ms · raw depths/poses/scale on GPU · independent stream")
             .arg(views).arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
-        reportProgress(99, "Preparing predicted camera wireframes…");
+        reportProgress(99, "Positioning point clouds and camera wireframes…");
         const auto poses = ma_->downloadCameraPoses();
         auto cameras = std::make_shared<std::vector<PredictedCameraFrame>>();
         cameras->reserve(views);
         for (int i = 0; i < views; ++i) {
             const auto& frame = *captures_[i].frame;
-            cameras->push_back({meshCamera(frame, frame.rectified_left().size()), poses[i]});
+            cameras->push_back({meshCamera(frame, frame.rectified_left().size()), poses[i], captures_[i].image_id});
         }
         checkpoint();
         state_.predicted_cameras = std::move(cameras);
-        emit log(QString("MA cameras ready · %1 blue wireframes · predicted camera-to-world poses in metres")
+        emit log(QString("MA poses ready · %1 FS point clouds and blue wireframes · predicted camera-to-world poses in metres")
             .arg(views));
         state_.status = QString("Capture complete · MapAnything inference finished for %1 views.").arg(views);
         publish();
@@ -600,6 +600,7 @@ void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
     auto cloud=std::make_shared<GPUMeshFrame>();
     cloud->buffer=gpu_mesh_; cloud->stats=stats; cloud->point_cloud=true;
     cloud->stream=inputs.stream; cloud->stream_owner=fs_;
+    cloud->image_id=state_.image_id;
     const auto error=cudaGetDevice(&cloud->device);
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     cloud->camera=meshCamera(*frame_,{inputs.width,inputs.height});
@@ -668,6 +669,7 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
     if (!stats.triangle_count) throw std::runtime_error("GPU mesh has no triangles after filtering.");
     auto mesh=std::make_shared<GPUMeshFrame>();
     mesh->buffer=gpu_mesh_; mesh->stats=stats; mesh->stream=inputs.stream; mesh->stream_owner=fs_;
+    mesh->image_id=state_.image_id;
     const auto error=cudaGetDevice(&mesh->device);
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     mesh->camera=meshCamera(*frame_,{inputs.width,inputs.height});

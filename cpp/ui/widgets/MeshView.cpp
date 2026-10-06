@@ -171,7 +171,9 @@ class MeshCanvas : public QOpenGLWidget {
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 color;
 uniform mat4 matrix;
-uniform bool deviceMesh;
+uniform mat4 cameraToWorld;
+uniform bool cameraSpace;
+uniform bool clipInvalid;
 uniform bool previewPoints;
 uniform bool processingPreview;
 uniform float processingTime;
@@ -199,8 +201,10 @@ void main() {
             displayed.z+=0.008*scanGlow;
         }
     }
-    vec3 p=deviceMesh ? (displayed-center)/scale*vec3(1.0,-1.0,-1.0) : displayed;
-    gl_Position=deviceMesh && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
+    vec3 world=(cameraToWorld*vec4(displayed,1.0)).xyz;
+    vec3 p=cameraSpace ? (world-center)/scale*vec3(1.0,-1.0,-1.0) : displayed;
+    // Invalid FS slots have zero camera-space Z. Valid world-space Z may be negative.
+    gl_Position=clipInvalid && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
 })";
         const char *fragment = R"(
 #version 460 core
@@ -357,16 +361,19 @@ void main() {
         program_->setUniformValue("previewPoints",false);
         program_->setUniformValue("processingPreview",false);
         // Captures have independent VBOs. Live images never upload these again.
-        program_->setUniformValue("deviceMesh",true);
+        program_->setUniformValue("cameraSpace",true);
+        program_->setUniformValue("clipInvalid",true);
         program_->setUniformValue("shaded",false);
         program_->setUniformValue("wireframe",false);
         for (const auto& capture:cloud_resources_) {
             if (capture->frame==hidden_capture_) continue;
+            program_->setUniformValue("cameraToWorld",cameraPose(capture->frame));
             capture->vao.bind();
             gl_->glDrawArrays(GL_POINTS,0,capture->count);
             capture->vao.release();
         }
-        program_->setUniformValue("deviceMesh",bool(gpu_mesh_));
+        program_->setUniformValue("cameraToWorld",cameraPose(gpu_mesh_ ? gpu_mesh_ : hidden_capture_));
+        program_->setUniformValue("clipInvalid",bool(gpu_mesh_));
         program_->setUniformValue("shaded",bool(gpu_mesh_) && mode_==1);
         program_->setUniformValue("wireframe",bool(gpu_mesh_) && mode_==2);
         vao_.bind();
@@ -375,7 +382,8 @@ void main() {
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         vao_.release();
         if ((live_preview_ || processing_) && preview_count_ > 0 && !displayCameraImage(0).isNull() && texture_sizes_[0] == preview_size_) {
-            program_->setUniformValue("deviceMesh",true);
+            program_->setUniformValue("cameraToWorld",QMatrix4x4());
+            program_->setUniformValue("clipInvalid",true);
             program_->setUniformValue("shaded",false);
             program_->setUniformValue("wireframe",false);
             program_->setUniformValue("textured",true);
@@ -396,7 +404,8 @@ void main() {
         }
         if (camera_count_>0) {
             camera_vao_.bind();
-            program_->setUniformValue("deviceMesh",false);
+            program_->setUniformValue("cameraSpace",false);
+            program_->setUniformValue("clipInvalid",false);
             program_->setUniformValue("shaded",false);
             program_->setUniformValue("wireframe",false);
             for (int camera = 0; camera < camera_image_count_; ++camera) {
@@ -457,6 +466,18 @@ void main() {
     bool hasMesh() const { return !captured_clouds_.empty() || gpu_mesh_ || (mesh_ && !mesh_->vertices.empty()); }
     bool isCaptured(const SharedGPUMesh& mesh) const {
         return std::find(captured_clouds_.begin(),captured_clouds_.end(),mesh)!=captured_clouds_.end();
+    }
+    QMatrix4x4 cameraPose(const SharedGPUMesh& mesh) const {
+        QMatrix4x4 pose;
+        if (!mesh || !mesh->image_id || !predicted_cameras_) return pose;
+        const auto found=std::find_if(predicted_cameras_->begin(),predicted_cameras_->end(),
+            [&](const auto& frame) { return frame.image_id==mesh->image_id; });
+        if (found==predicted_cameras_->end()) return pose;
+        // Use MA's original world frame for every view, including the first.
+        // FS vertices are already in metres; only rotation and translation apply.
+        for (int row=0;row<4;++row) for (int col=0;col<4;++col)
+            pose(row,col)=float(found->camera_to_world(row,col));
+        return pose;
     }
     void destroyCapture(CloudResource& capture) {
         if (capture.interop) {
@@ -527,11 +548,23 @@ void main() {
         const auto add_gpu=[&](const SharedGPUMesh& mesh) {
             if (!mesh) return;
             const auto& s=mesh->stats;
-            add({s.low[0],s.low[1],s.low[2]}); add({s.high[0],s.high[1],s.high[2]});
+            const auto pose=cameraPose(mesh);
+            // A rotated local bounding box needs all eight corners.
+            for (int corner=0;corner<8;++corner) {
+                const auto p=pose.map(QVector3D(corner&1 ? s.high[0] : s.low[0],
+                    corner&2 ? s.high[1] : s.low[1],corner&4 ? s.high[2] : s.low[2]));
+                add({p.x(),p.y(),p.z()});
+            }
         };
         for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_) add_gpu(cloud);
         add_gpu(gpu_mesh_);
-        if (mesh_) for (const auto& p:mesh_->vertices) add(p);
+        if (mesh_) {
+            const auto pose=cameraPose(hidden_capture_);
+            for (const auto& local:mesh_->vertices) {
+                const auto p=pose.map(QVector3D(local[0],local[1],local[2]));
+                add({p.x(),p.y(),p.z()});
+            }
+        }
         if (!any) {
             center_={}; scale_=1;
             const auto camera=activeCamera();
@@ -627,17 +660,15 @@ void main() {
     }
     void upload() {
         unregisterInterop();
-        const cv::Vec3f center(center_.x(),center_.y(),center_.z());
-        const float scale=scale_;
         std::vector<float> data;
         data.reserve(mode_ == 0
                          ? mesh_->vertices.size() * 6
                          : mesh_->triangles.size() * (mode_ == 2 ? 36 : 18));
         const auto add = [&](int id, float light) {
-            auto p = (mesh_->vertices[id] - center) / scale;
+            const auto& p = mesh_->vertices[id];
             const auto c = mode_ == 2 ? cv::Vec3b(0, 0, 0) : mesh_->colors[id];
             data.insert(data.end(),
-                        {p[0], -p[1], -p[2], c[0] / 255.f * light,
+                        {p[0], p[1], p[2], c[0] / 255.f * light,
                          c[1] / 255.f * light, c[2] / 255.f * light});
         };
         if (mode_ == 0) {
