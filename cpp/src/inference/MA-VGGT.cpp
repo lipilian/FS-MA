@@ -1,6 +1,7 @@
 #include "fs/inference/MA-VGGT.hpp"
 
 #include <NvInfer.h>
+#include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,9 @@
 
 namespace fs {
 namespace {
+constexpr std::size_t kColorPlane = std::size_t{MA_VGGT::kInputHeight} * MA_VGGT::kInputWidth;
+constexpr std::size_t kColorElements = 3 * kColorPlane;
+
 class Logger final : public nvinfer1::ILogger {
     void log(Severity severity, const char* message) noexcept override {
         if (severity <= Severity::kWARNING) std::cerr << "[MA TensorRT] " << message << '\n';
@@ -19,6 +23,10 @@ class Logger final : public nvinfer1::ILogger {
 
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error("MapAnything: " + message);
+}
+void checkCuda(cudaError_t error, const char* operation) {
+    if (error != cudaSuccess)
+        throw std::runtime_error(std::string("MapAnything: ") + operation + ": " + cudaGetErrorString(error));
 }
 nvinfer1::Dims dims(std::initializer_list<int64_t> values) {
     nvinfer1::Dims result{};
@@ -79,6 +87,26 @@ DeviceBuffer allocate(std::size_t elements, const char* name) {
     return DeviceBuffer(static_cast<float*>(pointer));
 }
 
+struct HostFree {
+    void operator()(float* pointer) const noexcept { if (pointer) cudaFreeHost(pointer); }
+};
+struct ColorUpload {
+    std::unique_ptr<float, HostFree> host;
+    cv::Mat resized;
+    cudaEvent_t done{};
+    bool pending{false};
+
+    ColorUpload() : resized(MA_VGGT::kInputHeight, MA_VGGT::kInputWidth, CV_8UC3) {
+        void* pointer = nullptr;
+        checkCuda(cudaMallocHost(&pointer, kColorElements * sizeof(float)), "cannot allocate pinned RGB staging buffer");
+        host.reset(static_cast<float*>(pointer));
+        checkCuda(cudaEventCreateWithFlags(&done, cudaEventDisableTiming), "cannot create RGB upload event");
+    }
+    ~ColorUpload() { cudaEventDestroy(done); }
+    ColorUpload(const ColorUpload&) = delete;
+    ColorUpload& operator=(const ColorUpload&) = delete;
+};
+
 struct Model {
     cudaStream_t stream;
     std::unique_ptr<nvinfer1::IRuntime> runtime;
@@ -104,6 +132,7 @@ struct MA_VGGT::Impl {
     // RAII also releases the stream if a buffer allocation fails in construction.
     CudaStream stream;
     DeviceBuffer inputs, depths, poses, scale;
+    ColorUpload color_upload;
     std::unique_ptr<Model> model;
 
     Impl() {
@@ -123,6 +152,38 @@ float* MA_VGGT::inputDevice() const noexcept { return impl_->inputs.get(); }
 float* MA_VGGT::depthsDevice() const noexcept { return impl_->depths.get(); }
 float* MA_VGGT::posesDevice() const noexcept { return impl_->poses.get(); }
 float* MA_VGGT::scaleDevice() const noexcept { return impl_->scale.get(); }
+
+void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb) {
+    require(view_index >= 0 && view_index < kMaxViews, "RGB view index must be in 0..4");
+    require(!rectified_rgb.empty() && rectified_rgb.type() == CV_8UC3,
+            "RGB upload requires a nonempty CV_8UC3 RGB image");
+    auto& upload = impl_->color_upload;
+    cv::resize(rectified_rgb, upload.resized, cv::Size(kInputWidth, kInputHeight),
+               0.0, 0.0, cv::INTER_LANCZOS4);
+    // Wait only for the preceding H2D read of the reused pinned buffer, not
+    // for later MA kernels or anything on FS's independent stream.
+    if (upload.pending) checkCuda(cudaEventSynchronize(upload.done), "cannot wait for previous RGB upload");
+    float* destination = upload.host.get();
+    for (int y = 0; y < kInputHeight; ++y) {
+        const auto* row = upload.resized.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < kInputWidth; ++x) {
+            const auto offset = static_cast<std::size_t>(y) * kInputWidth + x;
+            destination[offset] = float(row[x][0]);
+            destination[kColorPlane + offset] = float(row[x][1]);
+            destination[2 * kColorPlane + offset] = float(row[x][2]);
+        }
+    }
+    checkCuda(cudaMemcpyAsync(inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane,
+                              destination, kColorElements * sizeof(float), cudaMemcpyHostToDevice, stream()),
+              "cannot upload RGB input");
+    const auto error = cudaEventRecord(upload.done, stream());
+    // If recording fails, finish the copy before the staging buffer can be reused.
+    if (error != cudaSuccess) {
+        cudaStreamSynchronize(stream());
+        checkCuda(error, "cannot record RGB upload completion");
+    }
+    upload.pending = true;
+}
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {
     impl_->stream.synchronize();
