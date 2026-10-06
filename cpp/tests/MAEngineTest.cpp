@@ -142,6 +142,98 @@ void checkColorUploads(fs::MA_VGGT& model) {
     checkContents();
 }
 
+void checkDepthUploads(fs::MA_VGGT& model) {
+    constexpr int h = fs::MA_VGGT::kInputHeight, w = fs::MA_VGGT::kInputWidth;
+    constexpr std::size_t plane = std::size_t{h} * w;
+    const StereoCameraParameters camera{1800, 1750, 1100.25, 970.75, 0};
+    const cv::Mat rgb(2048, 2448, CV_8UC3, cv::Scalar(40, 110, 230));
+    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) model.uploadColor(v, rgb, camera);
+    std::vector<float> expected(fs::MA_VGGT::kInputElements);
+    checked(cudaMemcpyAsync(expected.data(), model.inputDevice(), expected.size() * sizeof(float),
+                            cudaMemcpyDeviceToHost, model.stream()));
+    checked(cudaStreamSynchronize(model.stream()));
+    std::array<bool, fs::MA_VGGT::kMaxViews> filled{};
+    const auto checkContents = [&] {
+        std::vector<float> actual(expected.size());
+        checked(cudaMemcpyAsync(actual.data(), model.inputDevice(), actual.size() * sizeof(float),
+                                cudaMemcpyDeviceToHost, model.stream()));
+        checked(cudaStreamSynchronize(model.stream()));
+        for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+            for (int c = 0; c < 7; ++c) {
+                const auto offset = (v * 7 + c) * plane;
+                if (c != 6 || !filled[v]) {
+                    require(std::memcmp(actual.data() + offset, expected.data() + offset, plane * sizeof(float)) == 0,
+                            "Depth upload changed RGB, rays or another view");
+                    continue;
+                }
+                for (std::size_t i = 0; i < plane; ++i) {
+                    const float value = actual[offset + i], reference = expected[offset + i];
+                    require(std::isfinite(value) && value >= 0 && std::abs(value - reference) <= 1e-6F,
+                            "GPU ray distance differs from Lanczos4 Z-depth and notebook 3D norm");
+                    if (reference == 0) require(value == 0, "Invalid depth must remain zero");
+                }
+            }
+        }
+    };
+    int undershoot_count = 0;
+    const auto upload = [&](int view, const cv::Mat& depth) {
+        cv::Mat clean = depth.clone();
+        for (int y = 0; y < clean.rows; ++y) {
+            float* row = clean.ptr<float>(y);
+            for (int x = 0; x < clean.cols; ++x)
+                if (!std::isfinite(row[x]) || row[x] <= 0) row[x] = 0;
+        }
+        cv::Mat resized;
+        cv::resize(clean, resized, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const double z = resized.at<float>(y, x);
+                if (z < 0) ++undershoot_count;
+                // Independent reference: unproject to a 3D point, then take
+                // its Euclidean norm as the notebook does (no GPU ray reads).
+                const double rx = ((x + 0.5) * rgb.cols / w - 0.5 - camera.cx) / camera.fx;
+                const double ry = ((y + 0.5) * rgb.rows / h - 0.5 - camera.cy) / camera.fy;
+                expected[(view * 7 + 6) * plane + y * w + x] =
+                    std::isfinite(z) && z > 0 ? float(std::sqrt(z * z * (rx * rx + ry * ry + 1.0))) : 0.0F;
+            }
+        }
+        model.uploadDepth(view, depth);
+        filled[view] = true;
+    };
+    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+        // Includes FS's 960x800 grid, other aspect ratios, and strided inputs.
+        const int sw = 960 + v * 17, sh = 800 - v * 31;
+        cv::Mat storage(sh + 8, sw + 12, CV_32FC1);
+        cv::Mat depth = storage(cv::Rect(3, 2, sw, sh));
+        require(!depth.isContinuous(), "Test depth must have a row stride");
+        for (int y = 0; y < sh; ++y) {
+            float* row = depth.ptr<float>(y);
+            for (int x = 0; x < sw; ++x)
+                row[x] = x < sw / 3 ? 0.0F : 0.2F + v * 0.1F + x * 0.0001F + y * 0.0002F;
+        }
+        depth(cv::Rect(sw / 2, 20, 20, 20)).setTo(std::numeric_limits<float>::quiet_NaN());
+        depth(cv::Rect(sw / 2, 50, 20, 20)).setTo(std::numeric_limits<float>::infinity());
+        depth(cv::Rect(sw / 2, 80, 20, 20)).setTo(-0.5F);
+        upload(v, depth);
+        depth.setTo(9.0F); // The async upload must own the source data now.
+        if (v == 0) checkContents();
+    }
+    checkContents();
+    require(undershoot_count > 0, "Depth test must exercise negative Lanczos ringing");
+    const cv::Mat replacement(700, 300, CV_32FC1, cv::Scalar(0.42));
+    upload(fs::MA_VGGT::kMaxViews - 1, replacement);
+    checkContents();
+    upload(fs::MA_VGGT::kMaxViews - 1, replacement);
+    checkContents(); // No double conversion, even when replacing the same slot.
+    upload(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0)));
+    checkContents(); // A fully invalid replacement must clear the old distances.
+    rejects([&] { model.uploadDepth(-1, replacement); }, "view index");
+    rejects([&] { model.uploadDepth(fs::MA_VGGT::kMaxViews, replacement); }, "view index");
+    rejects([&] { model.uploadDepth(0, cv::Mat{}); }, "CV_32FC1");
+    rejects([&] { model.uploadDepth(0, cv::Mat(h, w, CV_8UC1)); }, "CV_32FC1");
+    checkContents();
+}
+
 struct TempDirectory {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
         ("fs_ma_engine_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -158,6 +250,7 @@ int main(int argc, char** argv) {
         std::ofstream(empty).close();
         // MA can be constructed without FS and owns a non-blocking stream.
         auto model = std::make_unique<fs::MA_VGGT>();
+        rejects([&] { model->uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
         const auto ma_stream = model->stream();
         require(!model->isLoaded() && ma_stream, "Incorrect initial model or stream");
         unsigned int flags{};
@@ -208,6 +301,7 @@ int main(int argc, char** argv) {
         require(model->isLoaded() && model->stream() == ma_stream, "Successful reload changed the stream");
         checkBuffers();
         checkColorUploads(*model);
+        checkDepthUploads(*model);
         model.reset();
         for (const auto* pointer : pointers)
             require(!deviceAllocation(pointer), "Destructor retained a GPU I/O allocation");
@@ -228,10 +322,11 @@ int main(int argc, char** argv) {
         // Destruction also drains queued work before releasing buffers/stream.
         checked(cudaMemsetAsync(model->depthsDevice(), 0, elements[1]*sizeof(float), final_stream));
         model->uploadColor(0, cv::Mat(50, 80, CV_8UC3, cv::Scalar(5, 20, 240)), {60, 55, 39.5, 24.5, 0});
+        model->uploadDepth(0, cv::Mat(50, 80, CV_32FC1, cv::Scalar(0.4)));
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view Lanczos4 uploads with fused GPU DINOv2 normalization/unit camera rays, pixel-center resize geometry, retake calibration updates, depth isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
+        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view Lanczos4 uploads with fused GPU DINOv2 normalization/unit camera rays and metric ray distance, pixel-center resize geometry, retake updates, invalid depth/ringing cleanup, channel isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

@@ -26,6 +26,18 @@ __global__ void prepare_rgb_and_rays_kernel(float* input, int width, int pixel_c
     input[5 * plane + index] = 1.0F / norm;
 }
 
+__global__ void prepare_ray_distance_kernel(float* input, int pixel_count) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::size_t plane = pixel_count;
+    if (index >= plane) return;
+    const float depth_z = input[6 * plane + index];
+    const float ray_z = input[5 * plane + index];
+    // For a unit ray, norm(depth_z * ray / ray_z) == depth_z / ray_z.
+    const float distance = depth_z / ray_z;
+    input[6 * plane + index] = isfinite(depth_z) && depth_z > 0.0F &&
+        isfinite(ray_z) && ray_z > 0.0F && isfinite(distance) ? distance : 0.0F;
+}
+
 } // namespace
 
 cudaError_t prepare_rgb_and_rays(float* input, int width, int height,
@@ -38,6 +50,15 @@ cudaError_t prepare_rgb_and_rays(float* input, int width, int height,
     const int pixel_count = width * height;
     prepare_rgb_and_rays_kernel<<<1 + (pixel_count - 1) / threads, threads, 0, stream>>>(
         input, width, pixel_count, fx, fy, cx, cy);
+    return cudaGetLastError();
+}
+
+cudaError_t prepare_ray_distance(float* input, int width, int height, cudaStream_t stream) noexcept {
+    if (!input || width <= 0 || height <= 0 || width > INT_MAX / height)
+        return cudaErrorInvalidValue;
+    constexpr int threads = 256;
+    const int pixel_count = width * height;
+    prepare_ray_distance_kernel<<<1 + (pixel_count - 1) / threads, threads, 0, stream>>>(input, pixel_count);
     return cudaGetLastError();
 }
 

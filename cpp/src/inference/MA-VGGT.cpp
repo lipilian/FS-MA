@@ -5,7 +5,9 @@
 #include <NvInfer.h>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -93,21 +95,36 @@ DeviceBuffer allocate(std::size_t elements, const char* name) {
 struct HostFree {
     void operator()(float* pointer) const noexcept { if (pointer) cudaFreeHost(pointer); }
 };
-struct ColorUpload {
+struct InputUpload {
     std::unique_ptr<float, HostFree> host;
     cv::Mat resized;
     cudaEvent_t done{};
     bool pending{false};
 
-    ColorUpload() : resized(MA_VGGT::kInputHeight, MA_VGGT::kInputWidth, CV_8UC3) {
+    InputUpload(int type, std::size_t elements) : resized(MA_VGGT::kInputHeight, MA_VGGT::kInputWidth, type) {
         void* pointer = nullptr;
-        checkCuda(cudaMallocHost(&pointer, kColorElements * sizeof(float)), "cannot allocate pinned RGB staging buffer");
+        checkCuda(cudaMallocHost(&pointer, elements * sizeof(float)), "cannot allocate pinned input staging buffer");
         host.reset(static_cast<float*>(pointer));
-        checkCuda(cudaEventCreateWithFlags(&done, cudaEventDisableTiming), "cannot create RGB upload event");
+        checkCuda(cudaEventCreateWithFlags(&done, cudaEventDisableTiming), "cannot create input upload event");
     }
-    ~ColorUpload() { cudaEventDestroy(done); }
-    ColorUpload(const ColorUpload&) = delete;
-    ColorUpload& operator=(const ColorUpload&) = delete;
+    ~InputUpload() { cudaEventDestroy(done); }
+    InputUpload(const InputUpload&) = delete;
+    InputUpload& operator=(const InputUpload&) = delete;
+
+    void wait() const {
+        if (pending) checkCuda(cudaEventSynchronize(done), "cannot wait for previous input upload");
+    }
+    void enqueue(float* destination, std::size_t elements, cudaStream_t stream) {
+        checkCuda(cudaMemcpyAsync(destination, host.get(), elements * sizeof(float), cudaMemcpyHostToDevice, stream),
+                  "cannot upload input");
+        const auto error = cudaEventRecord(done, stream);
+        // Drain the H2D read if recording fails before staging can be reused.
+        if (error != cudaSuccess) {
+            cudaStreamSynchronize(stream);
+            checkCuda(error, "cannot record input upload completion");
+        }
+        pending = true;
+    }
 };
 
 struct Model {
@@ -135,7 +152,10 @@ struct MA_VGGT::Impl {
     // RAII also releases the stream if a buffer allocation fails in construction.
     CudaStream stream;
     DeviceBuffer inputs, depths, poses, scale;
-    ColorUpload color_upload;
+    InputUpload color_upload{CV_8UC3, kColorElements};
+    InputUpload depth_upload{CV_32FC1, kColorPlane};
+    cv::Mat valid_depth;
+    std::array<bool, kMaxViews> rays_ready{};
     std::unique_ptr<Model> model;
 
     Impl() {
@@ -174,7 +194,7 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const St
                0.0, 0.0, cv::INTER_LANCZOS4);
     // Wait only for the preceding H2D read of the reused pinned buffer, not
     // for later MA kernels or anything on FS's independent stream.
-    if (upload.pending) checkCuda(cudaEventSynchronize(upload.done), "cannot wait for previous RGB upload");
+    upload.wait();
     float* destination = upload.host.get();
     for (int y = 0; y < kInputHeight; ++y) {
         const auto* row = upload.resized.ptr<cv::Vec3b>(y);
@@ -186,20 +206,39 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const St
         }
     }
     float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
-    checkCuda(cudaMemcpyAsync(view_input, destination, kColorElements * sizeof(float), cudaMemcpyHostToDevice, stream()),
-              "cannot upload RGB input");
-    const auto error = cudaEventRecord(upload.done, stream());
-    // If recording fails, finish the copy before the staging buffer can be reused.
-    if (error != cudaSuccess) {
-        cudaStreamSynchronize(stream());
-        checkCuda(error, "cannot record RGB upload completion");
-    }
-    upload.pending = true;
+    upload.enqueue(view_input, kColorElements, stream());
     // Same-stream ordering starts this kernel after H2D, without a CPU wait.
     // The event above protects only host staging; the kernel uses device input.
     checkCuda(ma_preprocessing::prepare_rgb_and_rays(view_input, kInputWidth, kInputHeight,
                                                     fx, fy, cx, cy, stream()),
               "cannot launch RGB normalization and camera rays");
+    impl_->rays_ready[view_index] = true;
+}
+
+void MA_VGGT::uploadDepth(int view_index, const cv::Mat& depth_z) {
+    require(view_index >= 0 && view_index < kMaxViews, "Depth view index must be in 0..4");
+    require(!depth_z.empty() && depth_z.dims == 2 && depth_z.type() == CV_32FC1,
+            "Depth upload requires a nonempty CV_32FC1 metric Z-depth image");
+    require(impl_->rays_ready[view_index], "Depth upload requires camera rays from uploadColor for this view");
+    auto& upload = impl_->depth_upload;
+    auto& valid = impl_->valid_depth;
+    valid.create(depth_z.size(), CV_32FC1);
+    // Match the notebook's source-depth cleanup before interpolation, so a
+    // non-finite source pixel cannot contaminate neighbouring Lanczos samples.
+    for (int y = 0; y < depth_z.rows; ++y) {
+        const float* source = depth_z.ptr<float>(y);
+        float* target = valid.ptr<float>(y);
+        for (int x = 0; x < depth_z.cols; ++x)
+            target[x] = std::isfinite(source[x]) && source[x] > 0.0F ? source[x] : 0.0F;
+    }
+    cv::resize(valid, upload.resized, cv::Size(kInputWidth, kInputHeight), 0.0, 0.0, cv::INTER_LANCZOS4);
+    upload.wait();
+    std::memcpy(upload.host.get(), upload.resized.ptr<float>(), kColorPlane * sizeof(float));
+    float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    upload.enqueue(view_input + 6 * kColorPlane, kColorPlane, stream());
+    // Same-stream ordering waits for both this H2D and the earlier ray kernel.
+    checkCuda(ma_preprocessing::prepare_ray_distance(view_input, kInputWidth, kInputHeight, stream()),
+              "cannot launch Z-depth to ray-distance conversion");
 }
 
 void MA_VGGT::loadEngine(const std::filesystem::path& path) {
