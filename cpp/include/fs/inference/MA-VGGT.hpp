@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <memory>
 
+namespace cv { class Mat; }
+
 namespace fs {
 
 // MapAnything dynamic RAW engine (the MA-VGGT integration entry point).
@@ -36,6 +38,13 @@ public:
     void loadEngine(const std::filesystem::path& path);
     bool isLoaded() const noexcept;
     cudaStream_t stream() const noexcept; // Borrowed handle; do not destroy.
+
+    // Resize a rectified CV_8UC3 RGB image directly to 518x434 on the CPU with
+    // INTER_LANCZOS4 (no crop), pack FP32 CHW values in [0,255], and enqueue H2D
+    // on stream(). Writes only channels 0..2 of view_index (0..4); replacing a
+    // view leaves other slots and geometry channels unchanged. No normalization
+    // or inference. Owns the pinned staging memory until the upload completes.
+    void uploadColor(int view_index, const cv::Mat& rectified_rgb);
 
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;

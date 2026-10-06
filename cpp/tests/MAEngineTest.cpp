@@ -1,13 +1,16 @@
 #include "fs/inference/FS.hpp"
 #include "fs/inference/MA-VGGT.hpp"
 
+#include <opencv2/imgproc.hpp>
 #include <chrono>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 void require(bool condition, const char* message) {
@@ -29,11 +32,75 @@ bool deviceAllocation(const float* pointer) {
 template<class Action> void rejects(Action action, const char* expected) {
     try { action(); }
     catch (const std::runtime_error& error) {
-        require(std::string(error.what()).find(expected) != std::string::npos, "Unexpected load error");
+        require(std::string(error.what()).find(expected) != std::string::npos, "Unexpected error");
         return;
     }
-    throw std::runtime_error("Invalid model load unexpectedly succeeded");
+    throw std::runtime_error("Invalid operation unexpectedly succeeded");
 }
+
+void checkColorUploads(fs::MA_VGGT& model) {
+    constexpr int h = fs::MA_VGGT::kInputHeight, w = fs::MA_VGGT::kInputWidth;
+    constexpr std::size_t plane = std::size_t{h} * w;
+    constexpr std::uint32_t untouched = 0x3f3f3f3fU;
+    std::array<cv::Mat, fs::MA_VGGT::kMaxViews> expected;
+    const auto* input = model.inputDevice();
+    checked(cudaMemsetAsync(model.inputDevice(), 0x3f, fs::MA_VGGT::kInputElements * sizeof(float), model.stream()));
+
+    const auto checkContents = [&] {
+        require(model.inputDevice() == input, "Color upload replaced the engine's input allocation");
+        std::vector<float> actual(fs::MA_VGGT::kInputElements);
+        checked(cudaMemcpyAsync(actual.data(), input, actual.size() * sizeof(float), cudaMemcpyDeviceToHost, model.stream()));
+        checked(cudaStreamSynchronize(model.stream()));
+        for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+            for (int c = 0; c < 7; ++c) {
+                for (int y = 0; y < h; ++y) {
+                    for (int x = 0; x < w; ++x) {
+                        const auto offset = (v * 7 + c) * plane + y * w + x;
+                        if (c < 3 && !expected[v].empty()) {
+                            require(actual[offset] == float(expected[v].at<cv::Vec3b>(y, x)[c]),
+                                    "Uploaded RGB differs from raw FP32 CHW Lanczos4 resize (crop, normalization, channel order or slot mismatch)");
+                        } else {
+                            std::uint32_t bits{};
+                            std::memcpy(&bits, &actual[offset], sizeof(bits));
+                            require(bits == untouched, "Color upload overwrote geometry channels or another view");
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // Different aspect ratios exercise a direct resize; non-contiguous ROIs
+    // and immediately modified/destroyed source Mats exercise staging ownership.
+    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+        const int source_w = 640 + v * 83, source_h = 480 - v * 41;
+        cv::Mat storage(source_h + 8, source_w + 16, CV_8UC3);
+        cv::Mat rgb = storage(cv::Rect(3, 2, source_w, source_h));
+        require(!rgb.isContinuous(), "Test image must have a row stride");
+        for (int y = 0; y < rgb.rows; ++y) {
+            auto* row = rgb.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < rgb.cols; ++x)
+                row[x] = cv::Vec3b((x + v * 17) % 256, (y * 3 + v * 29) % 256, (x + y * 2 + v * 43) % 256);
+        }
+        cv::resize(rgb, expected[v], cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
+        model.uploadColor(v, rgb);
+        rgb.setTo(cv::Scalar::all(0));
+        if (v == 0) checkContents(); // Includes all untouched future slots.
+    }
+    checkContents();
+
+    // Retake the last view; all earlier views and all geometry must survive.
+    const cv::Mat replacement(700, 300, CV_8UC3, cv::Scalar(12, 34, 250));
+    expected.back() = cv::Mat(h, w, CV_8UC3, cv::Scalar(12, 34, 250));
+    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement);
+    checkContents();
+    rejects([&] { model.uploadColor(-1, replacement); }, "view index");
+    rejects([&] { model.uploadColor(fs::MA_VGGT::kMaxViews, replacement); }, "view index");
+    rejects([&] { model.uploadColor(0, cv::Mat{}); }, "CV_8UC3");
+    rejects([&] { model.uploadColor(0, cv::Mat(h, w, CV_32FC3)); }, "CV_8UC3");
+    checkContents();
+}
+
 struct TempDirectory {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
         ("fs_ma_engine_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -99,6 +166,7 @@ int main(int argc, char** argv) {
         model->loadEngine(argv[1]);
         require(model->isLoaded() && model->stream() == ma_stream, "Successful reload changed the stream");
         checkBuffers();
+        checkColorUploads(*model);
         model.reset();
         for (const auto* pointer : pointers)
             require(!deviceAllocation(pointer), "Destructor retained a GPU I/O allocation");
@@ -118,10 +186,11 @@ int main(int argc, char** argv) {
         checked(cudaStreamSynchronize(final_stream));
         // Destruction also drains queued work before releasing buffers/stream.
         checked(cudaMemsetAsync(model->depthsDevice(), 0, elements[1]*sizeof(float), final_stream));
+        model->uploadColor(0, cv::Mat(50, 80, CV_8UC3, cv::Scalar(5, 20, 240)));
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
+        std::cout << "PASS: constructor V=5 GPU I/O capacity, stable addresses/data through load and reload, dynamic shapes, load errors, five-view raw FP32 Lanczos4 RGB uploads and retake isolation, GPU buffer release, independent non-blocking streams and FS/MA lifetimes; no inference\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

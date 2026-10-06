@@ -477,6 +477,8 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         throw std::logic_error("Invalid capture sequence slot.");
     if (!state_.engine_ready || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("FoundationStereo must finish splash initialization before reconstruction.");
+    if (!ma_ || !ma_->isLoaded())
+        throw std::runtime_error("MapAnything must finish splash initialization before reconstruction.");
     if (!frame_ || state_.live) throw std::runtime_error("Import or freeze a stereo pair before reconstruction.");
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum < 0 || maximum <= minimum)
         throw std::runtime_error("Depth range must satisfy 0 ≤ minimum < maximum (metres).");
@@ -500,11 +502,16 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     fs_->set_selection_mask(mask); // Also completes the queued input uploads.
     emit log(QString("Input preparation: %1 ms").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
     reportProgress(25, "Running FoundationStereo inference…");
-    // Synchronized wall time: measure this inference only, excluding preparation.
+    // Submit FS first so MA's CPU resize/packing and independent H2D upload can
+    // overlap inference. Keep capture slots stable when replacing a retake.
     elapsed.restart();
-    fs_->inference(); fs_->synchronize();
+    fs_->inference();
+    ma_->uploadColor(capture_slot_, frame_->rectified_left());
+    emit log(QString("MA RGB upload queued · view %1 · 518 × 434 · FP32 CHW [0,255] · Lanczos4 resize · independent stream")
+        .arg(capture_slot_ + 1));
+    fs_->synchronize();
     const double inference_ms=elapsed.nsecsElapsed()/1e6;
-    emit log(QString("Inference: %1 ms").arg(inference_ms,0,'f',3));
+    emit log(QString("FS inference + overlapping MA RGB preparation: %1 ms").arg(inference_ms,0,'f',3));
     reportProgress(65, "Computing valid XYZ on GPU…"); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint();
     if (denoise) {
