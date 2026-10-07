@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 
-project(TSFS LANGUAGES C CXX CUDA)
+project(TSFS LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,9 +8,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND "$ENV{CUDAARCHS}" STREQUAL "")
     set(CMAKE_CUDA_ARCHITECTURES 120)
 endif()
+
+# Find standard toolkit installations even when nvcc is not on PATH. Respect
+# compilers selected through CMAKE_CUDA_COMPILER, a toolchain file, or CUDACXX.
+if(NOT CMAKE_CUDA_COMPILER AND "$ENV{CUDACXX}" STREQUAL "")
+    find_package(CUDAToolkit REQUIRED)
+    set(CMAKE_CUDA_COMPILER "${CUDAToolkit_NVCC_EXECUTABLE}")
+endif()
+enable_language(CUDA)
 
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgcodecs imgproc calib3d)
 find_package(CUDAToolkit REQUIRED)
