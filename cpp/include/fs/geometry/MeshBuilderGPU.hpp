@@ -19,6 +19,16 @@ struct MeshGPUInputs {
     cudaStream_t stream{nullptr}; // The existing FS stream, never a new stream.
 };
 
+// One view of MA's RAW dense output [6,H,W], RGB/rays/input depth [7,H,W],
+// and shared raw log scale [1]. All pointers stay on the MA CUDA device.
+struct MAPointCloudGPUInputs {
+    const float* dense{nullptr};
+    const float* input{nullptr};
+    const float* scale{nullptr};
+    int width{0}, height{0};
+    cudaStream_t stream{nullptr};
+};
+
 // Rendering layout: XYZ in camera-space metres and RGB in [0,1].
 struct MeshGPUVertex { float x, y, z, r, g, b; };
 struct MeshGPUStats {
@@ -46,6 +56,7 @@ private:
     std::unique_ptr<Impl> impl_;
     friend MeshGPUStats build_mesh_gpu(const MeshGPUInputs&, MeshGPUBuffer&, double, double);
     friend MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs&, MeshGPUBuffer&);
+    friend MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs&, MeshGPUBuffer&);
 };
 
 // One 16x16-block thread per pixel cell. Four valid corners produce ABD/ADC;
@@ -60,4 +71,10 @@ MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
 // Preserve every selected finite XYZ sample with Z>0, including isolated points.
 // XYZ/RGB stay on the device; only point count and bounds are downloaded.
 MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output);
+// Decode predicted unit rays * exp(depth) * exp(scale) into camera-space metres
+// and undo DINOv2 RGB normalization on GPU. Keep finite forward-facing points
+// with a positive non-ambiguous mask logit and finite positive input depth in
+// channel 6. Zero/invalid input depth produces a zero vertex even when MA
+// predicts valid depth. Only count/bounds leave the device.
+MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs& inputs, MeshGPUBuffer& output);
 } // namespace fs

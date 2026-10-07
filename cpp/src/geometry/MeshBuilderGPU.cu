@@ -128,6 +128,48 @@ __global__ void build_points(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUS
     }
     if (tid==0) partials[blockIdx.y*gridDim.x+blockIdx.x]=values[0];
 }
+__global__ void build_ma_points(MAPointCloudGPUInputs in, MeshGPUVertex* vertices, MeshGPUStats* partials) {
+    const int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y*blockDim.y+threadIdx.y;
+    const int tid=threadIdx.y*side+threadIdx.x;
+    MeshGPUStats stats=empty_stats();
+    if (x<in.width && y<in.height) {
+        const int id=y*in.width+x, plane=in.width*in.height;
+        vertices[id]={};
+        const float rx=in.dense[id], ry=in.dense[plane+id], rz=in.dense[2*plane+id];
+        const float norm=sqrtf(rx*rx+ry*ry+rz*rz);
+        const float raw_depth=in.dense[3*plane+id], raw_scale=*in.scale;
+        const float scale=fmaxf(expf(raw_scale),1e-8f);
+        const float distance=expf(raw_depth)*scale;
+        const float mask=in.dense[5*plane+id];
+        // Channel 6 is the actual MA input ray distance on this 518x434 grid.
+        // An invalid input pixel must stay empty even if MA predicts a surface.
+        const float input_depth=in.input[6*plane+id];
+        const float r=in.input[id]*.229f+.485f;
+        const float g=in.input[plane+id]*.224f+.456f;
+        const float b=in.input[2*plane+id]*.225f+.406f;
+        // Match the unit-sphere adaptor, including its epsilon for tiny rays.
+        const float divisor=fmaxf(norm,1e-8f);
+        const float3 p=make_float3(rx/divisor*distance,ry/divisor*distance,rz/divisor*distance);
+        if (isfinite(input_depth) && input_depth>0 &&
+            isfinite(norm) && norm>0 && isfinite(raw_depth) && isfinite(raw_scale) &&
+            isfinite(scale) && isfinite(distance) && distance>0 &&
+            isfinite(mask) && mask>0 && valid(p) && isfinite(r) && isfinite(g) && isfinite(b)) {
+            vertices[id]={p.x,p.y,p.z,fminf(1.f,fmaxf(0.f,r)),fminf(1.f,fmaxf(0.f,g)),fminf(1.f,fmaxf(0.f,b))};
+            stats.point_count=1;
+            stats.low[0]=stats.high[0]=p.x;
+            stats.low[1]=stats.high[1]=p.y;
+            stats.low[2]=stats.high[2]=p.z;
+        }
+    }
+    __shared__ MeshGPUStats values[threads];
+    values[tid]=stats;
+    __syncthreads();
+    for (int stride=threads/2; stride>0; stride/=2) {
+        if (tid<stride) merge_stats(values[tid],values[tid+stride]);
+        __syncthreads();
+    }
+    if (tid==0) partials[blockIdx.y*gridDim.x+blockIdx.x]=values[0];
+}
 __global__ void reduce_stats(const MeshGPUStats* partials, int size, MeshGPUStats* total) {
     const int tid=threadIdx.x;
     MeshGPUStats stats=empty_stats();
@@ -171,6 +213,33 @@ MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& o
         checked(cudaGetLastError(), "launch GPU point cloud reduction");
         checked(cudaMemcpyAsync(&result,storage.total.data,sizeof(result),cudaMemcpyDeviceToHost,inputs.stream), "download GPU point cloud statistics");
         checked(cudaStreamSynchronize(inputs.stream), "complete GPU point cloud");
+    } catch (...) {
+        cudaStreamSynchronize(inputs.stream);
+        throw;
+    }
+    storage.slots=slots;
+    return result;
+}
+
+MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs& inputs, MeshGPUBuffer& output) {
+    output.impl_->slots=0;
+    if (!inputs.dense || !inputs.input || !inputs.scale || !inputs.stream || inputs.width<1 || inputs.height<1 ||
+        std::size_t(inputs.width)*inputs.height>std::size_t(std::numeric_limits<int>::max()/7))
+        throw std::invalid_argument("MA point cloud needs device dense output, RGB input, scale, positive dimensions and the MA stream");
+    const dim3 block(side,side), grid((inputs.width+side-1)/side,(inputs.height+side-1)/side);
+    auto& storage=*output.impl_;
+    const std::size_t slots=std::size_t(inputs.width)*inputs.height;
+    storage.vertices.reserve(slots);
+    storage.partials.reserve(grid.x*grid.y);
+    storage.total.reserve(1);
+    MeshGPUStats result;
+    try {
+        build_ma_points<<<grid,block,0,inputs.stream>>>(inputs,storage.vertices.data,storage.partials.data);
+        checked(cudaGetLastError(), "decode MA GPU point cloud");
+        reduce_stats<<<1,threads,0,inputs.stream>>>(storage.partials.data,grid.x*grid.y,storage.total.data);
+        checked(cudaGetLastError(), "reduce MA GPU point cloud");
+        checked(cudaMemcpyAsync(&result,storage.total.data,sizeof(result),cudaMemcpyDeviceToHost,inputs.stream), "download MA point cloud statistics");
+        checked(cudaStreamSynchronize(inputs.stream), "complete MA GPU point cloud");
     } catch (...) {
         cudaStreamSynchronize(inputs.stream);
         throw;

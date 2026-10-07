@@ -185,7 +185,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
                                 const QString& ma_engine) {
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
     ma_.reset(); fs_.reset(); sam_.reset(); gpu_mesh_.reset();
@@ -224,7 +224,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
         checkpoint();
         emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
         state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
-        auto ma = std::make_unique<fs::MA_VGGT>();
+        auto ma = std::make_shared<fs::MA_VGGT>();
         ma->loadEngine(state_.ma_engine_path.toStdString());
         checkpoint();
         emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
@@ -323,7 +323,7 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     // A successfully imported input starts a new capture sequence. Failed imports
     // leave the existing sequence intact.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     if (ma_) ma_->resetInputs();
 }
 void PipelineWorker::connectCameras(CameraMode mode) {
@@ -391,7 +391,7 @@ void PipelineWorker::startCapturePreview(bool append) {
     if (append) capture_slot_=int(captures_.size());
     else if (clear_single_view) {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
-        state_.predicted_cameras.reset();
+        state_.predicted_cameras.reset(); state_.ma_clouds.reset();
         if (ma_) ma_->resetInputs();
         state_.gpu_ready=false; state_.depth_ready=false;
         latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
@@ -406,7 +406,7 @@ void PipelineWorker::startCapturePreview(bool append) {
 void PipelineWorker::cleanCaptures() {
     setLive(true); // Check the live source before discarding the current sequence.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     frame_.reset(); state_.image_camera.reset();
     state_.has_rectified=false; state_.gpu_ready=false; state_.depth_ready=false;
     latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
@@ -591,17 +591,40 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         checkpoint();
         emit log(QString("MA inference complete · %1 views · %2 ms · raw depths/poses/scale on GPU · independent stream")
             .arg(views).arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
-        reportProgress(99, "Positioning point clouds and camera wireframes…");
+        reportProgress(99, "Building MA point clouds and positioning cameras…");
         const auto poses = ma_->downloadCameraPoses();
         auto cameras = std::make_shared<std::vector<PredictedCameraFrame>>();
+        auto clouds = std::make_shared<std::vector<SharedGPUMesh>>();
         cameras->reserve(views);
+        clouds->reserve(views);
+        constexpr int width=fs::MA_VGGT::kInputWidth, height=fs::MA_VGGT::kInputHeight;
+        constexpr std::size_t plane=std::size_t(width)*height;
+        unsigned long long point_count=0;
         for (int i = 0; i < views; ++i) {
             const auto& frame = *captures_[i].frame;
             cameras->push_back({meshCamera(frame, frame.rectified_left().size()), poses[i],
                                 captures_[i].image_id, captures_[i].ma_image});
+            auto buffer=std::make_shared<fs::MeshGPUBuffer>();
+            auto cloud=std::make_shared<GPUMeshFrame>();
+            cloud->stats=fs::build_ma_point_cloud_gpu({ma_->depthsDevice()+i*6*plane,
+                ma_->inputDevice()+i*7*plane,ma_->scaleDevice(),width,height,ma_->stream()},*buffer);
+            cloud->buffer=std::move(buffer); cloud->point_cloud=true;
+            cloud->camera=meshCamera(frame,{width,height});
+            cloud->image_id=captures_[i].image_id;
+            cloud->stream=ma_->stream(); cloud->stream_owner=ma_;
+            const auto error=cudaGetDevice(&cloud->device);
+            if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+            point_count+=cloud->stats.point_count;
+            clouds->push_back(std::move(cloud));
+            checkpoint();
         }
         checkpoint();
+        // Publish complete immutable clouds and matching poses together. A failed
+        // inference/build leaves the previous MA scene available during retakes.
+        state_.ma_clouds = std::move(clouds);
         state_.predicted_cameras = std::move(cameras);
+        emit log(QString("MA GPU point clouds: %1 valid points · predicted rays/depth/scale decoded on device · XYZ/RGB stay on GPU")
+            .arg(point_count));
         emit log(QString("MA poses ready · %1 FS point clouds and blue cameras with 518 × 434 image textures · predicted camera-to-world poses in metres")
             .arg(views));
         state_.status = QString("Capture complete · MapAnything inference finished for %1 views.").arg(views);
@@ -829,7 +852,7 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
 }
 void PipelineWorker::shutdown() {
     disconnectCameras(); captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     latest_gpu_mesh_.reset(); gpu_mesh_.reset(); ma_.reset(); state_.ma_ready = false;
     sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }

@@ -60,6 +60,20 @@ class MeshCanvas : public QOpenGLWidget {
         if (!gpu_mesh_) dirty_ = true;
         update();
     }
+    void setMAClouds(SharedGPUClouds clouds) {
+        if (ma_clouds_==clouds) return;
+        ma_clouds_=std::move(clouds);
+        captures_dirty_=true; dirty_=true; failed_=false;
+        update();
+    }
+    void setShowMAClouds(bool enabled) {
+        if (show_ma_clouds_==enabled) return;
+        show_ma_clouds_=enabled;
+        // Keep identical framing when comparing both reconstructions.
+        preserveView();
+        dirty_=true;
+        update();
+    }
     void setPredictedCameras(SharedPredictedCameras cameras) {
         if (predicted_cameras_ == cameras) return;
         predicted_cameras_ = std::move(cameras);
@@ -203,7 +217,7 @@ void main() {
     }
     vec3 world=(cameraToWorld*vec4(displayed,1.0)).xyz;
     vec3 p=cameraSpace ? (world-center)/scale*vec3(1.0,-1.0,-1.0) : displayed;
-    // Invalid FS slots have zero camera-space Z. Valid world-space Z may be negative.
+    // Invalid slots have zero camera-space Z. Valid world-space Z may be negative.
     gl_Position=clipInvalid && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
 })";
         const char *fragment = R"(
@@ -358,7 +372,8 @@ void main() {
         program_->setUniformValue("shaded",false);
         program_->setUniformValue("wireframe",false);
         for (const auto& capture:cloud_resources_) {
-            if (capture->frame==hidden_capture_) continue;
+            if (isMACloud(capture->frame)!=show_ma_clouds_) continue;
+            if (!show_ma_clouds_ && capture->frame==hidden_capture_) continue;
             program_->setUniformValue("cameraToWorld",cameraPose(capture->frame));
             capture->vao.bind();
             gl_->glDrawArrays(GL_POINTS,0,capture->count);
@@ -370,7 +385,8 @@ void main() {
         program_->setUniformValue("wireframe",bool(gpu_mesh_) && mode_==2);
         vao_.bind();
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-        gl_->glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
+        if (!show_ma_clouds_)
+            gl_->glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         vao_.release();
         if ((live_preview_ || processing_) && preview_count_ > 0 && !displayCameraImage(0).isNull() && texture_sizes_[0] == preview_size_) {
@@ -463,7 +479,13 @@ void main() {
         qint64 image_key{0};
         int first_vertex{-1};
     };
-    bool hasMesh() const { return !captured_clouds_.empty() || gpu_mesh_ || (mesh_ && !mesh_->vertices.empty()); }
+    bool hasMesh() const {
+        return show_ma_clouds_ ? ma_clouds_ && !ma_clouds_->empty()
+            : !captured_clouds_.empty() || gpu_mesh_ || (mesh_ && !mesh_->vertices.empty());
+    }
+    bool isMACloud(const SharedGPUMesh& mesh) const {
+        return ma_clouds_ && std::find(ma_clouds_->begin(),ma_clouds_->end(),mesh)!=ma_clouds_->end();
+    }
     bool isCaptured(const SharedGPUMesh& mesh) const {
         return std::find(captured_clouds_.begin(),captured_clouds_.end(),mesh)!=captured_clouds_.end();
     }
@@ -550,7 +572,7 @@ void main() {
             for (int k=0;k<3;++k) { low[k]=std::min(low[k],p[k]); high[k]=std::max(high[k],p[k]); }
         };
         const auto add_gpu=[&](const SharedGPUMesh& mesh) {
-            if (!mesh) return;
+            if (!mesh || !(mesh->stats.point_count || mesh->stats.triangle_count)) return;
             const auto& s=mesh->stats;
             const auto pose=cameraPose(mesh);
             // A rotated local bounding box needs all eight corners.
@@ -560,9 +582,13 @@ void main() {
                 add({p.x(),p.y(),p.z()});
             }
         };
-        for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_) add_gpu(cloud);
-        add_gpu(gpu_mesh_);
-        if (mesh_) {
+        if (show_ma_clouds_) {
+            if (ma_clouds_) for (const auto& cloud:*ma_clouds_) add_gpu(cloud);
+        } else {
+            for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_) add_gpu(cloud);
+            add_gpu(gpu_mesh_);
+        }
+        if (!show_ma_clouds_ && mesh_) {
             const auto pose=cameraPose(hidden_capture_);
             for (const auto& local:mesh_->vertices) {
                 const auto p=pose.map(QVector3D(local[0],local[1],local[2]));
@@ -590,11 +616,13 @@ void main() {
     }
     void uploadCaptures() {
         for (auto it=cloud_resources_.begin();it!=cloud_resources_.end();) {
-            if (isCaptured((*it)->frame)) { ++it; continue; }
+            if (isCaptured((*it)->frame) || isMACloud((*it)->frame)) { ++it; continue; }
             destroyCapture(**it); it=cloud_resources_.erase(it);
         }
-        for (const auto& frame:captured_clouds_) {
-            if (!frame) continue;
+        auto clouds=captured_clouds_;
+        if (ma_clouds_) clouds.insert(clouds.end(),ma_clouds_->begin(),ma_clouds_->end());
+        for (const auto& frame:clouds) {
+            if (!frame || !frame->stats.point_count) continue;
             const auto existing=std::find_if(cloud_resources_.begin(),cloud_resources_.end(),
                 [&](const auto& resource) { return resource->frame==frame; });
             if (existing!=cloud_resources_.end()) continue;
@@ -937,6 +965,8 @@ void main() {
     MeshView* owner_;
     SharedGPUMesh gpu_mesh_;
     std::vector<SharedGPUMesh> captured_clouds_;
+    SharedGPUClouds ma_clouds_;
+    bool show_ma_clouds_{false};
     SharedPredictedCameras predicted_cameras_;
     std::vector<CameraTexture> predicted_textures_;
     SharedGPUMesh hidden_capture_;
@@ -1021,6 +1051,12 @@ void MeshView::setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMes
 }
 void MeshView::setPredictedCameras(SharedPredictedCameras cameras) {
     if (canvas_) canvas_->setPredictedCameras(std::move(cameras));
+}
+void MeshView::setMAClouds(SharedGPUClouds clouds) {
+    if (canvas_) canvas_->setMAClouds(std::move(clouds));
+}
+void MeshView::setShowMAClouds(bool enabled) {
+    if (canvas_) canvas_->setShowMAClouds(enabled);
 }
 void MeshView::setMode(int mode) {
     if (canvas_)

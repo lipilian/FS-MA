@@ -20,6 +20,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -156,6 +157,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
 
     tabs_ = new QTabWidget; tabs_->setObjectName("workspaceTabs");
     auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
+    auto* cloud_controls=new QHBoxLayout;
+    fs_cloud_=new QRadioButton("FS point cloud"); fs_cloud_->setObjectName("fsPointCloud");
+    ma_cloud_=new QRadioButton("MA point cloud"); ma_cloud_->setObjectName("maPointCloud");
+    auto* cloud_source=new QButtonGroup(this); cloud_source->setExclusive(true);
+    cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_);
+    fs_cloud_->setChecked(true);
+    cloud_controls->addWidget(fs_cloud_); cloud_controls->addWidget(ma_cloud_); cloud_controls->addStretch();
+    scene_layout->addLayout(cloud_controls);
     camera_image_mode_ = new QComboBox; camera_image_mode_->setObjectName("cameraImageMode");
     camera_image_mode_->addItems({"Left image", "Depth map"});
     camera_image_mode_->setToolTip("Display the rectified left image or Jet depth map on the camera image plane.");
@@ -178,6 +187,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); });
     connect(reset,&QPushButton::clicked,this,[this] { mesh_view_->resetView(); });
     connect(show_right_camera,&QCheckBox::toggled,this,[this](bool visible) { mesh_view_->setRightCameraVisible(visible); });
+    connect(ma_cloud_,&QRadioButton::toggled,this,[this] { refresh(); });
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
@@ -468,6 +478,17 @@ void ReconstructionWindow::refresh() {
     // Update it before controls that can cause a synchronous OpenGL repaint.
     if (closing_) captured_clouds_.clear();
     mesh_view_->setPredictedCameras(closing_ ? SharedPredictedCameras{} : state_.predicted_cameras);
+    mesh_view_->setMAClouds(closing_ ? SharedGPUClouds{} : state_.ma_clouds);
+    const bool ma_available=!closing_ && state_.ma_clouds && !state_.ma_clouds->empty();
+    if (!ma_available && ma_cloud_->isChecked()) {
+        const QSignalBlocker fs_blocker(fs_cloud_), ma_blocker(ma_cloud_);
+        fs_cloud_->setChecked(true);
+    }
+    const bool show_ma=ma_cloud_->isChecked();
+    fs_cloud_->setEnabled(!closing_); ma_cloud_->setEnabled(ma_available);
+    ma_cloud_->setToolTip(ma_available ? "Display MapAnything's predicted point clouds."
+        : "Available after MapAnything finishes inference on at least two captures.");
+    mesh_view_->setShowMAClouds(show_ma);
     const bool replacement=(mesh_valid_ || gpu_upload_pending_) &&
         (mesh_result_ || (gpu_mesh_result_ && !gpu_mesh_result_->point_cloud));
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
@@ -530,9 +551,9 @@ void ReconstructionWindow::refresh() {
     }
     const bool point_cloud=(mesh_valid_ || gpu_upload_pending_) && ((mesh_result_ && mesh_result_->triangles.empty()) ||
                                                                   (gpu_mesh_result_ && gpu_mesh_result_->point_cloud));
-    save_mesh_->setText(point_cloud ? "Point cloud (mesh.ply)" : "Mesh (mesh.ply)");
-    save_mesh_->setToolTip(gpu_mesh_result_ ? "Save the displayed GPU points or mesh as PLY; downloads geometry only when saving." : "Save the current points or mesh as PLY.");
-    mesh_mode_->setEnabled(mesh_valid_);
+    save_mesh_->setText(point_cloud ? "FS point cloud (mesh.ply)" : "FS mesh (mesh.ply)");
+    save_mesh_->setToolTip("Save the current FS points or mesh as PLY; the FS / MA selector controls the 3D display.");
+    mesh_mode_->setEnabled(mesh_valid_ && !show_ma);
     for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(!point_cloud);
     browse_save_->setEnabled(idle);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
@@ -562,7 +583,12 @@ void ReconstructionWindow::refresh() {
         : result_current ? "Depth ready. Switch the camera image or generate a CPU / GPU mesh."
         : frozen ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
         : "Connect cameras to see the left live image in 3D, or import a capture.");
-    if (!captured_clouds_.empty())
+    if (show_ma) {
+        unsigned long long points=0;
+        for (const auto& cloud:*state_.ma_clouds) points+=cloud->stats.point_count;
+        scene_status_->setText(QString("MA point cloud · %1 valid points · %2 views")
+            .arg(points).arg(state_.ma_clouds->size()));
+    } else if (!captured_clouds_.empty())
         scene_status_->setText(scene_status_->text()+QString(" · %1 completed %2 visible")
             .arg(captured_clouds_.size()).arg(captured_clouds_.size()==1 ? "capture" : "captures"));
     showImages();

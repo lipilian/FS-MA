@@ -42,6 +42,7 @@ struct PipelineState {
     quint64 image_id{0};
     std::optional<fs::MeshCamera> live_camera, image_camera;
     SharedPredictedCameras predicted_cameras;
+    SharedGPUClouds ma_clouds;
 };
 Q_DECLARE_METATYPE(PipelineState)
 
@@ -117,7 +118,7 @@ private:
     int capture_slot_{0}; // Retake replaces this slot; Capture more selects the next slot.
     std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
-    std::unique_ptr<fs::MA_VGGT> ma_;
+    std::shared_ptr<fs::MA_VGGT> ma_;
     // Owned snapshots from the depth display download; CPU meshing and depth export reuse these.
     cv::Mat mesh_xyz_, mesh_mask_, mesh_rgb_;
     QByteArray calibration_json_;

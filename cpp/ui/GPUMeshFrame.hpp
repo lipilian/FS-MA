@@ -4,8 +4,8 @@
 #include <QMetaType>
 #include <QImage>
 
-// Immutable, completed device output. Never includes borrowed FS input pointers.
-// Keeps the FS stream owner alive through queued delivery, upload and GL context
+// Immutable, completed device output. Never includes borrowed model input pointers.
+// Keeps the FS or MA stream owner alive through queued delivery, upload and GL context
 // recreation. The worker must not rebuild into a buffer referenced by a frame.
 struct GPUMeshFrame {
     std::shared_ptr<const fs::MeshGPUBuffer> buffer;
@@ -19,6 +19,7 @@ struct GPUMeshFrame {
 };
 using SharedGPUMesh = std::shared_ptr<const GPUMeshFrame>;
 Q_DECLARE_METATYPE(SharedGPUMesh)
+using SharedGPUClouds = std::shared_ptr<const std::vector<SharedGPUMesh>>;
 
 // Small, immutable display snapshot in MA's predicted world coordinate frame.
 // Intrinsics define each wireframe's shape; camera_to_world defines its pose.

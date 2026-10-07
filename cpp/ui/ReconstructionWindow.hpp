@@ -15,6 +15,7 @@ class MaskEditor;
 class MeshView;
 class QComboBox;
 class QLineEdit;
+class QRadioButton;
 
 class ReconstructionWindow : public QMainWindow {
     Q_OBJECT
@@ -60,6 +61,7 @@ private:
     QLineEdit* save_directory_;
     QLabel* save_calibration_name_;
     MeshView* mesh_view_;
+    QRadioButton *fs_cloud_, *ma_cloud_;
     QComboBox* mesh_mode_;
     QComboBox* camera_image_mode_;
     QComboBox* camera_mode_;

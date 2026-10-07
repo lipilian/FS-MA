@@ -1,6 +1,7 @@
 #include "fs/inference/FS.hpp"
 #include "fs/inference/MA-VGGT.hpp"
 #include "fs/inference/MAPostprocessing.hpp"
+#include "fs/geometry/MeshBuilderGPU.hpp"
 
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
@@ -303,6 +304,7 @@ void checkInference(fs::MA_VGGT& model) {
         checked(cudaMemcpy(raw_poses.data(),model.posesDevice(),views*7*sizeof(float),cudaMemcpyDeviceToHost));
         checked(cudaMemcpy(&raw_scale,model.scaleDevice(),sizeof(float),cudaMemcpyDeviceToHost));
         const float scale = std::max(std::exp(raw_scale),1e-8F);
+        fs::MeshGPUBuffer point_cloud;
         for (int v = 0; v < views; ++v) {
             const auto& pose = cameras[v];
             for (int c = 0; c < 3; ++c)
@@ -311,6 +313,34 @@ void checkInference(fs::MA_VGGT& model) {
                                       pose(2,0),pose(2,1),pose(2,2));
             require(cv::norm(rotation.t()*rotation-cv::Matx33d::eye()) < 1e-6 &&
                     std::abs(cv::determinant(rotation)-1) < 1e-6, "Invalid predicted camera rotation");
+            const auto stats=fs::build_ma_point_cloud_gpu({model.depthsDevice()+v*6*plane,
+                model.inputDevice()+v*7*plane,model.scaleDevice(),fs::MA_VGGT::kInputWidth,
+                fs::MA_VGGT::kInputHeight,model.stream()},point_cloud);
+            std::vector<float> dense(6*plane), input(7*plane);
+            std::vector<fs::MeshGPUVertex> vertices(plane);
+            // CPU readback is only for validation of the production GPU path.
+            checked(cudaMemcpy(dense.data(),model.depthsDevice()+v*6*plane,dense.size()*sizeof(float),cudaMemcpyDeviceToHost));
+            checked(cudaMemcpy(input.data(),model.inputDevice()+v*7*plane,input.size()*sizeof(float),cudaMemcpyDeviceToHost));
+            checked(cudaMemcpy(vertices.data(),point_cloud.vertices(),vertices.size()*sizeof(vertices[0]),cudaMemcpyDeviceToHost));
+            unsigned long long retained=0;
+            for (std::size_t i=0;i<plane;++i) {
+                const cv::Vec3f ray(dense[i],dense[plane+i],dense[2*plane+i]);
+                const float distance=std::exp(dense[3*plane+i])*scale;
+                const auto p=ray/std::max(float(cv::norm(ray)),1e-8f)*distance;
+                const bool valid=std::isfinite(input[6*plane+i]) && input[6*plane+i]>0 &&
+                    dense[5*plane+i]>0 && p[2]>0 &&
+                    std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]);
+                const auto& point=vertices[i];
+                if (!valid) { require(point.z==0,"MA invalid prediction reached the renderer"); continue; }
+                ++retained;
+                require(cv::norm(p-cv::Vec3f(point.x,point.y,point.z))<1e-5*std::max(1.f,distance),
+                    "GPU MA point differs from decoded real prediction");
+                require(std::abs(point.r-std::clamp(input[i]*.229f+.485f,0.f,1.f))<1e-6f &&
+                    std::abs(point.g-std::clamp(input[plane+i]*.224f+.456f,0.f,1.f))<1e-6f &&
+                    std::abs(point.b-std::clamp(input[2*plane+i]*.225f+.406f,0.f,1.f))<1e-6f,
+                    "GPU MA point has incorrect image color");
+            }
+            require(stats.point_count==retained,"MA rendered count differs from real prediction");
         }
         return hash;
     };
@@ -323,7 +353,9 @@ void checkInference(fs::MA_VGGT& model) {
         }
         model.uploadColor(v, rgb, camera);
         rejects([&] { model.inference(std::max(2, v + 1)); }, "view " + std::to_string(v + 1));
-        model.uploadDepth(v, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.35 + v * 0.02)));
+        cv::Mat depth(800,960,CV_32FC1,cv::Scalar(0.35+v*0.02));
+        depth(cv::Rect(100+v*20,100,160,160)).setTo(0); // Missing FS depth remains absent in MA clouds.
+        model.uploadDepth(v,depth);
         if (v == 0) rejects([&] { model.inference(2); }, "view 2");
         else run(v + 1);
     }
