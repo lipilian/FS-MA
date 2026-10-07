@@ -279,15 +279,7 @@ void main() {
         gl_->glEnableVertexAttribArray(0);
         gl_->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
         preview_vao_.release(); preview_buffer_.release();
-        gl_->glGenTextures(int(textures_.size()), textures_.data());
-        for (const auto texture : textures_) {
-            gl_->glBindTexture(GL_TEXTURE_2D, texture);
-            gl_->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            gl_->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            gl_->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            gl_->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        }
-        gl_->glBindTexture(GL_TEXTURE_2D, 0);
+        for (auto& texture : textures_) texture=createTexture();
         ready_ = true;
         camera_dirty_ = true; image_dirty_.fill(true);
         preview_geometry_dirty_ = true;
@@ -408,20 +400,22 @@ void main() {
             program_->setUniformValue("clipInvalid",false);
             program_->setUniformValue("shaded",false);
             program_->setUniformValue("wireframe",false);
-            for (int camera = 0; camera < camera_image_count_; ++camera) {
-                if (!displayCameraImage(camera).isNull()) {
-                    gl_->glActiveTexture(GL_TEXTURE0);
-                    gl_->glBindTexture(GL_TEXTURE_2D,textures_[camera]);
-                    program_->setUniformValue("cameraImage",0);
-                    program_->setUniformValue("textured",true);
-                    gl_->glEnable(GL_POLYGON_OFFSET_FILL);
-                    gl_->glPolygonOffset(1.f,1.f);
-                    gl_->glDrawArrays(GL_TRIANGLES,camera_count_+camera*6,6);
-                    gl_->glDisable(GL_POLYGON_OFFSET_FILL);
-                    gl_->glBindTexture(GL_TEXTURE_2D,0);
-                    program_->setUniformValue("textured",false);
-                }
-            }
+            const auto draw_image=[&](GLuint texture,int first) {
+                gl_->glActiveTexture(GL_TEXTURE0);
+                gl_->glBindTexture(GL_TEXTURE_2D,texture);
+                program_->setUniformValue("cameraImage",0);
+                program_->setUniformValue("textured",true);
+                gl_->glEnable(GL_POLYGON_OFFSET_FILL);
+                gl_->glPolygonOffset(1.f,1.f);
+                gl_->glDrawArrays(GL_TRIANGLES,first,6);
+                gl_->glDisable(GL_POLYGON_OFFSET_FILL);
+                gl_->glBindTexture(GL_TEXTURE_2D,0);
+                program_->setUniformValue("textured",false);
+            };
+            for (int camera = 0; camera < camera_image_count_; ++camera)
+                if (!displayCameraImage(camera).isNull()) draw_image(textures_[camera],camera_count_+camera*6);
+            for (const auto& texture:predicted_textures_)
+                if (texture.first_vertex>=0) draw_image(texture.id,texture.first_vertex);
             gl_->glDrawArrays(GL_LINES,0,camera_count_);
             camera_vao_.release();
         }
@@ -462,6 +456,12 @@ void main() {
         QOpenGLVertexArrayObject vao;
         cudaGraphicsResource* interop{nullptr};
         int device{0}, count{0};
+    };
+    struct CameraTexture {
+        GLuint id{0};
+        QSize size;
+        qint64 image_key{0};
+        int first_vertex{-1};
     };
     bool hasMesh() const { return !captured_clouds_.empty() || gpu_mesh_ || (mesh_ && !mesh_->vertices.empty()); }
     bool isCaptured(const SharedGPUMesh& mesh) const {
@@ -513,7 +513,11 @@ void main() {
             camera_buffer_.destroy();
             preview_vao_.destroy(); preview_buffer_.destroy();
             preview_count_ = 0; preview_geometry_dirty_ = true;
-            if (gl_) gl_->glDeleteTextures(int(textures_.size()), textures_.data());
+            if (gl_) {
+                gl_->glDeleteTextures(int(textures_.size()), textures_.data());
+                for (const auto& texture:predicted_textures_) gl_->glDeleteTextures(1,&texture.id);
+            }
+            predicted_textures_.clear();
             textures_ = {}; texture_sizes_ = {};
             uploaded_image_keys_ = {};
             program_.reset();
@@ -697,24 +701,37 @@ void main() {
         buffer_.release();
         dirty_ = false;
     }
-    void uploadImage(int camera) {
-        image_dirty_[camera] = false;
-        const auto& source = displayCameraImage(camera);
-        if (source.isNull() || uploaded_image_keys_[camera] == source.cacheKey()) return;
+    GLuint createTexture() {
+        GLuint texture=0;
+        gl_->glGenTextures(1,&texture);
+        gl_->glBindTexture(GL_TEXTURE_2D,texture);
+        gl_->glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        gl_->glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        gl_->glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        gl_->glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        gl_->glBindTexture(GL_TEXTURE_2D,0);
+        return texture;
+    }
+    void uploadTexture(GLuint texture,const QImage& source,QSize& size,qint64& image_key) {
+        if (source.isNull() || image_key == source.cacheKey()) return;
         const auto image = source.convertToFormat(QImage::Format_RGBA8888);
         gl_->glActiveTexture(GL_TEXTURE0);
-        gl_->glBindTexture(GL_TEXTURE_2D, textures_[camera]);
+        gl_->glBindTexture(GL_TEXTURE_2D, texture);
         gl_->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         gl_->glPixelStorei(GL_UNPACK_ROW_LENGTH, image.bytesPerLine() / 4);
-        if (texture_sizes_[camera] != image.size()) {
+        if (size != image.size()) {
             gl_->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image.width(), image.height(),
                               0, GL_RGBA, GL_UNSIGNED_BYTE, image.constBits());
-            texture_sizes_[camera] = image.size();
+            size = image.size();
         } else gl_->glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image.width(), image.height(),
                                     GL_RGBA, GL_UNSIGNED_BYTE, image.constBits());
         gl_->glBindTexture(GL_TEXTURE_2D, 0);
         gl_->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        uploaded_image_keys_[camera] = source.cacheKey();
+        image_key = source.cacheKey();
+    }
+    void uploadImage(int camera) {
+        image_dirty_[camera] = false;
+        uploadTexture(textures_[camera],displayCameraImage(camera),texture_sizes_[camera],uploaded_image_keys_[camera]);
     }
     const QImage& displayCameraImage(int camera) const {
         return processing_ ? processing_images_[camera] : camera_images_[camera];
@@ -774,7 +791,8 @@ void main() {
         // geometry or touch CUDA/OpenGL interop resources.
         const auto metadata = activeCamera();
         const cv::Vec3f center(center_.x(), center_.y(), center_.z());
-        auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_);
+        auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_,
+                               cv::Matx44d::eye(),cv::Vec3f(1.f,.65f,.12f),right_camera_visible_ ? 2 : 1);
         camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
         // The original image remains on the short camera frustum. Also fit the
         // separate 40 cm point plane, without extending/moving that image.
@@ -787,28 +805,51 @@ void main() {
                 camera_radius_=std::max(camera_radius_,float(cv::norm((world-center)/scale_)));
             }
         }
-        // Predicted cameras use MA's own world frame, with no reference-view
-        // rebasing. Append only blue line vertices, never image triangles.
-        std::vector<float> lines;
+        // Retain immutable MA-sized textures when only poses change. Clean
+        // releases the whole set; retakes replace only the corresponding image.
+        const auto texture_count=predicted_cameras_ ? predicted_cameras_->size() : 0;
+        while (predicted_textures_.size()>texture_count) {
+            gl_->glDeleteTextures(1,&predicted_textures_.back().id);
+            predicted_textures_.pop_back();
+        }
+        while (predicted_textures_.size()<texture_count) {
+            CameraTexture texture; texture.id=createTexture();
+            predicted_textures_.push_back(texture);
+        }
+        // Keep all lines before the active image planes, then append one image
+        // plane per MA camera. Both use the same original camera-to-world pose.
+        std::vector<float> lines, images;
         if (predicted_cameras_) {
-            for (const auto& frame:*predicted_cameras_) {
+            for (size_t i=0;i<predicted_cameras_->size();++i) {
+                const auto& frame=(*predicted_cameras_)[i];
+                auto& texture=predicted_textures_[i];
                 int count=0; float radius=0;
                 const auto predicted=cameraData(frame.camera,center,scale_,count,radius,
-                    frame.camera_to_world,cv::Vec3f(.10f,.45f,1.f),false);
-                lines.insert(lines.end(),predicted.begin(),predicted.end());
+                    frame.camera_to_world,cv::Vec3f(.10f,.45f,1.f),frame.image.isNull() ? 0 : 1);
+                lines.insert(lines.end(),predicted.begin(),predicted.begin()+count*6);
+                texture.first_vertex=-1;
+                if (int(predicted.size())>count*6) {
+                    texture.first_vertex=int(images.size()/6);
+                    images.insert(images.end(),predicted.begin()+count*6,predicted.end());
+                    uploadTexture(texture.id,frame.image,texture.size,texture.image_key);
+                }
                 camera_radius_=std::max(camera_radius_,radius);
             }
         } else {
             for (const auto& frame:captured_clouds_) {
                 if (!frame) continue;
                 int count=0; float radius=0;
-                const auto captured=cameraData(frame->camera,center,scale_,count,radius);
+                const auto captured=cameraData(frame->camera,center,scale_,count,radius,
+                    cv::Matx44d::eye(),cv::Vec3f(1.f,.65f,.12f),0);
                 lines.insert(lines.end(),captured.begin(),captured.begin()+count*6);
                 camera_radius_=std::max(camera_radius_,radius);
             }
         }
         data.insert(data.begin(),lines.begin(),lines.end());
         camera_count_+=int(lines.size()/6);
+        for (auto& texture:predicted_textures_)
+            if (texture.first_vertex>=0) texture.first_vertex+=int(data.size()/6);
+        data.insert(data.end(),images.begin(),images.end());
         camera_buffer_.bind();
         camera_buffer_.allocate(data.data(), int(data.size() * sizeof(float)));
         camera_buffer_.release();
@@ -817,7 +858,7 @@ void main() {
     std::vector<float> cameraData(const std::optional<fs::MeshCamera>& metadata, cv::Vec3f center, float scale,
                                   int& line_count, float& radius,
                                   const cv::Matx44d& pose = cv::Matx44d::eye(),
-                                  const cv::Vec3f& color = cv::Vec3f(1.f,.65f,.12f), bool textured = true) {
+                                  const cv::Vec3f& color = cv::Vec3f(1.f,.65f,.12f), int image_count = 1) {
         std::vector<float> data;
         line_count = 0;
         radius = .87f; // Radius of the mesh's normalized bounding box.
@@ -878,11 +919,11 @@ void main() {
                 line(corners[0], up);
                 line(up, corners[1]);
                 line_count = int(data.size() / 6);
-                if (!textured) return data;
+                if (!image_count) return data;
                 // QImage row zero is the image top. Upload unchanged and give
                 // the upper frustum corners v=0 to avoid a vertical flip.
                 const float uv[][2] = {{0,0}, {1,0}, {1,1}, {0,1}};
-                for (int camera=0; camera<(right_camera_visible_ ? 2 : 1); ++camera)
+                for (int camera=0; camera<image_count; ++camera)
                     for (int i : {0,1,2,0,2,3}) {
                         const auto world = to_world(corners[i] + cv::Vec3f(camera * right_offset,0,0));
                         const auto p = (world - center) / scale;
@@ -897,6 +938,7 @@ void main() {
     SharedGPUMesh gpu_mesh_;
     std::vector<SharedGPUMesh> captured_clouds_;
     SharedPredictedCameras predicted_cameras_;
+    std::vector<CameraTexture> predicted_textures_;
     SharedGPUMesh hidden_capture_;
     std::vector<std::unique_ptr<CloudResource>> cloud_resources_;
     bool captures_dirty_{true};

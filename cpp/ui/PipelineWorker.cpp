@@ -597,11 +597,12 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         cameras->reserve(views);
         for (int i = 0; i < views; ++i) {
             const auto& frame = *captures_[i].frame;
-            cameras->push_back({meshCamera(frame, frame.rectified_left().size()), poses[i], captures_[i].image_id});
+            cameras->push_back({meshCamera(frame, frame.rectified_left().size()), poses[i],
+                                captures_[i].image_id, captures_[i].ma_image});
         }
         checkpoint();
         state_.predicted_cameras = std::move(cameras);
-        emit log(QString("MA poses ready · %1 FS point clouds and blue wireframes · predicted camera-to-world poses in metres")
+        emit log(QString("MA poses ready · %1 FS point clouds and blue cameras with 518 × 434 image textures · predicted camera-to-world poses in metres")
             .arg(views));
         state_.status = QString("Capture complete · MapAnything inference finished for %1 views.").arg(views);
         publish();
@@ -638,7 +639,7 @@ void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
 void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     checkpoint();
     CapturedStereoPair capture{state_.image_id,frame_,state_.input,state_.calibration_filename,
-                               calibration_json_,std::move(point_cloud)};
+                               calibration_json_,std::move(point_cloud),image(ma_->resizedColor())};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
