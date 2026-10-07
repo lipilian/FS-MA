@@ -2,6 +2,7 @@
 #include "fs/geometry/MeshBuilder.hpp"
 #include "fs/geometry/MeshBuilderGPU.hpp"
 #include <QMetaType>
+#include <QImage>
 
 // Immutable, completed device output. Never includes borrowed FS input pointers.
 // Keeps the FS stream owner alive through queued delivery, upload and GL context
@@ -25,5 +26,6 @@ struct PredictedCameraFrame {
     fs::MeshCamera camera;
     cv::Matx44d camera_to_world;
     quint64 image_id{0};
+    QImage image; // Owned MA-sized RGB snapshot; shared across pose updates.
 };
 using SharedPredictedCameras = std::shared_ptr<const std::vector<PredictedCameraFrame>>;

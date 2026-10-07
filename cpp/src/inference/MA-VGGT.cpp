@@ -181,6 +181,7 @@ float* MA_VGGT::inputDevice() const noexcept { return impl_->inputs.get(); }
 float* MA_VGGT::depthsDevice() const noexcept { return impl_->depths.get(); }
 float* MA_VGGT::posesDevice() const noexcept { return impl_->poses.get(); }
 float* MA_VGGT::scaleDevice() const noexcept { return impl_->scale.get(); }
+const cv::Mat& MA_VGGT::resizedColor() const noexcept { return impl_->color_upload.resized; }
 
 void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera) {
     require(view_index >= 0 && view_index < kMaxViews, "RGB view index must be in 0..4");

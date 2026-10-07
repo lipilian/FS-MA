@@ -52,6 +52,10 @@ public:
     // Owns the pinned staging memory until the upload completes.
     void uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera);
 
+    // Borrowed 518x434 CV_8UC3 RGB from the last successful uploadColor, before
+    // normalization. Copy to retain it; the next uploadColor reuses this storage.
+    const cv::Mat& resizedColor() const noexcept;
+
     // After uploadColor for this slot, resize aligned CV_32FC1 metric Z-depth
     // directly to 518x434 with INTER_LANCZOS4 (no crop). Invalid source depths
     // become zero before resize. Enqueue pinned H2D and a pixel kernel on our

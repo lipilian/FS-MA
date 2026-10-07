@@ -23,6 +23,7 @@ struct CapturedStereoPair {
     QString input, calibration_filename;
     QByteArray calibration_json;
     SharedGPUMesh point_cloud;
+    QImage ma_image;
 };
 
 struct PipelineState {
