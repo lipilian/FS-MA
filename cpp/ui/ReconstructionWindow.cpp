@@ -99,19 +99,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         item->setEnabled(false); item->setToolTip("Install librealsense2-dev and rebuild to enable D435 support.");
     }
     camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
-    retake_ = button("Retake", "retake"); capture_more_ = button("Capture more", "captureMore");
-    clean_ = button("Clean", "cleanCaptures");
-    clean_->setToolTip("Clear all captured views and reconstruction results, then return to live preview for the first capture.");
+    retake_ = button("Retake", "retake");
+    restart_ = button("Restart", "restartCaptures");
+    restart_->setToolTip("Clear all captured views and reconstruction results, then return to live preview for the first capture.");
     retake_->setToolTip("Return to preview. A single view's reconstruction is cleared; with multiple views, completed captures are retained until the replacement succeeds.");
-    capture_more_->setToolTip("Keep completed captures and preview the next view. Up to five pairs.");
     capture_ = button("Capture pair", "capturePair");
-    capture_->setToolTip("Capture, reconstruct and display all valid points automatically. No mask drawing required.");
     finish_draw_ = button("Finish draw", "finishDraw");
-    build_mesh_gpu_ = button("GPU mesh", "buildMeshGPU");
-    build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
-    for (auto* b : {camera_, retake_, capture_more_, clean_}) toolbar->addWidget(b);
-    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_);
+    toolbar->addWidget(camera_);
     if (has_confirmed_calibration_) {
         manual_reconstruct_ = button("Reconstruct", "run");
         manual_reconstruct_->setStyleSheet("QPushButton { background: #2464d9; color: white; border: 0; }"
@@ -119,7 +114,13 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         toolbar->addWidget(manual_reconstruct_);
         connect(manual_reconstruct_,&QPushButton::clicked,this,&ReconstructionWindow::reconstructCurrent);
     }
-    toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
+    toolbar->addStretch(); toolbar->addWidget(finish_draw_);
+    toolbar->addWidget(restart_,0,Qt::AlignBottom);
+    auto* capture_actions = new QVBoxLayout;
+    capture_actions->setSpacing(4);
+    capture_actions->addWidget(retake_); capture_actions->addWidget(capture_);
+    toolbar->addLayout(capture_actions);
+    outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -397,17 +398,20 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         live_left_ = {}; live_right_ = {};
         controller_.submit([=](auto& w) { if (connected) w.disconnectCameras(); else w.connectCameras(mode); });
     });
-    const auto start_capture_preview=[this](bool append) {
+    connect(retake_,&QPushButton::clicked,this,[this] {
         live_left_={}; live_right_={}; tabs_->setCurrentIndex(SceneTab);
-        controller_.submit([append](auto& worker) { worker.startCapturePreview(append); });
-    };
-    connect(retake_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(false); });
-    connect(capture_more_,&QPushButton::clicked,this,[start_capture_preview] { start_capture_preview(true); });
-    connect(clean_,&QPushButton::clicked,this,[this] {
+        controller_.submit([](auto& worker) { worker.startCapturePreview(false); });
+    });
+    connect(restart_,&QPushButton::clicked,this,[this] {
         mask_request_id_=controller_.requestMask(state_.image_id,{});
         controller_.submit([](auto& worker) { worker.cleanCaptures(); });
     });
     connect(capture_,&QPushButton::clicked,this,[this] {
+        if (!state_.live) {
+            live_left_={}; live_right_={}; tabs_->setCurrentIndex(SceneTab);
+            controller_.submit([](auto& worker) { worker.startCapturePreview(true); });
+            return;
+        }
         mesh_view_->preserveView();
         capture_processing_=true; mesh_view_->setProcessing(true);
         reconstruction_valid_=false; refresh();
@@ -446,12 +450,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(save_all_,&QPushButton::clicked,this,[this,save_results] {
         save_results({true,true,mask_->hasSelection(),true,true});
-    });
-    connect(build_mesh_gpu_,&QPushButton::clicked,this,[this] {
-        gpu_upload_pending_=false; mesh_valid_=false; refresh();
-        const QImage selected=mask_->mask();
-        const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
-        controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge,jump); });
     });
     const auto mesh_settings_changed=[this] {
         // Triangle constraints do not change a point-only result.
@@ -510,6 +508,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(tabs_,&QTabWidget::currentChanged,this,&ReconstructionWindow::refreshWorkspace);
     refresh();
 }
+void ReconstructionWindow::buildMeshGPU() {
+    if (busy_ || closing_ || gpu_upload_pending_ || state_.live || !reconstruction_valid_ ||
+        !state_.depth_ready || !state_.gpu_ready || !state_.engine_ready) return;
+    mesh_valid_=false; refresh();
+    const QImage selected=mask_->mask();
+    const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
+    controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge,jump); });
+}
 void ReconstructionWindow::reconstructCurrent() {
     if (busy_ || closing_ || state_.live || !state_.has_rectified || !state_.engine_ready) return;
     reconstruction_valid_=false; refresh();
@@ -548,14 +554,19 @@ void ReconstructionWindow::refresh() {
         camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
     }
     const bool depth_valid = minimum_->value() < maximum_->value();
-    retake_->setEnabled(idle && state_.connected && !state_.live);
-    clean_->setEnabled(idle && state_.connected && (state_.has_rectified || state_.capture_count>0));
-    capture_more_->setEnabled(idle && state_.connected && frozen && reconstruction_valid_ && mesh_valid_ &&
-                              state_.capture_count>0 && state_.capture_count<PipelineState::kMaxCaptures);
-    capture_->setEnabled(idle && state_.live && state_.engine_ready && depth_valid);
+    retake_->setEnabled(idle && state_.connected && frozen);
+    restart_->setEnabled(idle && state_.connected && (state_.has_rectified || state_.capture_count>0));
+    const bool can_append=frozen && reconstruction_valid_ && mesh_valid_ &&
+                          state_.capture_count>0 && state_.capture_count<PipelineState::kMaxCaptures;
+    capture_->setEnabled(idle && state_.connected && state_.engine_ready && depth_valid && (state_.live || can_append));
+    capture_->setText(state_.capture_count>0 ? "Capture more" : "Capture pair");
+    capture_->setToolTip(state_.live
+        ? "Capture this stereo pair, reconstruct and display valid points automatically."
+        : state_.capture_count>=PipelineState::kMaxCaptures
+            ? "Five captures are complete. Retake the latest view or restart."
+            : "Keep completed captures and preview the next view, then press again to capture it. Up to five pairs.");
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
-    build_mesh_gpu_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && state_.gpu_ready && state_.engine_ready);
     denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
     if (manual_reconstruct_) {
         manual_reconstruct_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
@@ -644,7 +655,6 @@ void ReconstructionWindow::refresh() {
 }
 void ReconstructionWindow::refreshWorkspace() {
     const bool frozen=state_.has_rectified && !state_.live;
-    const bool depth_ready=frozen && state_.depth_ready && reconstruction_valid_;
     if (!frozen && tabs_->currentIndex()==RegionTab) tabs_->setCurrentIndex(SceneTab);
     tabs_->setTabEnabled(RegionTab,frozen && !busy_);
     tabs_->setTabToolTip(RegionTab,frozen ? "Optional: draw and confirm a mask for region measurement." : "Capture or import a stereo pair first.");
@@ -653,14 +663,12 @@ void ReconstructionWindow::refreshWorkspace() {
     input_panel_->setVisible(scene);
     mask_panel_->setVisible(!scene);
     depth_panel_->setVisible(scene); geometry_panel_->setVisible(scene); save_panel_->setVisible(scene && frozen);
-    for (auto* b : {import_,camera_,capture_,clean_}) b->setVisible(scene);
-    retake_->setVisible(scene && !state_.live);
-    capture_more_->setVisible(scene && frozen);
+    for (auto* b : {import_,camera_,capture_,restart_}) b->setVisible(scene);
+    retake_->setVisible(scene && state_.has_rectified);
     camera_mode_->setVisible(scene);
     finish_draw_->setVisible(!scene);
     if (manual_reconstruct_) manual_reconstruct_->setVisible(scene && frozen);
     if (open_save_) open_save_->setVisible(scene && frozen);
-    build_mesh_gpu_->setVisible(scene && depth_ready);
 }
 void ReconstructionWindow::showImages() {
     const bool depth_available = !state_.live && reconstruction_valid_ && state_.depth_ready && !depth_image_.isNull();

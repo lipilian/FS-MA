@@ -107,6 +107,12 @@ int checkLiveScan(QApplication& app) {
     QTemporaryDir point_export, mesh_export;
     require(point_export.isValid() && mesh_export.isValid(), "Cannot create export test directories");
     SharedGPUMesh exported_geometry;
+    const auto captured_views=[&] {
+        int count=0;
+        for (int i=1;i<=PipelineState::kMaxCaptures;++i)
+            count+=window->findChild<QWidget*>(QString("captureSegment%1").arg(i))->property("captured").toBool();
+        return count;
+    };
     const auto finish=[&](QString error) {
         if (finished) return;
         finished=true; failure=std::move(error); passed=failure.isEmpty();
@@ -130,6 +136,8 @@ int checkLiveScan(QApplication& app) {
                     window=qobject_cast<ReconstructionWindow*>(widget);
                     if (!window) continue;
                     require(!window->findChild<QPushButton*>("buildMeshCPU"), "CPU mesh button still exists");
+                    require(!window->findChild<QPushButton*>("buildMeshGPU"), "GPU mesh toolbar button still exists");
+                    require(!window->findChild<QPushButton*>("captureMore"), "Capture more still has a separate button");
                     const auto* mode=window->findChild<QComboBox*>("cameraMode");
                     require(mode && mode->count()==1 && mode->currentData().toInt()==int(CameraMode::RealSenseD435),
                             "Scan workspace must default to RealSense only");
@@ -140,7 +148,7 @@ int checkLiveScan(QApplication& app) {
                     require(view, "No OpenGL mesh view");
                     QObject::connect(view,&MeshView::renderFailed,&app,[&](QString error) { finish(error); });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
-                        if (finished || !mesh) return;
+                        if (finished || !mesh || phase>=7) return;
                         if (!(mesh->point_cloud ? mesh->stats.point_count : mesh->stats.triangle_count)) {
                             finish("RealSense reconstruction produced empty geometry"); return;
                         }
@@ -156,6 +164,17 @@ int checkLiveScan(QApplication& app) {
                                         "Scan settings sidebar reappeared after capture");
                                 require(!window->findChild<QPushButton*>("run"),
                                         "Scan still creates an unused manual reconstruction button");
+                                auto* restart=window->findChild<QPushButton*>("restartCaptures");
+                                auto* retake=window->findChild<QPushButton*>("retake");
+                                auto* capture=window->findChild<QPushButton*>("capturePair");
+                                require(restart->text()=="Restart" && retake->isVisible() && capture->text()=="Capture more",
+                                        "Captured toolbar does not expose Restart / Retake / Capture more");
+                                const auto retake_position=retake->mapTo(window,QPoint());
+                                const auto capture_position=capture->mapTo(window,QPoint());
+                                require(restart->mapTo(window,QPoint()).x()<capture_position.x() &&
+                                        retake_position.x()==capture_position.x() &&
+                                        retake_position.y()+retake->height()<=capture_position.y(),
+                                        "Retake must be above Capture more, with Restart to the left");
                                 auto* tabs=window->findChild<QTabWidget*>("workspaceTabs");
                                 if (presented==1) {
                                     tabs->setCurrentIndex(1);
@@ -206,21 +225,45 @@ int checkLiveScan(QApplication& app) {
                 if (!status.startsWith("Saved ")) throw std::runtime_error(status.toStdString());
                 checkGeometryExport(phase==4 ? point_export.path() : mesh_export.path(),*exported_geometry);
                 if (phase==4) {
-                    auto* build=window->findChild<QPushButton*>("buildMeshGPU");
-                    require(build && build->isEnabled(), "GPU mesh generation is unavailable");
-                    phase=5; build->click();
+                    phase=5; window->buildMeshGPU(); // Function remains available without a button.
                 } else {
                     const auto points_depth=cv::imread(point_export.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     const auto mesh_depth=cv::imread(mesh_export.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     require(cv::norm(points_depth,mesh_depth,cv::NORM_INF)==0, "GPU mesh build changed the saved depth");
-                    finish({});
+                    require(captured_views()==1, "Mesh export changed the captured view count");
+                    auto* capture=window->findChild<QPushButton*>("capturePair");
+                    require(capture->isEnabled() && capture->text()=="Capture more", "Cannot start the next capture");
+                    phase=7; ready_ticks=0; capture->click();
                 }
                 return;
             }
             auto* camera=window->findChild<QPushButton*>("connectCameras");
             auto* capture=window->findChild<QPushButton*>("capturePair");
+            auto* retake=window->findChild<QPushButton*>("retake");
+            if ((phase==7 || phase==9) && capture->isEnabled()) {
+                require(!retake->isEnabled(), "Next-view or retake action did not resume preview");
+                require(captured_views()==(phase==7 ? 1 : 2), "Starting preview changed completed views");
+                if (++ready_ticks<8) return;
+                ready_ticks=0; ++phase; capture->click();
+                return;
+            }
+            if ((phase==8 || phase==10) && capture->isEnabled()) {
+                require(captured_views()==2, "Capture more did not append, or Retake appended instead of replacing");
+                require(retake->isVisible() && retake->isEnabled(), "Retake is unavailable for captured images");
+                require(window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Two-view MA reconstruction did not complete");
+                if (phase==8) { phase=9; ready_ticks=0; retake->click(); }
+                else { phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); }
+                return;
+            }
+            if (phase==11 && capture->isEnabled()) {
+                require(captured_views()==0 && capture->text()=="Capture pair" && !retake->isVisible(),
+                        "Restart did not restore the empty capture toolbar");
+                require(!window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Restart retained MA geometry");
+                finish({}); return;
+            }
             const bool connected=camera->isEnabled() && camera->text()=="Disconnect cameras" && capture->isEnabled();
             if ((phase==0 || phase==2) && connected) {
+                require(capture->text()=="Capture pair" && !retake->isVisible(), "Initial toolbar shows Retake or Capture more without an image");
                 if (++ready_ticks<8) return; // Allow fresh camera frames to arrive.
                 ready_ticks=0;
                 if (phase==0) { camera->click(); phase=1; }
@@ -238,7 +281,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: skip calibration, load FS/SAM/MA, D435 capture/reconnect, automatic region updates, GPU mesh/wireframe, PLY/depth export, CUDA/OpenGL display and clean shutdown\n";
+    std::cout<<"PASS: D435 capture/reconnect, merged capture button, two-view MA, retake replacement, restart, automatic region updates, GPU mesh API/wireframe, PLY/depth export and clean shutdown\n";
     return 0;
 }
 }
