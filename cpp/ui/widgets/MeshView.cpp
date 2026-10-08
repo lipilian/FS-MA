@@ -32,20 +32,12 @@ class MeshCanvas : public QOpenGLWidget {
         connect(&animation_timer_, &QTimer::timeout, this, [this] { if (isVisible()) update(); });
     }
     ~MeshCanvas() override { cleanup(); }
-    void setMesh(std::shared_ptr<const fs::MeshResult> mesh) {
-        const bool had_mesh=hasMesh();
-        gpu_mesh_.reset();
-        mesh_ = std::move(mesh);
-        failed_=false; announce_gpu_=false;
-        dirty_ = true;
-        if (mesh_ && !had_mesh && !preserve_view_) resetView(); else update();
-    }
     void setGPUMesh(SharedGPUMesh mesh) {
         const bool had_mesh=hasMesh();
-        mesh_.reset(); gpu_mesh_=std::move(mesh);
+        gpu_mesh_=std::move(mesh);
         if (gpu_mesh_ && gpu_mesh_->point_cloud) mode_=0;
-        dirty_=true; failed_=false; announce_gpu_=true;
-        if (!had_mesh && !preserve_view_) resetView(); else update();
+        dirty_=true; failed_=false; announce_gpu_=bool(gpu_mesh_);
+        if (gpu_mesh_ && !had_mesh && !preserve_view_) resetView(); else update();
     }
     void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden) {
         if (clouds==captured_clouds_ && hidden==hidden_capture_) return;
@@ -57,7 +49,6 @@ class MeshCanvas : public QOpenGLWidget {
     }
     void setMode(int mode) {
         mode_ = mode;
-        if (!gpu_mesh_) dirty_ = true;
         update();
     }
     void setMAClouds(SharedGPUClouds clouds) {
@@ -316,7 +307,6 @@ void main() {
                 if (captures_dirty_) uploadCaptures();
                 updateBounds();
                 if (gpu_mesh_ && !isCaptured(gpu_mesh_)) uploadGPU();
-                else if (mesh_ && !mesh_->vertices.empty()) upload();
                 else { unregisterInterop(); count_ = 0; dirty_ = false; }
                 camera_dirty_ = true;
             }
@@ -379,14 +369,14 @@ void main() {
             gl_->glDrawArrays(GL_POINTS,0,capture->count);
             capture->vao.release();
         }
-        program_->setUniformValue("cameraToWorld",cameraPose(gpu_mesh_ ? gpu_mesh_ : hidden_capture_));
-        program_->setUniformValue("clipInvalid",bool(gpu_mesh_));
-        program_->setUniformValue("shaded",bool(gpu_mesh_) && mode_==1);
-        program_->setUniformValue("wireframe",bool(gpu_mesh_) && mode_==2);
+        program_->setUniformValue("cameraToWorld",cameraPose(gpu_mesh_));
+        program_->setUniformValue("clipInvalid",true);
+        program_->setUniformValue("shaded",mode_==1);
+        program_->setUniformValue("wireframe",mode_==2);
         vao_.bind();
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
         if (!show_ma_clouds_)
-            gl_->glDrawArrays(mode_==0 ? GL_POINTS : (mode_==2 && !gpu_mesh_ ? GL_LINES : GL_TRIANGLES),0,count_);
+            gl_->glDrawArrays(mode_==0 ? GL_POINTS : GL_TRIANGLES,0,count_);
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         vao_.release();
         if ((live_preview_ || processing_) && preview_count_ > 0 && !displayCameraImage(0).isNull() && texture_sizes_[0] == preview_size_) {
@@ -481,7 +471,7 @@ void main() {
     };
     bool hasMesh() const {
         return show_ma_clouds_ ? ma_clouds_ && !ma_clouds_->empty()
-            : !captured_clouds_.empty() || gpu_mesh_ || (mesh_ && !mesh_->vertices.empty());
+            : !captured_clouds_.empty() || gpu_mesh_;
     }
     bool isMACloud(const SharedGPUMesh& mesh) const {
         return ma_clouds_ && std::find(ma_clouds_->begin(),ma_clouds_->end(),mesh)!=ma_clouds_->end();
@@ -588,13 +578,6 @@ void main() {
             for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_) add_gpu(cloud);
             add_gpu(gpu_mesh_);
         }
-        if (!show_ma_clouds_ && mesh_) {
-            const auto pose=cameraPose(hidden_capture_);
-            for (const auto& local:mesh_->vertices) {
-                const auto p=pose.map(QVector3D(local[0],local[1],local[2]));
-                add({p.x(),p.y(),p.z()});
-            }
-        }
         if (!any) {
             center_={}; scale_=1;
             const auto camera=activeCamera();
@@ -690,45 +673,6 @@ void main() {
         emit owner_->log(QString("GPU %1 → OpenGL: %2 ms (VBO setup + device copy + handoff; excludes drawing)")
             .arg(frame.point_cloud ? "point cloud" : "mesh").arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
     }
-    void upload() {
-        unregisterInterop();
-        std::vector<float> data;
-        data.reserve(mode_ == 0
-                         ? mesh_->vertices.size() * 6
-                         : mesh_->triangles.size() * (mode_ == 2 ? 36 : 18));
-        const auto add = [&](int id, float light) {
-            const auto& p = mesh_->vertices[id];
-            const auto c = mode_ == 2 ? cv::Vec3b(0, 0, 0) : mesh_->colors[id];
-            data.insert(data.end(),
-                        {p[0], p[1], p[2], c[0] / 255.f * light,
-                         c[1] / 255.f * light, c[2] / 255.f * light});
-        };
-        if (mode_ == 0) {
-            for (size_t i = 0; i < mesh_->vertices.size(); ++i)
-                add(i, 1);
-        } else
-            for (auto f : mesh_->triangles) {
-                const auto n =
-                    (mesh_->vertices[f[1]] - mesh_->vertices[f[0]])
-                        .cross(mesh_->vertices[f[2]] - mesh_->vertices[f[0]]);
-                const float light =
-                    .45f + .55f * std::abs(n[2]) /
-                               std::max(float(cv::norm(n)), 1e-10f);
-                if (mode_ == 2)
-                    for (int i = 0; i < 3; ++i) {
-                        add(f[i], 1);
-                        add(f[(i + 1) % 3], 1);
-                    }
-                else
-                    for (int i = 0; i < 3; ++i)
-                        add(f[i], light);
-            }
-        count_ = int(data.size() / 6);
-        buffer_.bind();
-        buffer_.allocate(data.data(), int(data.size() * sizeof(float)));
-        buffer_.release();
-        dirty_ = false;
-    }
     GLuint createTexture() {
         GLuint texture=0;
         gl_->glGenTextures(1,&texture);
@@ -766,8 +710,7 @@ void main() {
     }
     std::optional<fs::MeshCamera> activeCamera() const {
         if (processing_) return processing_camera_;
-        return camera_ ? camera_ : gpu_mesh_ ? std::optional<fs::MeshCamera>(gpu_mesh_->camera)
-                                            : mesh_ ? mesh_->camera : std::nullopt;
+        return camera_ ? camera_ : gpu_mesh_ ? std::optional<fs::MeshCamera>(gpu_mesh_->camera) : std::nullopt;
     }
     static bool validCamera(const std::optional<fs::MeshCamera>& camera) {
         if (!camera || camera->image_size.width<=0 || camera->image_size.height<=0) return false;
@@ -1007,7 +950,6 @@ void main() {
     std::array<bool, 2> image_dirty_{{true, true}};
     bool camera_dirty_{true};
     std::unique_ptr<QOpenGLShaderProgram> program_;
-    std::shared_ptr<const fs::MeshResult> mesh_;
     bool dirty_{true}, right_camera_visible_{false};
     int mode_{1}, count_{}, camera_count_{}, camera_image_count_{};
     float camera_radius_{};
@@ -1038,13 +980,9 @@ MeshView::MeshView(QWidget *parent) : QWidget(parent) {
         layout->addWidget(canvas_);
     }
 }
-void MeshView::setMesh(std::shared_ptr<const fs::MeshResult> mesh) {
-    if (canvas_)
-        canvas_->setMesh(std::move(mesh));
-}
 void MeshView::setGPUMesh(SharedGPUMesh mesh) {
     if (canvas_) canvas_->setGPUMesh(std::move(mesh));
-    else emit renderFailed("GPU mesh rendering requires a hardware OpenGL display session.");
+    else if (mesh) emit renderFailed("GPU mesh rendering requires a hardware OpenGL display session.");
 }
 void MeshView::setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden) {
     if (canvas_) canvas_->setCapturedClouds(std::move(clouds),std::move(hidden));

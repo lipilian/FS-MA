@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 
-project(TSFS LANGUAGES C CXX)
+project(TSFS LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,16 +47,8 @@ if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY OR
     message(FATAL_ERROR "TensorRT headers, nvinfer, or nvonnxparser library not found")
 endif()
 
-# Native Triangle 1.6; preserve exact-predicate floating-point semantics.
-add_library(fs_triangle STATIC third_party/triangle/triangle.c)
-target_compile_definitions(fs_triangle PRIVATE TRILIBRARY ANSI_DECLARATORS)
-target_include_directories(fs_triangle PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/triangle)
-target_compile_options(fs_triangle PRIVATE $<$<C_COMPILER_ID:GNU,Clang>:-fno-fast-math -ffp-contract=off>)
-target_link_libraries(fs_triangle PRIVATE m)
-
 # Shared processing code for the CLI and future desktop application.
 add_library(fs_core STATIC
-    src/geometry/MeshBuilder.cpp
     src/geometry/MeshBuilderGPU.cu
     src/inference/FS.cpp
     src/inference/MA-VGGT.cpp
@@ -78,7 +70,6 @@ target_link_libraries(fs_core
         ${OpenCV_LIBS}
         CUDA::cudart
     PRIVATE
-        fs_triangle
         GWCVolumePlugin
         ${TENSORRT_NVINFER_LIBRARY}
 )

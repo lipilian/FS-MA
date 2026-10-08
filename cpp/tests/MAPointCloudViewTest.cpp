@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
         view.setMAClouds(empty);
         const auto no_points=snapshot();
         require(pixels(no_points,true)==0 && pixels(no_points,false)==0,"Empty MA result retained old geometry or fell back to FS");
-        view.setMAClouds({}); view.setCapturedClouds({}); view.setMesh({}); view.setPredictedCameras({});
+        view.setMAClouds({}); view.setCapturedClouds({}); view.setGPUMesh({}); view.setPredictedCameras({});
         view.setShowMAClouds(false);
         require(snapshot()==no_points,"Clean retained point-cloud geometry");
         std::cout<<"PASS: CUDA/OpenGL uploads, exclusive FS/MA rendering, stable view/poses, cached switches, retake, empty clouds and clean\n";

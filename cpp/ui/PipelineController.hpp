@@ -20,7 +20,6 @@ signals:
     void images(QImage rectified_left, QImage rectified_right);
     void preview(QImage rectified_left, QImage rectified_right);
     void depthImage(QImage depth_rgb, float minimum, float maximum);
-    void meshReady(SharedMesh mesh);
     void gpuMeshReady(SharedGPUMesh mesh);
     void maskReady(quint64 image_id, quint64 request_id, QImage mask, QString message);
     void log(QString message);

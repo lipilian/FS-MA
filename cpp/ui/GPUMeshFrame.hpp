@@ -1,8 +1,10 @@
 #pragma once
-#include "fs/geometry/MeshBuilder.hpp"
+#include "fs/geometry/MeshCamera.hpp"
 #include "fs/geometry/MeshBuilderGPU.hpp"
 #include <QMetaType>
 #include <QImage>
+#include <memory>
+#include <vector>
 
 // Immutable, completed device output. Never includes borrowed model input pointers.
 // Keeps the FS or MA stream owner alive through queued delivery, upload and GL context

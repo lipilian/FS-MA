@@ -57,8 +57,13 @@ struct PLYVertexHash {
         return hash;
     }
 };
-// Called only for an explicit GPU mesh export, on the pipeline thread.
-fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::function<void()>& checkpoint) {
+// Temporary host data used only while writing GPU geometry to PLY.
+struct PLYMesh {
+    std::vector<cv::Vec3f> vertices;
+    std::vector<cv::Vec3b> colors;
+    std::vector<cv::Vec3i> triangles;
+};
+PLYMesh downloadMeshForExport(const GPUMeshFrame& source, const std::function<void()>& checkpoint) {
     const auto vertex_count=source.buffer ? source.buffer->vertex_slots() : 0;
     if (!source.buffer || !source.buffer->vertices() || !source.stream || !source.stream_owner ||
         (source.point_cloud ? !source.stats.point_count || source.stats.point_count>vertex_count
@@ -80,7 +85,7 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
         throw;
     }
     checkpoint();
-    fs::MeshResult mesh;
+    PLYMesh mesh;
     if (source.point_cloud) {
         mesh.vertices.reserve(source.stats.point_count);
         mesh.colors.reserve(source.stats.point_count);
@@ -96,7 +101,6 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
         }
         if (mesh.vertices.size()!=source.stats.point_count)
             throw std::runtime_error("GPU point cloud export count does not match the displayed result");
-        mesh.camera=source.camera;
         return mesh;
     }
     mesh.vertices.reserve(source.stats.triangle_count);
@@ -133,7 +137,6 @@ fs::MeshResult downloadMeshForExport(const GPUMeshFrame& source, const std::func
     }
     if (mesh.triangles.size()!=source.stats.triangle_count)
         throw std::runtime_error("GPU mesh export triangle count does not match the displayed result");
-    mesh.area_m2=source.stats.area_m2;
     return mesh;
 }
 }
@@ -191,7 +194,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
+    timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release();
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
     ma_.reset(); fs_.reset(); sam_.reset(); gpu_mesh_.reset();
     state_.sam_ready = false; state_.ma_ready = false; state_.ma_engine_path.clear();
@@ -260,7 +263,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     // Commit together only after validation and rectification succeed. Failed imports retain the previous input.
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
     state_.calibration_filename=std::move(calibration_filename); calibration_json_=std::move(calibration_json);
-    state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
+    state_.has_rectified = true; state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release();
     state_.live = false; latest_.reset();
     state_.image_camera = meshCamera(*frame_, frame_->rectified_left().size());
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
@@ -407,8 +410,7 @@ void PipelineWorker::startCapturePreview(bool append) {
         state_.predicted_cameras.reset(); state_.ma_clouds.reset();
         if (ma_) ma_->resetInputs();
         state_.gpu_ready=false; state_.depth_ready=false;
-        latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
-        mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
+        latest_gpu_mesh_.reset(); gpu_mesh_.reset(); depth_.release();
     }
     // Multi-view retakes keep the current slot (including an unfinished extra
     // capture) and retain completed views until a replacement succeeds.
@@ -422,8 +424,7 @@ void PipelineWorker::cleanCaptures() {
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     frame_.reset(); state_.image_camera.reset();
     state_.has_rectified=false; state_.gpu_ready=false; state_.depth_ready=false;
-    latest_mesh_.reset(); latest_gpu_mesh_.reset(); gpu_mesh_.reset();
-    mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release();
+    latest_gpu_mesh_.reset(); gpu_mesh_.reset(); depth_.release();
     if (ma_) ma_->resetInputs();
     if (sam_) sam_->clearImage();
     ++state_.image_id; // Reject results and mask requests belonging to the old input.
@@ -527,7 +528,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         throw std::runtime_error("The mask must be aligned with the current rectified left image.");
     if (!std::isfinite(max_neighbor_distance_m) || max_neighbor_distance_m<=0)
         throw std::runtime_error("Neighbour distance must be positive and finite.");
-    state_.gpu_ready = false; state_.depth_ready = false; latest_mesh_.reset(); latest_gpu_mesh_.reset(); mesh_xyz_.release(); mesh_mask_.release(); mesh_rgb_.release(); publish();
+    state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release(); publish();
     reportProgress(10, "Preparing stereo images…");
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
@@ -565,7 +566,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
                     : "Full-image XYZ · neighbourhood denoising disabled.");
     reportProgress(85, "Preparing depth display…"); elapsed.restart();
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();
-    cv::Mat depth, indices, depth_rgb, model_left;
+    cv::Mat depth, indices, depth_rgb;
     cv::extractChannel(xyz, depth, 2);
     ma_->uploadDepth(capture_slot_, depth);
     emit log(QString("MA metric ray distance queued · view %1 · 518 × 434 · FP32 channel 6 · Lanczos4 depth resize")
@@ -576,13 +577,8 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     const cv::Mat valid = (depth > 0.0F) & (depth >= minimum) & (depth <= maximum);
     depth_rgb.setTo(cv::Scalar::all(0), ~valid);
     cv::cvtColor(depth_rgb, depth_rgb, cv::COLOR_BGR2RGB);
-    // Same dimensions and interpolation as FS::prepare_stereo_images().
-    cv::resize(frame_->rectified_left(), model_left,
-               cv::Size(FS::kTensorRtInputWidth, FS::kTensorRtInputHeight), 0.0, 0.0, cv::INTER_LINEAR);
     checkpoint();
-    mesh_xyz_ = xyz; // cv::Mat retains the owned download with no additional copy.
-    mesh_rgb_ = model_left;
-    cv::resize(mask, mesh_mask_, xyz.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    depth_ = depth; // Keep only Z for export, without another copy.
     const QImage depth_image=image(depth_rgb);
     const double display_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Post processing: %1 ms (XYZ + denoising: %2 ms; XYZ download + depth display: %3 ms)")
@@ -680,31 +676,13 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
 }
-void PipelineWorker::buildMeshCPU(double max_edge_m, double max_depth_jump_m) {
-    if (!state_.depth_ready || state_.live || !frame_ || mesh_xyz_.empty() || mesh_mask_.empty())
-        throw std::runtime_error("Reconstruct depth before generating a mesh.");
-    latest_mesh_.reset(); latest_gpu_mesh_.reset();
-    checkpoint(); state_.status = "Building constrained Delaunay mesh on CPU…"; publish();
-    QElapsedTimer elapsed; elapsed.start();
-    auto mesh = std::make_shared<fs::MeshResult>(fs::build_constrained_mesh(
-        mesh_xyz_, mesh_mask_, mesh_rgb_, max_edge_m, max_depth_jump_m, [this] { checkpoint(); }));
-    checkpoint();
-    const double mesh_ms=elapsed.nsecsElapsed()/1e6;
-    emit log(QString("Mesh build: %1 ms (CPU)").arg(mesh_ms,0,'f',3));
-    mesh->camera=meshCamera(*frame_,mesh_xyz_.size());
-    state_.status = QString("Mesh ready · %1 vertices · %2 triangles · %3 cm²")
-        .arg(mesh->vertices.size()).arg(mesh->triangles.size()).arg(mesh->area_m2 * 1e4, 0, 'f', 2);
-    if (mesh->skipped_components) emit log(QString("Skipped %1 mask components with insufficient points or degenerate boundaries.").arg(mesh->skipped_components));
-    latest_mesh_=mesh;
-    publish(); emit meshReady(mesh); emit log(state_.status);
-}
 void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m, double max_depth_jump_m) {
     if (!state_.depth_ready || !state_.gpu_ready || state_.live || !frame_ || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("Reconstruct depth before preparing a GPU mesh.");
     if (!selection_mask.isNull() && (selection_mask.width() != frame_->rectified_left().cols ||
         selection_mask.height() != frame_->rectified_left().rows))
         throw std::invalid_argument("GPU mesh requires an aligned rectified-left mask.");
-    latest_mesh_.reset(); latest_gpu_mesh_.reset();
+    latest_gpu_mesh_.reset();
     checkpoint();
     state_.status = "Preparing GPU mesh…"; publish();
     QElapsedTimer elapsed; elapsed.start();
@@ -738,7 +716,7 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
     publish(); emit log(state_.status); emit gpuMeshReady(std::move(mesh));
 }
 void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOptions options,
-                                 const QImage& selection, SharedMesh mesh, bool overwrite, SharedGPUMesh gpu_mesh) {
+                                 const QImage& selection, SharedGPUMesh gpu_mesh, bool overwrite) {
     if (!frame_ || state_.live) throw std::runtime_error("Capture or import a frozen pair before saving.");
     if (!options.images && !options.calibration && !options.mask && !options.mesh && !options.depth)
         throw std::runtime_error("Select at least one item to save.");
@@ -749,13 +727,12 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
         throw std::runtime_error("No valid calibration snapshot is available.");
     if (options.mask && (selection.isNull() || selection.size()!=QSize(frame_->rectified_left().cols,frame_->rectified_left().rows)))
         throw std::runtime_error("Confirm a full-resolution mask before saving it.");
-    if (options.depth && (!state_.depth_ready || mesh_xyz_.empty() || mesh_xyz_.type()!=CV_32FC3))
+    if (options.depth && (!state_.depth_ready || depth_.empty() || depth_.type()!=CV_32FC1))
         throw std::runtime_error("Reconstruct depth before saving it.");
     if (options.mesh) {
-        const bool current_cpu=mesh && mesh==latest_mesh_ && !mesh->vertices.empty();
         const bool current_gpu=gpu_mesh && gpu_mesh==latest_gpu_mesh_.lock() &&
             (gpu_mesh->point_cloud ? gpu_mesh->stats.point_count : gpu_mesh->stats.triangle_count);
-        if (!state_.depth_ready || (mesh && gpu_mesh) || (!current_cpu && !current_gpu))
+        if (!state_.depth_ready || !current_gpu)
             throw std::runtime_error("Generate the current displayed mesh before saving it.");
     }
     QStringList names;
@@ -773,9 +750,10 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
         throw std::runtime_error("Calibration filename conflicts with another selected output.");
     checkpoint(); state_.status="Saving selected results…"; publish();
     QElapsedTimer elapsed; elapsed.start();
-    if (options.mesh && gpu_mesh) {
+    std::optional<PLYMesh> mesh;
+    if (options.mesh) {
         QElapsedTimer download; download.start();
-        mesh=std::make_shared<fs::MeshResult>(downloadMeshForExport(*gpu_mesh,[this] { checkpoint(); }));
+        mesh=downloadMeshForExport(*gpu_mesh,[this] { checkpoint(); });
         emit log(QString("GPU geometry export download + filtering: %1 ms · %2 triangles · %3 vertices · RGB uint8 0–255")
             .arg(download.nsecsElapsed()/1e6,0,'f',3).arg(mesh->triangles.size()).arg(mesh->vertices.size()));
     }
@@ -798,11 +776,8 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
         if (!selection.convertToFormat(QImage::Format_Grayscale8).save(&file,"PNG")) throw std::runtime_error("Cannot encode mask.png");
     });
     if (options.depth) queue("depth.tiff",[&](auto& file) {
-        // Reuse the filtered CPU XYZ snapshot downloaded for the depth display.
-        cv::Mat depth;
-        cv::extractChannel(mesh_xyz_,depth,2);
         std::vector<unsigned char> encoded;
-        if (!cv::imencode(".tiff",depth,encoded,{cv::IMWRITE_TIFF_COMPRESSION,1}))
+        if (!cv::imencode(".tiff",depth_,encoded,{cv::IMWRITE_TIFF_COMPRESSION,1}))
             throw std::runtime_error("Cannot encode depth.tiff");
         const auto bytes=static_cast<qint64>(encoded.size());
         if (file.write(reinterpret_cast<const char*>(encoded.data()),bytes)!=bytes)

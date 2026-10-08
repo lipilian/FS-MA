@@ -107,9 +107,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     capture_ = button("Capture pair", "capturePair");
     capture_->setToolTip("Capture, reconstruct and display all valid points automatically. No mask drawing required.");
     finish_draw_ = button("Finish draw", "finishDraw");
-    build_mesh_cpu_ = button("CPU mesh", "buildMeshCPU");
     build_mesh_gpu_ = button("GPU mesh", "buildMeshGPU");
-    build_mesh_cpu_->setToolTip("Generate a constrained Delaunay mesh on the CPU.");
     build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
     for (auto* b : {camera_, retake_, capture_more_, clean_}) toolbar->addWidget(b);
@@ -121,7 +119,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         toolbar->addWidget(manual_reconstruct_);
         connect(manual_reconstruct_,&QPushButton::clicked,this,&ReconstructionWindow::reconstructCurrent);
     }
-    toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
+    toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -311,7 +309,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (clean_preview) {
             capture_processing_=false; mesh_view_->setProcessing(false);
             mesh_valid_=false; gpu_upload_pending_=false;
-            mesh_result_.reset(); gpu_mesh_result_.reset(); mesh_view_->setMesh({});
+            gpu_mesh_result_.reset(); mesh_view_->setGPUMesh({});
             rectified_left_={}; rectified_right_={}; live_left_={}; live_right_={}; depth_image_={};
             render_error_.clear();
             mask_request_id_=controller_.requestMask(state_.image_id,{});
@@ -341,16 +339,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (closing_ || image_id!=state_.image_id || request_id!=mask_request_id_) return;
         mask_->setPrediction(std::move(mask)); status_->setText(message);
     });
-    connect(&controller_,&PipelineController::meshReady,this,[this](SharedMesh mesh) {
-        if (closing_ || !reconstruction_valid_) return;
-        gpu_mesh_result_.reset(); gpu_upload_pending_=false;
-        mesh_result_=std::move(mesh); mesh_valid_=true;
-        mesh_mode_->setCurrentIndex(mesh_result_->triangles.empty() ? 0 : 1);
-        mesh_view_->setMesh(mesh_result_); refresh(); tabs_->setCurrentIndex(SceneTab);
-    });
     connect(&controller_,&PipelineController::gpuMeshReady,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_) return;
-        mesh_result_.reset(); mesh_valid_=false;
+        mesh_valid_=false;
         gpu_mesh_result_=std::move(mesh); gpu_upload_pending_=true;
         if (gpu_mesh_result_->point_cloud && state_.capture_count>0) {
             captured_clouds_.resize(state_.capture_count);
@@ -447,20 +438,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             "These files already exist in the chosen folder:\n"+existing.join("\n")+"\n\nReplace them?",
             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         const QImage selection=mask_->mask();
-        const SharedMesh mesh=mesh_valid_ ? mesh_result_ : SharedMesh{};
         const SharedGPUMesh gpu_mesh=mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
-        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,mesh,overwrite,gpu_mesh); });
+        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,gpu_mesh,overwrite); });
     };
     connect(save_selected_,&QPushButton::clicked,this,[this,save_results] {
         save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked(),save_depth_->isChecked()});
     });
     connect(save_all_,&QPushButton::clicked,this,[this,save_results] {
         save_results({true,true,mask_->hasSelection(),true,true});
-    });
-    connect(build_mesh_cpu_,&QPushButton::clicked,this,[this] {
-        gpu_upload_pending_=false; mesh_valid_=false; refresh();
-        const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
-        controller_.submit([=](auto& worker) { worker.buildMeshCPU(edge,jump); });
     });
     connect(build_mesh_gpu_,&QPushButton::clicked,this,[this] {
         gpu_upload_pending_=false; mesh_valid_=false; refresh();
@@ -470,8 +455,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     const auto mesh_settings_changed=[this] {
         // Triangle constraints do not change a point-only result.
-        const bool point_cloud=(mesh_result_ && mesh_result_->triangles.empty()) ||
-                               (gpu_mesh_result_ && gpu_mesh_result_->point_cloud);
+        const bool point_cloud=gpu_mesh_result_ && gpu_mesh_result_->point_cloud;
         if (!point_cloud) { gpu_upload_pending_=false; mesh_valid_=false; }
         refresh();
     };
@@ -552,8 +536,7 @@ void ReconstructionWindow::refresh() {
     ma_cloud_->setToolTip(ma_available ? "Display MapAnything's predicted point clouds."
         : "Available after MapAnything finishes inference on at least two captures.");
     mesh_view_->setShowMAClouds(show_ma);
-    const bool replacement=(mesh_valid_ || gpu_upload_pending_) &&
-        (mesh_result_ || (gpu_mesh_result_ && !gpu_mesh_result_->point_cloud));
+    const bool replacement=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && !gpu_mesh_result_->point_cloud;
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
         ? captured_clouds_.back() : SharedGPUMesh{});
     const bool idle = !busy_ && !closing_ && !gpu_upload_pending_, frozen = state_.has_rectified && !state_.live;
@@ -572,8 +555,7 @@ void ReconstructionWindow::refresh() {
     capture_->setEnabled(idle && state_.live && state_.engine_ready && depth_valid);
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
     mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
-    build_mesh_cpu_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready);
-    build_mesh_gpu_->setEnabled(build_mesh_cpu_->isEnabled() && state_.gpu_ready && state_.engine_ready);
+    build_mesh_gpu_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && state_.gpu_ready && state_.engine_ready);
     denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
     if (manual_reconstruct_) {
         manual_reconstruct_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
@@ -615,11 +597,10 @@ void ReconstructionWindow::refresh() {
                                            : "background: #dce3ed; border-radius: 2px;");
         }
     }
-    if (!mesh_valid_ && !gpu_upload_pending_ && (mesh_result_ || gpu_mesh_result_)) {
-        mesh_result_.reset(); gpu_mesh_result_.reset(); mesh_view_->setMesh({});
+    if (!mesh_valid_ && !gpu_upload_pending_ && gpu_mesh_result_) {
+        gpu_mesh_result_.reset(); mesh_view_->setGPUMesh({});
     }
-    const bool point_cloud=(mesh_valid_ || gpu_upload_pending_) && ((mesh_result_ && mesh_result_->triangles.empty()) ||
-                                                                  (gpu_mesh_result_ && gpu_mesh_result_->point_cloud));
+    const bool point_cloud=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && gpu_mesh_result_->point_cloud;
     save_mesh_->setText(point_cloud ? "FS point cloud (mesh.ply)" : "FS mesh (mesh.ply)");
     save_mesh_->setToolTip("Save the current FS points or mesh as PLY; the FS / MA selector controls the 3D display.");
     mesh_mode_->setEnabled(mesh_valid_ && !show_ma);
@@ -636,21 +617,18 @@ void ReconstructionWindow::refresh() {
     const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked() || save_depth_->isChecked();
     const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
         (!save_depth_->isChecked() || result_current) &&
-        (!save_mesh_->isChecked() || (mesh_valid_ && (mesh_result_ || gpu_mesh_result_)));
+        (!save_mesh_->isChecked() || (mesh_valid_ && gpu_mesh_result_));
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
-    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && (mesh_result_ || gpu_mesh_result_) && !save_directory_->text().isEmpty());
+    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && gpu_mesh_result_ && !save_directory_->text().isEmpty());
     scene_status_->setText(capture_processing_ ? "Processing · Reconstructing the captured point cloud…"
-        : point_cloud ? QString("%1 point cloud · %2 valid points%3")
-        .arg(gpu_mesh_result_ ? "GPU" : "RGB")
-        .arg(gpu_mesh_result_ ? gpu_mesh_result_->stats.point_count : mesh_result_->vertices.size())
+        : point_cloud ? QString("GPU point cloud · %1 valid points%2")
+        .arg(gpu_mesh_result_->stats.point_count)
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "")
         : gpu_mesh_result_ ? QString("GPU mesh · %1 triangles · %2 cm²%3")
         .arg(gpu_mesh_result_->stats.triangle_count).arg(gpu_mesh_result_->stats.area_m2*1e4,0,'f',2)
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "")
-        : mesh_valid_ && mesh_result_ ? QString("%1 vertices · %2 triangles · %3 cm²")
-        .arg(mesh_result_->vertices.size()).arg(mesh_result_->triangles.size()).arg(mesh_result_->area_m2*1e4,0,'f',2)
         : state_.live ? "LIVE · Pixel point cloud at 40 cm · Capture a pair to reconstruct depth."
-        : result_current ? "Depth ready. Switch the camera image or generate a CPU / GPU mesh."
+        : result_current ? "Depth ready. Switch the camera image or generate a GPU mesh."
         : frozen ? (has_confirmed_calibration_ ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
                                               : "Captured left image · Confirm a region, retake or import a pair to update the point cloud.")
         : "Connect cameras to see the left live image in 3D, or import a capture.");
@@ -682,7 +660,6 @@ void ReconstructionWindow::refreshWorkspace() {
     finish_draw_->setVisible(!scene);
     if (manual_reconstruct_) manual_reconstruct_->setVisible(scene && frozen);
     if (open_save_) open_save_->setVisible(scene && frozen);
-    build_mesh_cpu_->setVisible(scene && depth_ready);
     build_mesh_gpu_->setVisible(scene && depth_ready);
 }
 void ReconstructionWindow::showImages() {
