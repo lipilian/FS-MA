@@ -1,14 +1,17 @@
 #include "DesktopController.hpp"
 #include "widgets/MeshView.hpp"
+#include "widgets/MaskEditor.hpp"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QDoubleSpinBox>
 #include <QLabel>
+#include <QDialog>
+#include <QMouseEvent>
 #include <QOpenGLWidget>
 #include <QPointer>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QTabWidget>
 #include <QTimer>
 #include <opencv2/imgcodecs.hpp>
 #include <iostream>
@@ -63,7 +66,7 @@ int checkLiveScan(QApplication& app) {
     QPointer<ReconstructionWindow> window;
     bool finished=false, passed=false;
     QString failure;
-    int phase=0, ready_ticks=0;
+    int phase=0, ready_ticks=0, presented=0;
     const auto finish=[&](QString error) {
         if (finished) return;
         finished=true; failure=std::move(error); passed=failure.isEmpty();
@@ -98,13 +101,45 @@ int checkLiveScan(QApplication& app) {
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
                         if (finished || !mesh || !mesh->point_cloud) return;
                         if (mesh->stats.point_count==0) { finish("RealSense capture produced no points"); return; }
+                        ++presented;
                         std::cout<<"RealSense points displayed: "<<mesh->stats.point_count<<'\n';
                         // Inspect the framebuffer after the presentation callback returns.
                         QTimer::singleShot(250,&app,[&] {
                             auto* canvas=window ? window->findChild<QOpenGLWidget*>() : nullptr;
-                            if (!canvas || !canvas->isValid() || canvas->grabFramebuffer().isNull())
-                                finish("No valid OpenGL framebuffer after capture");
-                            else finish({});
+                            try {
+                                require(canvas && canvas->isValid() && !canvas->grabFramebuffer().isNull(),
+                                        "No valid OpenGL framebuffer after capture");
+                                require(!window->findChild<QWidget*>("workspaceTools")->isVisible(),
+                                        "Scan settings sidebar reappeared after capture");
+                                require(!window->findChild<QPushButton*>("run"),
+                                        "Scan still creates an unused manual reconstruction button");
+                                auto* tabs=window->findChild<QTabWidget*>("workspaceTabs");
+                                if (presented==1) {
+                                    tabs->setCurrentIndex(1);
+                                    auto* editor=window->findChild<MaskEditor*>();
+                                    window->findChild<QPushButton*>("maskBrush")->click();
+                                    const QPointF center=editor->rect().center();
+                                    const QPointF global=editor->mapToGlobal(center.toPoint());
+                                    QMouseEvent press(QEvent::MouseButtonPress,center,global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                                    QMouseEvent release(QEvent::MouseButtonRelease,center,global,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                                    QApplication::sendEvent(editor,&press); QApplication::sendEvent(editor,&release);
+                                    auto* confirm=window->findChild<QPushButton*>("finishDraw");
+                                    require(confirm->isEnabled(), "Region cannot be confirmed after brush input");
+                                    confirm->click(); // Must rebuild without any manual reconstruction button.
+                                } else if (presented==2) {
+                                    tabs->setCurrentIndex(1);
+                                    window->findChild<QPushButton*>("clearMask")->click();
+                                } else {
+                                    auto* save=window->findChild<QPushButton*>("openSaveResults");
+                                    require(save && save->isVisible() && save->isEnabled(), "Saving is inaccessible without the sidebar");
+                                    save->click();
+                                    auto* dialog=window->findChild<QDialog*>("saveResultsDialog");
+                                    require(dialog && dialog->isVisible() && dialog->findChild<QPushButton*>("browseSaveDirectory")->isVisible(),
+                                            "Save dialog did not expose the existing export controls");
+                                    dialog->close();
+                                    finish({});
+                                }
+                            } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
                         });
                     });
                 }
@@ -118,7 +153,6 @@ int checkLiveScan(QApplication& app) {
                 ready_ticks=0;
                 if (phase==0) { camera->click(); phase=1; }
                 else {
-                    window->findChild<QDoubleSpinBox*>("maximumDepth")->setValue(5.0);
                     capture->click(); phase=3;
                 }
             } else if (phase==1 && camera->isEnabled() && camera->text()=="Connect cameras") {
@@ -132,7 +166,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: skip calibration, load FS/SAM/MA, auto-connect D435, reconnect, capture, CUDA/OpenGL display and clean shutdown\n";
+    std::cout<<"PASS: skip calibration, load FS/SAM/MA, auto-connect D435, reconnect, capture, confirm/clear region auto-reconstruction, full-width UI, export access, CUDA/OpenGL display and clean shutdown\n";
     return 0;
 }
 }

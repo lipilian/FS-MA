@@ -31,6 +31,7 @@ private:
     void refresh();
     void showImages();
     void refreshWorkspace();
+    void reconstructCurrent();
     PipelineController& controller_;
     PipelineState state_;
     const bool has_confirmed_calibration_;
@@ -45,7 +46,8 @@ private:
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
     QImage rectified_left_, rectified_right_, live_left_, live_right_, depth_image_;
-    QPushButton *import_, *camera_, *retake_, *capture_more_, *clean_, *capture_, *run_, *finish_draw_, *clear_, *build_mesh_cpu_, *build_mesh_gpu_;
+    QPushButton *import_, *camera_, *retake_, *capture_more_, *clean_, *capture_, *finish_draw_, *clear_, *build_mesh_cpu_, *build_mesh_gpu_;
+    QPushButton* manual_reconstruct_{nullptr}; // Only the calibrated fs_gui workspace uses this control.
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *denoise_;
@@ -58,6 +60,7 @@ private:
     QWidget *input_panel_, *depth_panel_, *geometry_panel_, *mask_panel_, *save_panel_;
     MaskEditor* mask_;
     QPushButton *save_selected_, *save_all_, *browse_save_;
+    QPushButton* open_save_{nullptr};
     QCheckBox *save_images_, *save_calibration_, *save_mask_, *save_mesh_, *save_depth_;
     QLineEdit* save_directory_;
     QLabel* save_calibration_name_;

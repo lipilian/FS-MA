@@ -20,6 +20,11 @@ to reconstruct, then **Capture more** for up to five views. If the camera is not
 connected at startup, attach it and click **Connect cameras**. A model load failure
 keeps the loading window open so engine paths can be corrected and retried.
 
+The scan workspace uses fixed depth and geometry defaults and a full-width view.
+Captures, imported pairs and confirmed or cleared regions reconstruct automatically.
+Use **Save results…** in the bottom-right corner to export; region drawing tools are inside
+the **Region measurement** tab.
+
 The existing `fs_gui` entry still starts with calibration. Imported captures in
 `scan_gui` must include `left.png`, `right.png` and their own `calibration.json`
 (or `sentech_stereo_calibration.json`).

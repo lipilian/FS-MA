@@ -7,6 +7,7 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -65,8 +66,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         QPushButton:checked { background: #dbeafe; color: #1d4ed8; border-color: #2464d9; }
         QPushButton:hover { background: #eaf1fc; border-color: #6c97cf; }
         QPushButton:disabled { color: #9aa8b9; background: #edf1f6; border-color: #dfe5ed; }
-        QPushButton#run { background: #2464d9; color: white; border: 0; }
-        QPushButton#run:disabled { background: #c3d1e6; }
         QDoubleSpinBox, QSpinBox, QComboBox { min-height: 28px; border: 1px solid #ced8e5; border-radius: 4px; background: white; color: #20314a; padding: 2px 5px; }
         QWidget#inputCard { background: white; border: 1px solid #dce3ed; border-radius: 8px; }
         QToolButton#inputDetailsToggle { border: 0; background: transparent; text-align: left; padding: 10px 8px; font-weight: 600; }
@@ -107,14 +106,22 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     capture_more_->setToolTip("Keep completed captures and preview the next view. Up to five pairs.");
     capture_ = button("Capture pair", "capturePair");
     capture_->setToolTip("Capture, reconstruct and display all valid points automatically. No mask drawing required.");
-    run_ = button("Reconstruct", "run"); finish_draw_ = button("Finish draw", "finishDraw");
+    finish_draw_ = button("Finish draw", "finishDraw");
     build_mesh_cpu_ = button("CPU mesh", "buildMeshCPU");
     build_mesh_gpu_ = button("GPU mesh", "buildMeshGPU");
     build_mesh_cpu_->setToolTip("Generate a constrained Delaunay mesh on the CPU.");
     build_mesh_gpu_->setToolTip("Build a local grid mesh on the GPU and display it through CUDA/OpenGL interoperability.");
     toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
     for (auto* b : {camera_, retake_, capture_more_, clean_}) toolbar->addWidget(b);
-    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_); toolbar->addWidget(run_); toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
+    toolbar->addStretch(); toolbar->addWidget(capture_); toolbar->addWidget(finish_draw_);
+    if (has_confirmed_calibration_) {
+        manual_reconstruct_ = button("Reconstruct", "run");
+        manual_reconstruct_->setStyleSheet("QPushButton { background: #2464d9; color: white; border: 0; }"
+                                          "QPushButton:disabled { background: #c3d1e6; }");
+        toolbar->addWidget(manual_reconstruct_);
+        connect(manual_reconstruct_,&QPushButton::clicked,this,&ReconstructionWindow::reconstructCurrent);
+    }
+    toolbar->addWidget(build_mesh_cpu_); toolbar->addWidget(build_mesh_gpu_); outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
     QVBoxLayout* layout;
@@ -248,6 +255,29 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     save_selected_=button("Save selected","saveSelected"); layout->addWidget(save_selected_);
     save_all_=button("Save all","saveAll"); layout->addWidget(save_all_);
     settings_layout->addWidget(save_panel); settings_layout->addStretch();
+    if (!calibration) {
+        // Scan uses the existing defaults; the scene gets the full width.
+        // Keep the hidden parameter widgets as the shared pipeline's settings.
+        settings_panel->hide();
+        auto* mask_tools = new QWidget; mask_tools->setObjectName("scanMaskTools");
+        auto* mask_rows = new QVBoxLayout(mask_tools);
+        auto* prompt_row = new QHBoxLayout;
+        for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_,sam_undo_}) prompt_row->addWidget(b);
+        prompt_row->addStretch(); mask_rows->addLayout(prompt_row);
+        auto* brush_row = new QHBoxLayout;
+        brush_row->addWidget(brush_); brush_row->addWidget(eraser_);
+        brush_row->addWidget(label("Brush size")); brush_row->addWidget(brush_size_);
+        brush_row->addWidget(clear_); brush_row->addStretch(); mask_rows->addLayout(brush_row);
+        region_layout->insertWidget(0,mask_tools);
+        mask_panel_ = mask_tools;
+
+        auto* save_dialog = new QDialog(this);
+        save_dialog->setObjectName("saveResultsDialog"); save_dialog->setWindowTitle("Save results");
+        save_dialog->setWindowModality(Qt::WindowModal);
+        auto* save_layout = new QVBoxLayout(save_dialog); save_layout->addWidget(save_panel);
+        open_save_ = button("Save results…","openSaveResults");
+        connect(open_save_,&QPushButton::clicked,this,[save_dialog] { save_dialog->open(); });
+    }
     split->setSizes({290,1170}); split->setStretchFactor(1,1); outer->addWidget(split,1);
     steps_ = label(""); outer->addWidget(steps_);
     auto* footer = new QHBoxLayout; status_ = label(""); status_->setObjectName("status"); footer->addWidget(status_,1);
@@ -265,7 +295,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     outer->addWidget(capture_slots);
     progress_ = new QProgressBar; progress_->setObjectName("calculationProgress");
     progress_->setRange(0,100); progress_->setValue(0); progress_->setTextVisible(true);
-    progress_->setToolTip("Progress updates when each calculation stage completes."); outer->addWidget(progress_);
+    progress_->setToolTip("Progress updates when each calculation stage completes.");
+    auto* bottom_row = new QHBoxLayout; bottom_row->addWidget(progress_,1);
+    if (open_save_) bottom_row->addWidget(open_save_);
+    outer->addLayout(bottom_row);
     connect(show_log,&QPushButton::toggled,log_,&QWidget::setVisible);
     connect(show_log,&QPushButton::toggled,this,[show_log](bool shown) { show_log->setText(shown ? "Hide log" : "Show log"); });
     connect(&controller_,&PipelineController::log,this,[this](const QString& message) { log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss") + "  " + message); });
@@ -358,7 +391,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(import_,&QPushButton::clicked,this,[this] {
         const QString path = QFileDialog::getExistingDirectory(this,"Choose capture directory (left.png, right.png, calibration JSON)");
         if (path.isEmpty()) return;
-        const bool own_calibration = capture_calibration_->isChecked(); controller_.submit([=](auto& w) { w.importCapture(path,own_calibration); });
+        const bool own_calibration = capture_calibration_->isChecked();
+        const bool auto_reconstruct = !has_confirmed_calibration_;
+        const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
+        const bool denoise=denoise_->isChecked();
+        controller_.submit([=](auto& w) {
+            w.importCapture(path,own_calibration);
+            if (auto_reconstruct) w.reconstruct(low,high,{},denoise,distance);
+        });
     });
     connect(camera_,&QPushButton::clicked,this,[this] {
         const bool connected = state_.connected;
@@ -383,13 +423,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
         const bool denoise=denoise_->isChecked();
         controller_.submit([=](auto& w) { w.captureAndReconstruct(low,high,denoise,distance); });
-    });
-    connect(run_,&QPushButton::clicked,this,[this] {
-        reconstruction_valid_=false; refresh();
-        const float low = minimum_->value(), high = maximum_->value();
-        const QImage selected=mask_->mask();
-        const bool denoise=denoise_->isChecked(); const float distance=neighbor_distance_->value();
-        controller_.submit([=](auto& w) { w.reconstruct(low,high,selected,denoise,distance); });
     });
     connect(browse_save_,&QPushButton::clicked,this,[this] {
         const auto directory=QFileDialog::getExistingDirectory(this,"Choose output folder",save_directory_->text());
@@ -453,7 +486,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(maximum_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(denoise_,&QCheckBox::toggled,this,depth_settings_changed);
     connect(neighbor_distance_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
-    connect(clear_,&QPushButton::clicked,mask_,&MaskEditor::clearMask);
+    connect(clear_,&QPushButton::clicked,this,[this] {
+        mask_->clearMask();
+        if (!has_confirmed_calibration_) reconstructCurrent();
+    });
     connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
     connect(brush_size_,&QSpinBox::valueChanged,mask_,&MaskEditor::setBrushSize);
     connect(mask_,&MaskEditor::brushSizeChanged,brush_size_,&QSpinBox::setValue);
@@ -474,10 +510,29 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         const auto prompts=mask_->prompts(); mask_request_id_=controller_.requestMask(state_.image_id,prompts);
         if (!prompts.empty()) status_->setText("Updating SAM mask…");
     });
-    connect(mask_,&MaskEditor::selectionChanged,this,[this] { reconstruction_valid_=false; refresh(); }); connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
+    connect(mask_,&MaskEditor::selectionChanged,this,[this] {
+        reconstruction_valid_=false; refresh();
+        if (!has_confirmed_calibration_ && mask_->hasSelection()) {
+            // Finish draw (or Enter) commits the selection. Wait for its UI
+            // updates to finish before starting work on the frozen input.
+            const auto image_id=state_.image_id;
+            QTimer::singleShot(0,this,[this,image_id] {
+                if (state_.image_id==image_id && mask_->hasSelection()) reconstructCurrent();
+            });
+        }
+    });
+    connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
     auto* timer = new QTimer(this); timer->setInterval(200); connect(timer,&QTimer::timeout,this,[this] { if (busy_) time_->setText(QString("Running: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); }); timer->start();
     connect(tabs_,&QTabWidget::currentChanged,this,&ReconstructionWindow::refreshWorkspace);
     refresh();
+}
+void ReconstructionWindow::reconstructCurrent() {
+    if (busy_ || closing_ || state_.live || !state_.has_rectified || !state_.engine_ready) return;
+    reconstruction_valid_=false; refresh();
+    const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
+    const QImage selected=mask_->mask();
+    const bool denoise=denoise_->isChecked();
+    controller_.submit([=](auto& w) { w.reconstruct(low,high,selected,denoise,distance); });
 }
 void ReconstructionWindow::refresh() {
     if (!reconstruction_valid_ || !state_.depth_ready) { mesh_valid_=false; gpu_upload_pending_=false; }
@@ -520,8 +575,12 @@ void ReconstructionWindow::refresh() {
     build_mesh_cpu_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready);
     build_mesh_gpu_->setEnabled(build_mesh_cpu_->isEnabled() && state_.gpu_ready && state_.engine_ready);
     denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
-    run_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
-    run_->setToolTip(!state_.engine_ready ? "FoundationStereo is not initialized." : !depth_valid ? "Minimum depth must be less than maximum." : !frozen ? "Import or capture a frozen stereo pair first." : "Reconstruct depth and display valid points. Without a confirmed mask, process the full image.");
+    if (manual_reconstruct_) {
+        manual_reconstruct_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
+        manual_reconstruct_->setToolTip(depth_valid
+            ? "Reconstruct depth and display valid points. Without a confirmed mask, process the full image."
+            : "Minimum depth must be less than maximum.");
+    }
     mask_->setEditingEnabled(idle && frozen);
     for (auto* b : {brush_,eraser_}) b->setEnabled(idle && frozen);
     brush_size_->setEnabled(idle && frozen);
@@ -531,7 +590,9 @@ void ReconstructionWindow::refresh() {
     clear_->setEnabled(idle && (mask_->hasPrompts() || mask_->hasPrediction()));
     input_->setText(state_.input); calibration_->setText(state_.calibration);
     if (!closing_) status_->setText(!render_error_.isEmpty() ? render_error_ : !busy_ && !state_.action_failed && !state_.live && state_.depth_ready && !reconstruction_valid_
-        ? "Selection or post-processing settings changed. Reconstruct again to update the point cloud." : state_.status);
+        ? has_confirmed_calibration_ ? "Selection or post-processing settings changed. Reconstruct again to update the point cloud."
+                                     : "Confirm the region with Finish draw to update the point cloud."
+        : state_.status);
     if (!state_.depth_ready || !reconstruction_valid_) {
         depth_image_ = {};
         depth_status_->setText("Jet uses the Minimum and Maximum depth settings for each reconstruction.");
@@ -564,6 +625,7 @@ void ReconstructionWindow::refresh() {
     mesh_mode_->setEnabled(mesh_valid_ && !show_ma);
     for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(!point_cloud);
     browse_save_->setEnabled(idle);
+    if (open_save_) open_save_->setEnabled(idle && frozen);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
     if (!mask_->hasSelection()) {
         const QSignalBlocker blocker(save_mask_);
@@ -589,7 +651,8 @@ void ReconstructionWindow::refresh() {
         .arg(mesh_result_->vertices.size()).arg(mesh_result_->triangles.size()).arg(mesh_result_->area_m2*1e4,0,'f',2)
         : state_.live ? "LIVE · Pixel point cloud at 40 cm · Capture a pair to reconstruct depth."
         : result_current ? "Depth ready. Switch the camera image or generate a CPU / GPU mesh."
-        : frozen ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
+        : frozen ? (has_confirmed_calibration_ ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
+                                              : "Captured left image · Confirm a region, retake or import a pair to update the point cloud.")
         : "Connect cameras to see the left live image in 3D, or import a capture.");
     if (show_ma) {
         unsigned long long points=0;
@@ -617,7 +680,8 @@ void ReconstructionWindow::refreshWorkspace() {
     capture_more_->setVisible(scene && frozen);
     camera_mode_->setVisible(scene);
     finish_draw_->setVisible(!scene);
-    run_->setVisible(scene && frozen);
+    if (manual_reconstruct_) manual_reconstruct_->setVisible(scene && frozen);
+    if (open_save_) open_save_->setVisible(scene && frozen);
     build_mesh_cpu_->setVisible(scene && depth_ready);
     build_mesh_gpu_->setVisible(scene && depth_ready);
 }
