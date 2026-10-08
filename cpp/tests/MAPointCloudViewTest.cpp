@@ -117,6 +117,40 @@ int main(int argc, char** argv) {
         view.setMAClouds({}); view.setCapturedClouds({}); view.setGPUMesh({}); view.setPredictedCameras({});
         view.setShowMAClouds(false);
         require(snapshot()==no_points,"Clean retained point-cloud geometry");
+        // Render five MA meshes at distinct poses, with negative world-space Z.
+        // The red FS source must disappear while MA triangles are selected.
+        auto surface=std::make_shared<GPUMeshFrame>(*ma);
+        auto mesh_buffer=std::make_shared<fs::MeshGPUBuffer>();
+        // This rendering fixture uses 6 mm spacing, independent of MA's production limit.
+        surface->stats=fs::build_mesh_from_point_cloud_gpu(*ma->buffer,31,23,*mesh_buffer,ma->stream,.01);
+        surface->buffer=mesh_buffer; surface->point_cloud=false;
+        auto surfaces=std::make_shared<std::vector<SharedGPUMesh>>();
+        auto mesh_poses=std::make_shared<std::vector<PredictedCameraFrame>>();
+        auto mesh_clouds=std::make_shared<std::vector<SharedGPUMesh>>();
+        for (int i=0;i<5;++i) {
+            auto part=std::make_shared<GPUMeshFrame>(*surface); part->image_id=i+1; surfaces->push_back(part);
+            auto points=std::make_shared<GPUMeshFrame>(*ma); points->image_id=i+1; mesh_clouds->push_back(points);
+            auto pose=cv::Matx44d::eye(); pose(0,3)=i*.25; pose(2,3)=-.5;
+            mesh_poses->push_back({{},pose,quint64(i+1),{}});
+        }
+        int presented_meshes=0;
+        QObject::connect(&view,&MeshView::maMeshesPresented,[&](SharedGPUMeshes result) {
+            require(result==surfaces,"Renderer presented an outdated MA mesh snapshot"); ++presented_meshes;
+        });
+        view.setCapturedClouds({fs}); view.setMAClouds(mesh_clouds); view.setMAMeshes(surfaces);
+        view.setPredictedCameras(mesh_poses); view.setShowMAClouds(true); view.setMode(1); view.resetView();
+        const auto mesh_image=snapshot();
+        require(presented_meshes==1 && pixels(mesh_image,false)>500 && pixels(mesh_image,true)==0,
+                "MA meshes were not presented, lost negative world Z, or overlapped FS geometry");
+        view.setMode(2); const auto wire=snapshot(); require(wire!=mesh_image,"MA wireframe rendered filled triangles");
+        view.setMode(0); require(snapshot()!=mesh_image,"MA point-cloud mode still draws mesh surfaces");
+        auto updated_poses=std::make_shared<std::vector<PredictedCameraFrame>>(*mesh_poses);
+        updated_poses->back().camera_to_world(1,3)=.2;
+        view.setPredictedCameras(updated_poses); view.setMode(1);
+        require(snapshot()!=mesh_image,"MA mesh ignored an updated camera pose");
+        view.setMAClouds({}); view.setMAMeshes({}); view.setCapturedClouds({}); view.setPredictedCameras({});
+        view.setShowMAClouds(false);
+        require(snapshot()==no_points,"Clean retained MA mesh geometry");
         // Compare the animation destination against actual textured GL pixels,
         // including the top/bottom orientation, perspective and a resized view.
         view.setCamera(fs::MeshCamera{cv::Matx33d(240,0,120,0,255,85,0,0,1),{320,240}});
@@ -146,8 +180,40 @@ int main(int argc, char** argv) {
         require(view.cameraImageQuad().size()==4,"Hiding the texture removed the animation's wireframe destination");
         view.setCamera({}); snapshot();
         require(view.cameraImageQuad().isEmpty(),"Clearing the camera retained a stale animation destination");
+        const fs::MeshCamera camera{cv::Matx33d(240,0,120,0,255,85,0,0,1),{320,240}};
+        QImage dark(320,240,QImage::Format_RGB32); dark.fill(Qt::black);
+        auto cameras=std::make_shared<std::vector<PredictedCameraFrame>>();
+        auto left=cv::Matx44d::eye(), right=cv::Matx44d::eye(); left(0,3)=-.10; right(0,3)=.10;
+        cameras->push_back({camera,left,10,dark}); cameras->push_back({camera,right,20,dark});
+        view.setPredictedCameras(cameras); view.setCameraPresentation(20,0,20); view.resetCaptureView();
+        const auto color_count=[](const QImage& frame,bool green) {
+            int count=0;
+            for (int y=0;y<frame.height();++y) for (int x=0;x<frame.width();++x) {
+                const auto p=frame.pixelColor(x,y);
+                if (green ? p.green()>230 && p.red()<50 && p.blue()<100 : p.blue()>230 && p.red()<50 && p.green()<150) ++count;
+            }
+            return count;
+        };
+        auto camera_image=snapshot();
+        require(color_count(camera_image,true)==0 && color_count(camera_image,false)>20,"Camera frames must be blue before landing");
+        const auto target=view.cameraImageQuad();
+        require(target.size()==4,"Transfer does not target the active MA camera");
+        view.setCameraPresentation(20,20); camera_image=snapshot();
+        require(color_count(camera_image,true)>10 && color_count(camera_image,false)>10,"Active camera did not turn green while other cameras stayed blue");
+        view.setCameraPresentation(10,10); const auto switched=snapshot();
+        require(view.cameraImageQuad()!=target && switched!=camera_image && color_count(switched,true)>10 && color_count(switched,false)>10,
+                "Highlight or transfer destination did not follow the active camera ID");
+        auto overlapping=std::make_shared<std::vector<PredictedCameraFrame>>(*cameras);
+        overlapping->back().camera_to_world=overlapping->front().camera_to_world;
+        view.setPredictedCameras(overlapping); view.setCameraPresentation(20,20);
+        require(color_count(snapshot(),true)>10,"An overlapping camera hid the active green frame");
+        view.setPredictedCameras({}); view.setCameraPresentation(0,0);
+        const auto cleared=snapshot();
+        require(color_count(cleared,true)==0 && color_count(cleared,false)==0 && view.cameraImageQuad().isEmpty(),
+                "Clean retained camera highlighting");
         std::cout<<"PASS: CUDA/OpenGL uploads, exclusive FS/MA rendering, stable view/poses, cached switches, retake, empty clouds and clean\n";
         std::cout<<"PASS: projected camera corners match textured GL pixels, perspective, orientation and resizing\n";
+        std::cout<<"PASS: five MA meshes, negative world Z, exclusive source/mode rendering, pose updates and green/blue camera selection\n";
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
     }

@@ -22,6 +22,8 @@ struct GPUMeshFrame {
 using SharedGPUMesh = std::shared_ptr<const GPUMeshFrame>;
 Q_DECLARE_METATYPE(SharedGPUMesh)
 using SharedGPUClouds = std::shared_ptr<const std::vector<SharedGPUMesh>>;
+using SharedGPUMeshes = std::shared_ptr<const std::vector<SharedGPUMesh>>;
+Q_DECLARE_METATYPE(SharedGPUMeshes)
 
 // Small, immutable display snapshot in MA's predicted world coordinate frame.
 // Intrinsics define each wireframe's shape; camera_to_world defines its pose.

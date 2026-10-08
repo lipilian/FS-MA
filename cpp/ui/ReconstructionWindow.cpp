@@ -174,8 +174,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     tabs_ = new QTabWidget; tabs_->setObjectName("workspaceTabs");
     auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
     auto* cloud_controls=new QHBoxLayout;
-    fs_cloud_=new QRadioButton("FS point cloud"); fs_cloud_->setObjectName("fsPointCloud");
-    ma_cloud_=new QRadioButton("MA point cloud"); ma_cloud_->setObjectName("maPointCloud");
+    fs_cloud_=new QRadioButton("FS"); fs_cloud_->setObjectName("fsPointCloud");
+    ma_cloud_=new QRadioButton("MA"); ma_cloud_->setObjectName("maPointCloud");
     auto* cloud_source=new QButtonGroup(this); cloud_source->setExclusive(true);
     cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_);
     fs_cloud_->setChecked(true);
@@ -204,6 +204,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     scene_split->setSizes({360,720}); scene_layout->addWidget(scene_split,1);
     capture_transition_ = new CaptureTransition(scene);
     connect(capture_transition_, &CaptureTransition::finished, this, [this] {
+        if (transition_camera_id_) highlighted_camera_id_=transition_camera_id_;
+        transition_camera_id_=0;
         preview_->setImageVisible(true);
         refresh(); // Hand the landed image to the actual OpenGL camera texture.
     });
@@ -215,7 +217,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     tabs_->addTab(scene,"3D workspace");
     tabs_->setTabToolTip(SceneTab,"Image preview on the left; captured point clouds and mesh on the right.");
     connect(camera_image_mode_,&QComboBox::currentIndexChanged,this,[this] { showImages(); });
-    connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); });
+    connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); refresh(); });
     connect(reset,&QPushButton::clicked,this,[this] { mesh_view_->resetView(); });
     connect(show_right_camera,&QCheckBox::toggled,this,[this](bool visible) {
         right_preview_->setVisible(visible); mesh_view_->setRightCameraVisible(visible);
@@ -349,12 +351,18 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
                 capture_mesh_requested_=false;
                 setCaptureProcessing(false);
                 // Do not present the intermediate FS point cloud. Wait until
-                // the entire first-capture job (including meshing) has finished.
-                if (!state_.action_failed && pending_capture_mesh_) {
+                // the entire capture job (including FS or MA meshing) has finished.
+                if (!state_.action_failed && state_.capture_count>=2 && state_.ma_meshes &&
+                    state_.ma_meshes!=displayed_ma_meshes_) {
+                    capture_transition_pending_=true;
+                    transition_camera_id_=state_.image_id; highlighted_camera_id_=0;
+                    presentMAResult();
+                } else if (!state_.action_failed && pending_capture_mesh_) {
                     captured_clouds_={pending_capture_cloud_};
                     capture_transition_pending_=true;
+                    transition_camera_id_=state_.image_id; highlighted_camera_id_=0;
                     presentGeometry(std::move(pending_capture_mesh_));
-                } else if (pending_capture_cloud_) {
+                } else if (pending_capture_cloud_ && state_.capture_count<2) {
                     // Meshing may reject every triangle; retain usable points
                     // and the worker's failure message without a success animation.
                     presentGeometry(pending_capture_cloud_);
@@ -363,6 +371,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             } else if (capture_processing_ && (state_.action_failed || !gpu_upload_pending_)) {
                 setCaptureProcessing(false);
             }
+            if (!state_.action_failed && state_.ma_meshes && state_.ma_meshes!=displayed_ma_meshes_) presentMAResult();
         }
         refresh();
     });
@@ -395,9 +404,16 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (capture_transition_pending_) startCaptureTransition();
         refresh();
     },Qt::QueuedConnection); // Updating the progress bar may repaint; wait until paintGL returns.
+    connect(mesh_view_,&MeshView::maMeshesPresented,this,[this](SharedGPUMeshes meshes) {
+        if (closing_ || meshes!=displayed_ma_meshes_) return;
+        ma_upload_pending_=false; ma_mesh_valid_=true;
+        if (capture_transition_pending_) startCaptureTransition();
+        refresh();
+    },Qt::QueuedConnection);
     connect(mesh_view_,&MeshView::renderFailed,this,[this](const QString& message) {
         cancelCapturePresentation();
-        render_error_=message; gpu_upload_pending_=false; mesh_valid_=false; refresh();
+        render_error_=message; gpu_upload_pending_=false; mesh_valid_=false;
+        ma_upload_pending_=false; ma_mesh_valid_=false; refresh();
         scene_status_->setText(message); status_->setText(message);
         log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss")+"  "+message);
     },Qt::QueuedConnection);
@@ -452,7 +468,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         }
         if (!captured_clouds_.empty()) mesh_view_->preserveView();
         const bool single_capture=state_.capture_count==0;
-        capture_mesh_requested_=single_capture;
+        capture_mesh_requested_=true;
         pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
         setCaptureProcessing(true);
         reconstruction_valid_=false; refresh();
@@ -488,7 +504,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         const QImage selection=mask_->mask();
         const SharedGPUMesh gpu_mesh=mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
-        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,gpu_mesh,overwrite); });
+        const SharedGPUMeshes ma_geometry=ma_cloud_->isChecked() && ma_mesh_valid_
+            ? (mesh_mode_->currentIndex()==0 ? displayed_ma_clouds_ : displayed_ma_meshes_) : SharedGPUMeshes{};
+        controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,gpu_mesh,overwrite,ma_geometry); });
     };
     connect(save_selected_,&QPushButton::clicked,this,[this,save_results] {
         save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked(),save_depth_->isChecked()});
@@ -569,28 +587,37 @@ void ReconstructionWindow::reconstructCurrent() {
     controller_.submit([=](auto& w) { w.reconstruct(low,high,selected,denoise,distance); });
 }
 void ReconstructionWindow::refresh() {
-    if (!reconstruction_valid_ || !state_.depth_ready) { mesh_valid_=false; gpu_upload_pending_=false; }
+    if (!reconstruction_valid_ || !state_.depth_ready) {
+        mesh_valid_=false; gpu_upload_pending_=false; ma_mesh_valid_=false; ma_upload_pending_=false;
+    }
     // Result validity controls processing/export. Completed scene geometry has
     // its own lifetime and survives preview, new inference and failed retakes.
     // Update it before controls that can cause a synchronous OpenGL repaint.
     if (closing_) captured_clouds_.clear();
-    mesh_view_->setPredictedCameras(closing_ ? SharedPredictedCameras{} : state_.predicted_cameras);
-    mesh_view_->setMAClouds(closing_ ? SharedGPUClouds{} : state_.ma_clouds);
-    const bool ma_available=!closing_ && state_.ma_clouds && !state_.ma_clouds->empty();
+    if (closing_ || !state_.ma_clouds) {
+        displayed_ma_clouds_.reset(); displayed_ma_meshes_.reset(); displayed_cameras_.reset();
+        ma_mesh_valid_=false; ma_upload_pending_=false;
+    }
+    if (!state_.capture_count) highlighted_camera_id_=0;
+    mesh_view_->setPredictedCameras(displayed_cameras_);
+    mesh_view_->setMAClouds(displayed_ma_clouds_);
+    mesh_view_->setMAMeshes(displayed_ma_meshes_);
+    const bool ma_available=displayed_ma_clouds_ && !displayed_ma_clouds_->empty();
     if (!ma_available && ma_cloud_->isChecked()) {
         const QSignalBlocker fs_blocker(fs_cloud_), ma_blocker(ma_cloud_);
         fs_cloud_->setChecked(true);
     }
     const bool show_ma=ma_cloud_->isChecked();
-    fs_cloud_->setEnabled(!closing_); ma_cloud_->setEnabled(ma_available);
-    ma_cloud_->setToolTip(ma_available ? "Display MapAnything's predicted point clouds."
+    fs_cloud_->setEnabled(!closing_ && !busy_ && !capture_transition_pending_ && !capture_transition_->isRunning());
+    ma_cloud_->setEnabled(fs_cloud_->isEnabled() && ma_available);
+    ma_cloud_->setToolTip(ma_available ? "Display MapAnything's GPU meshes or point clouds at the predicted camera poses."
         : "Available after MapAnything finishes inference on at least two captures.");
     mesh_view_->setShowMAClouds(show_ma);
     const bool replacement=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && !gpu_mesh_result_->point_cloud;
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
         ? captured_clouds_.back() : SharedGPUMesh{});
     const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
-    const bool idle = !busy_ && !closing_ && !gpu_upload_pending_ && !transferring, frozen = state_.has_rectified && !state_.live;
+    const bool idle = !busy_ && !closing_ && !gpu_upload_pending_ && !ma_upload_pending_ && !transferring, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle && has_confirmed_calibration_); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     camera_mode_->setEnabled(idle && !state_.connected);
@@ -601,13 +628,13 @@ void ReconstructionWindow::refresh() {
     const bool depth_valid = minimum_->value() < maximum_->value();
     retake_->setEnabled(idle && state_.connected && frozen);
     restart_->setEnabled(idle && state_.connected && (state_.has_rectified || state_.capture_count>0));
-    const bool can_append=frozen && reconstruction_valid_ && mesh_valid_ &&
+    const bool can_append=frozen && reconstruction_valid_ && (mesh_valid_ || ma_mesh_valid_) &&
                           state_.capture_count>0 && state_.capture_count<PipelineState::kMaxCaptures;
     capture_->setEnabled(idle && state_.connected && state_.engine_ready && depth_valid && (state_.live || can_append));
     capture_->setText(state_.capture_count>0 ? "Capture more" : "Capture pair");
     capture_->setToolTip(state_.live
         ? (state_.capture_count==0 ? "Capture this stereo pair and automatically display the FS GPU mesh."
-                                   : "Capture this stereo pair, reconstruct and display valid points automatically.")
+                                   : "Capture this stereo pair, update all MA meshes and display them automatically.")
         : state_.capture_count>=PipelineState::kMaxCaptures
             ? "Five captures are complete. Retake the latest view or restart."
             : "Keep completed captures and preview the next view, then press again to capture it. Up to five pairs.");
@@ -640,9 +667,9 @@ void ReconstructionWindow::refresh() {
     steps_->setText(QString("%1 Rectification   →   %2 FS inference   →   %3 GPU XYZ / filtering   →   %4 Depth map   →   %5 Valid point cloud")
         .arg(state_.has_rectified ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", result_current ? "✓" : "○", mesh_valid_ ? "✓" : "○"));
     refreshWorkspace();
-    const int progress=!render_error_.isEmpty() ? std::min(state_.progress,95) : gpu_upload_pending_ ? 97 : state_.progress;
+    const int progress=!render_error_.isEmpty() ? std::min(state_.progress,95) : (gpu_upload_pending_ || ma_upload_pending_) ? 97 : state_.progress;
     const QString progress_stage=!render_error_.isEmpty() ? "Display failed · " + render_error_
-        : gpu_upload_pending_ ? "Transferring GPU geometry to OpenGL…" : state_.progress_stage;
+        : (gpu_upload_pending_ || ma_upload_pending_) ? "Transferring GPU geometry to OpenGL…" : state_.progress_stage;
     progress_->setValue(progress);
     progress_->setFormat(QString::number(progress) + "% · " + progress_stage);
     for (int i=0; i<PipelineState::kMaxCaptures; ++i) {
@@ -658,10 +685,12 @@ void ReconstructionWindow::refresh() {
         gpu_mesh_result_.reset(); mesh_view_->setGPUMesh({});
     }
     const bool point_cloud=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && gpu_mesh_result_->point_cloud;
-    save_mesh_->setText(point_cloud ? "FS point cloud (mesh.ply)" : "FS mesh (mesh.ply)");
-    save_mesh_->setToolTip("Save the current FS points or mesh as PLY; the FS / MA selector controls the 3D display.");
-    mesh_mode_->setEnabled(mesh_valid_ && !show_ma && !transferring);
-    for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(!point_cloud);
+    save_mesh_->setText(show_ma ? (mesh_mode_->currentIndex()==0 ? "MA point cloud (mesh.ply)" : "MA mesh (mesh.ply)")
+                              : point_cloud ? "FS point cloud (mesh.ply)" : "FS mesh (mesh.ply)");
+    save_mesh_->setToolTip(show_ma ? "Save the displayed MA geometry in its predicted world frame." : "Save the displayed FS geometry as PLY.");
+    mesh_mode_->setEnabled((show_ma ? ma_mesh_valid_ : mesh_valid_) && !transferring);
+    for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(show_ma ? bool(displayed_ma_meshes_) : !point_cloud);
+    if (!show_ma && point_cloud && mesh_mode_->currentIndex()!=0) mesh_mode_->setCurrentIndex(0);
     browse_save_->setEnabled(idle);
     if (open_save_) open_save_->setEnabled(idle && frozen);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
@@ -672,11 +701,12 @@ void ReconstructionWindow::refresh() {
     save_mask_->setEnabled(idle && mask_->hasSelection());
     save_calibration_name_->setText(state_.calibration_filename);
     const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked() || save_depth_->isChecked();
+    const bool geometry_valid=show_ma ? ma_mesh_valid_ : mesh_valid_ && bool(gpu_mesh_result_);
     const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
         (!save_depth_->isChecked() || result_current) &&
-        (!save_mesh_->isChecked() || (mesh_valid_ && gpu_mesh_result_));
+        (!save_mesh_->isChecked() || geometry_valid);
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
-    save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && gpu_mesh_result_ && !save_directory_->text().isEmpty());
+    save_all_->setEnabled(idle && frozen && result_current && geometry_valid && !save_directory_->text().isEmpty());
     scene_status_->setText(transferring ? "Capture complete · Placing the image in its camera frame…"
         : capture_processing_ ? "Calculating · Reconstructing the captured surface…"
         : point_cloud ? QString("GPU point cloud · %1 valid points%2")
@@ -690,11 +720,13 @@ void ReconstructionWindow::refresh() {
         : frozen ? (has_confirmed_calibration_ ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
                                               : "Captured left image · Confirm a region, retake or import a pair to update the point cloud.")
         : "Connect cameras to preview on the left, or import a capture.");
-    if (show_ma) {
-        unsigned long long points=0;
-        for (const auto& cloud:*state_.ma_clouds) points+=cloud->stats.point_count;
-        scene_status_->setText(QString("MA point cloud · %1 valid points · %2 views")
-            .arg(points).arg(state_.ma_clouds->size()));
+    if (show_ma && !transferring && !capture_processing_) {
+        unsigned long long count=0;
+        const bool mesh=mesh_mode_->currentIndex()!=0;
+        const auto& frames=mesh ? displayed_ma_meshes_ : displayed_ma_clouds_;
+        if (frames) for (const auto& frame:*frames) count+=mesh ? frame->stats.triangle_count : frame->stats.point_count;
+        scene_status_->setText(QString(mesh ? "MA GPU mesh · %1 triangles · %2 views" : "MA point cloud · %1 valid points · %2 views")
+            .arg(count).arg(frames ? frames->size() : 0));
     } else if (!captured_clouds_.empty())
         scene_status_->setText(scene_status_->text()+QString(" · %1 completed %2 visible")
             .arg(captured_clouds_.size()).arg(captured_clouds_.size()==1 ? "capture" : "captures"));
@@ -719,6 +751,7 @@ void ReconstructionWindow::refreshWorkspace() {
 }
 void ReconstructionWindow::showImages() {
     const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
+    mesh_view_->setCameraPresentation(state_.image_id,highlighted_camera_id_,transferring ? transition_camera_id_ : 0);
     camera_image_mode_->setEnabled(!capture_processing_ && !transferring);
     const bool depth_available = !state_.live && !capture_processing_ && !transferring && reconstruction_valid_ && state_.depth_ready && !depth_image_.isNull();
     static_cast<QStandardItemModel*>(camera_image_mode_->model())->item(1)->setEnabled(depth_available);
@@ -757,6 +790,26 @@ void ReconstructionWindow::presentGeometry(SharedGPUMesh mesh) {
     if (capture_transition_pending_) mesh_view_->resetCaptureView();
     refresh();
 }
+void ReconstructionWindow::presentMAResult() {
+    displayed_ma_clouds_=state_.ma_clouds; displayed_ma_meshes_=state_.ma_meshes;
+    displayed_cameras_=state_.predicted_cameras;
+    if (pending_capture_cloud_) {
+        captured_clouds_.resize(state_.capture_count); captured_clouds_.back()=pending_capture_cloud_;
+        gpu_mesh_result_=pending_capture_cloud_; mesh_valid_=true;
+    }
+    gpu_upload_pending_=false;
+    ma_mesh_valid_=false; ma_upload_pending_=true;
+    {
+        const QSignalBlocker fs_blocker(fs_cloud_), ma_blocker(ma_cloud_), mode_blocker(mesh_mode_);
+        ma_cloud_->setChecked(true); mesh_mode_->setCurrentIndex(1);
+    }
+    mesh_view_->setGPUMesh({}); mesh_view_->setShowMAClouds(true); mesh_view_->setMode(1);
+    tabs_->setCurrentIndex(SceneTab);
+    refresh();
+    // MA may change the world origin and every pose. Fit the completed snapshot
+    // so the active camera and its transfer destination stay in view.
+    mesh_view_->resetCaptureView();
+}
 void ReconstructionWindow::startCaptureTransition() {
     capture_transition_pending_=false;
     const auto source=[this] {
@@ -767,9 +820,10 @@ void ReconstructionWindow::startCaptureTransition() {
         return mesh_view_->cameraImageQuad().translated(mesh_view_->mapTo(capture_transition_->parentWidget(),QPoint()));
     };
     if (capture_transition_->start(rectified_left_,source,destination)) preview_->setImageVisible(false);
+    else transition_camera_id_=0;
 }
 void ReconstructionWindow::cancelCapturePresentation() {
-    capture_mesh_requested_=false; capture_transition_pending_=false;
+    capture_mesh_requested_=false; capture_transition_pending_=false; transition_camera_id_=0;
     pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
     setCaptureProcessing(false);
     capture_transition_->cancel();

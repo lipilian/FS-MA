@@ -45,6 +45,7 @@ class MeshCanvas : public QOpenGLWidget {
     }
     void setMode(int mode) {
         mode_ = mode;
+        dirty_=true;
         update();
     }
     void setMAClouds(SharedGPUClouds clouds) {
@@ -60,6 +61,18 @@ class MeshCanvas : public QOpenGLWidget {
         preserveView();
         dirty_=true;
         update();
+    }
+    void setMAMeshes(SharedGPUMeshes meshes) {
+        if (ma_meshes_==meshes) return;
+        ma_meshes_=std::move(meshes);
+        captures_dirty_=true; dirty_=true; failed_=false;
+        announce_ma_=ma_meshes_ && !ma_meshes_->empty();
+        update();
+    }
+    void setCameraPresentation(quint64 active, quint64 highlighted, quint64 hidden) {
+        if (active_camera_id_==active && highlighted_camera_id_==highlighted && hidden_image_id_==hidden) return;
+        active_camera_id_=active; highlighted_camera_id_=highlighted; hidden_image_id_=hidden;
+        camera_dirty_=true; update();
     }
     void setPredictedCameras(SharedPredictedCameras cameras) {
         if (predicted_cameras_ == cameras) return;
@@ -224,6 +237,7 @@ void main() {
         camera_dirty_ = true; image_dirty_.fill(true);
         captures_dirty_=true;
         dirty_ = true; failed_=false; announce_gpu_=bool(gpu_mesh_);
+        announce_ma_=ma_meshes_ && !ma_meshes_->empty();
         emit owner_->log(QString("3D renderer: OpenGL %1 (Core), %2")
                              .arg(QString::fromLatin1(reinterpret_cast<const char *>(gl_->glGetString(GL_VERSION))))
                              .arg(QString::fromLatin1(reinterpret_cast<const char *>(gl_->glGetString(GL_RENDERER)))));
@@ -283,11 +297,17 @@ void main() {
         program_->setUniformValue("shaded",false);
         program_->setUniformValue("wireframe",false);
         for (const auto& capture:cloud_resources_) {
-            if (isMACloud(capture->frame)!=show_ma_clouds_) continue;
+            const bool ma_cloud=isMACloud(capture->frame), ma_mesh=isMAMesh(capture->frame);
+            if (show_ma_clouds_ ? (mode_==0 ? !ma_cloud : !ma_mesh) : (ma_cloud || ma_mesh)) continue;
             if (!show_ma_clouds_ && capture->frame==hidden_capture_) continue;
+            const bool surface=!capture->frame->point_cloud && mode_!=0;
+            program_->setUniformValue("shaded",surface && mode_==1);
+            program_->setUniformValue("wireframe",surface && mode_==2);
             program_->setUniformValue("cameraToWorld",cameraPose(capture->frame));
             capture->vao.bind();
-            gl_->glDrawArrays(GL_POINTS,0,capture->count);
+            if (surface && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
+            gl_->glDrawArrays(surface ? GL_TRIANGLES : GL_POINTS,0,capture->count);
+            if (surface && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
             capture->vao.release();
         }
         program_->setUniformValue("cameraToWorld",cameraPose(gpu_mesh_));
@@ -323,6 +343,13 @@ void main() {
             for (const auto& texture:predicted_textures_)
                 if (texture.first_vertex>=0) draw_image(texture.id,texture.first_vertex);
             gl_->glDrawArrays(GL_LINES,0,camera_count_);
+            if (highlight_count_>0) {
+                // The active frame stays legible even when MA predicts nearly
+                // overlapping camera poses or scene geometry lies in front.
+                gl_->glDisable(GL_DEPTH_TEST);
+                gl_->glDrawArrays(GL_LINES,highlight_first_,highlight_count_);
+                gl_->glEnable(GL_DEPTH_TEST);
+            }
             camera_vao_.release();
         }
         program_->release();
@@ -333,6 +360,14 @@ void main() {
                 failed_=true;
                 emit owner_->renderFailed(QString("OpenGL mesh draw failed (error %1).").arg(error));
             } else emit owner_->gpuMeshPresented(gpu_mesh_);
+        }
+        if (announce_ma_ && show_ma_clouds_ && mode_!=0 && ma_meshes_) {
+            announce_ma_=false;
+            const auto error=gl_->glGetError();
+            if (error!=GL_NO_ERROR) {
+                failed_=true;
+                emit owner_->renderFailed(QString("OpenGL MA mesh draw failed (error %1).").arg(error));
+            } else emit owner_->maMeshesPresented(ma_meshes_);
         }
     }
     void mousePressEvent(QMouseEvent *e) override { last_ = e->position(); }
@@ -370,11 +405,14 @@ void main() {
         int first_vertex{-1};
     };
     bool hasMesh() const {
-        return show_ma_clouds_ ? ma_clouds_ && !ma_clouds_->empty()
+        return show_ma_clouds_ ? (mode_==0 ? ma_clouds_ && !ma_clouds_->empty() : ma_meshes_ && !ma_meshes_->empty())
             : !captured_clouds_.empty() || gpu_mesh_;
     }
     bool isMACloud(const SharedGPUMesh& mesh) const {
         return ma_clouds_ && std::find(ma_clouds_->begin(),ma_clouds_->end(),mesh)!=ma_clouds_->end();
+    }
+    bool isMAMesh(const SharedGPUMesh& mesh) const {
+        return ma_meshes_ && std::find(ma_meshes_->begin(),ma_meshes_->end(),mesh)!=ma_meshes_->end();
     }
     bool isCaptured(const SharedGPUMesh& mesh) const {
         return std::find(captured_clouds_.begin(),captured_clouds_.end(),mesh)!=captured_clouds_.end();
@@ -470,7 +508,8 @@ void main() {
             }
         };
         if (show_ma_clouds_) {
-            if (ma_clouds_) for (const auto& cloud:*ma_clouds_) add_gpu(cloud);
+            const auto& geometry=mode_==0 ? ma_clouds_ : ma_meshes_;
+            if (geometry) for (const auto& frame:*geometry) add_gpu(frame);
         } else {
             for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_) add_gpu(cloud);
             add_gpu(gpu_mesh_);
@@ -496,20 +535,21 @@ void main() {
     }
     void uploadCaptures() {
         for (auto it=cloud_resources_.begin();it!=cloud_resources_.end();) {
-            if (isCaptured((*it)->frame) || isMACloud((*it)->frame)) { ++it; continue; }
+            if (isCaptured((*it)->frame) || isMACloud((*it)->frame) || isMAMesh((*it)->frame)) { ++it; continue; }
             destroyCapture(**it); it=cloud_resources_.erase(it);
         }
         auto clouds=captured_clouds_;
         if (ma_clouds_) clouds.insert(clouds.end(),ma_clouds_->begin(),ma_clouds_->end());
+        if (ma_meshes_) clouds.insert(clouds.end(),ma_meshes_->begin(),ma_meshes_->end());
         for (const auto& frame:clouds) {
-            if (!frame || !frame->stats.point_count) continue;
+            if (!frame || !(frame->stats.point_count || frame->stats.triangle_count)) continue;
             const auto existing=std::find_if(cloud_resources_.begin(),cloud_resources_.end(),
                 [&](const auto& resource) { return resource->frame==frame; });
             if (existing!=cloud_resources_.end()) continue;
             auto resource=std::make_unique<CloudResource>(); resource->frame=frame;
             try {
                 if (!resource->buffer.create() || !resource->vao.create())
-                    throw std::runtime_error("Unable to create captured point-cloud buffer/array");
+                    throw std::runtime_error("Unable to create captured geometry buffer/array");
                 resource->vao.bind(); resource->buffer.bind();
                 gl_->glEnableVertexAttribArray(0); gl_->glEnableVertexAttribArray(1);
                 gl_->glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(fs::MeshGPUVertex),nullptr);
@@ -613,21 +653,18 @@ void main() {
     }
     void uploadCamera() {
         // Camera frustums use a separate buffer from CUDA/OpenGL geometry.
-        const auto metadata = activeCamera();
+        const bool predicted=predicted_cameras_ && !predicted_cameras_->empty();
+        const auto metadata = predicted ? std::nullopt : activeCamera();
         const cv::Vec3f center(center_.x(), center_.y(), center_.z());
         auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_,
-                               cv::Matx44d::eye(),cv::Vec3f(1.f,.65f,.12f),right_camera_visible_ ? 2 : 1);
+                               cv::Matx44d::eye(),cameraColor(active_camera_id_),right_camera_visible_ ? 2 : 1);
         camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
+        const int base_highlight=active_camera_id_ && active_camera_id_==highlighted_camera_id_ ? camera_count_ : 0;
+        highlight_first_=0; highlight_count_=0;
         // Reuse the exact image-plane vertices supplied to OpenGL. Project only
         // these four corners on the CPU for the 2D capture transfer animation.
         camera_quad_valid_ = camera_image_count_ > 0;
-        if (camera_quad_valid_) {
-            const int vertices[] = {0,1,2,5}; // First image: triangles 0,1,2 / 0,2,3.
-            for (int i = 0; i < 4; ++i) {
-                const auto offset = (camera_count_ + vertices[i]) * 6;
-                camera_image_corners_[i] = QVector3D(data[offset], data[offset+1], data[offset+2]);
-            }
-        }
+        if (camera_quad_valid_) rememberCameraQuad(data,camera_count_);
         // Retain immutable MA-sized textures when only poses change. Clean
         // releases the whole set; retakes replace only the corresponding image.
         const auto texture_count=predicted_cameras_ ? predicted_cameras_->size() : 0;
@@ -642,17 +679,21 @@ void main() {
         // Keep all lines before the active image planes, then append one image
         // plane per MA camera. Both use the same original camera-to-world pose.
         std::vector<float> lines, images;
-        if (predicted_cameras_) {
+        if (predicted) {
             for (size_t i=0;i<predicted_cameras_->size();++i) {
                 const auto& frame=(*predicted_cameras_)[i];
                 auto& texture=predicted_textures_[i];
                 int count=0; float radius=0;
                 const auto predicted=cameraData(frame.camera,center,scale_,count,radius,
-                    frame.camera_to_world,cv::Vec3f(.10f,.45f,1.f),frame.image.isNull() ? 0 : 1);
+                    frame.camera_to_world,cameraColor(frame.image_id),frame.image.isNull() ? 0 : 1);
+                if (frame.image_id && frame.image_id==highlighted_camera_id_) {
+                    highlight_first_=int(lines.size()/6); highlight_count_=count;
+                }
                 lines.insert(lines.end(),predicted.begin(),predicted.begin()+count*6);
                 texture.first_vertex=-1;
                 if (int(predicted.size())>count*6) {
-                    texture.first_vertex=int(images.size()/6);
+                    if (frame.image_id==active_camera_id_) { rememberCameraQuad(predicted,count); camera_quad_valid_=true; }
+                    if (frame.image_id!=hidden_image_id_) texture.first_vertex=int(images.size()/6);
                     images.insert(images.end(),predicted.begin()+count*6,predicted.end());
                     uploadTexture(texture.id,frame.image,texture.size,texture.image_key);
                 }
@@ -661,14 +702,19 @@ void main() {
         } else {
             for (const auto& frame:captured_clouds_) {
                 if (!frame) continue;
+                if (metadata && frame->image_id==active_camera_id_) continue;
                 int count=0; float radius=0;
                 const auto captured=cameraData(frame->camera,center,scale_,count,radius,
-                    cv::Matx44d::eye(),cv::Vec3f(1.f,.65f,.12f),0);
+                    cv::Matx44d::eye(),cameraColor(frame->image_id),0);
+                if (frame->image_id && frame->image_id==highlighted_camera_id_) {
+                    highlight_first_=int(lines.size()/6); highlight_count_=count;
+                }
                 lines.insert(lines.end(),captured.begin(),captured.begin()+count*6);
                 camera_radius_=std::max(camera_radius_,radius);
             }
         }
         data.insert(data.begin(),lines.begin(),lines.end());
+        if (base_highlight) { highlight_first_=int(lines.size()/6); highlight_count_=base_highlight; }
         camera_count_+=int(lines.size()/6);
         for (auto& texture:predicted_textures_)
             if (texture.first_vertex>=0) texture.first_vertex+=int(data.size()/6);
@@ -678,10 +724,20 @@ void main() {
         camera_buffer_.release();
         camera_dirty_ = false;
     }
+    cv::Vec3f cameraColor(quint64 id) const {
+        return id && id==highlighted_camera_id_ ? cv::Vec3f(.1f,1.f,.25f) : cv::Vec3f(.1f,.45f,1.f);
+    }
+    void rememberCameraQuad(const std::vector<float>& data, int lines) {
+        const int vertices[] = {0,1,2,5};
+        for (int i=0;i<4;++i) {
+            const auto offset=(lines+vertices[i])*6;
+            camera_image_corners_[i]=QVector3D(data[offset],data[offset+1],data[offset+2]);
+        }
+    }
     std::vector<float> cameraData(const std::optional<fs::MeshCamera>& metadata, cv::Vec3f center, float scale,
                                   int& line_count, float& radius,
                                   const cv::Matx44d& pose = cv::Matx44d::eye(),
-                                  const cv::Vec3f& color = cv::Vec3f(1.f,.65f,.12f), int image_count = 1) {
+                                  const cv::Vec3f& color = cv::Vec3f(.1f,.45f,1.f), int image_count = 1) {
         std::vector<float> data;
         line_count = 0;
         radius = .87f; // Radius of the mesh's normalized bounding box.
@@ -760,6 +816,9 @@ void main() {
     SharedGPUMesh gpu_mesh_;
     std::vector<SharedGPUMesh> captured_clouds_;
     SharedGPUClouds ma_clouds_;
+    SharedGPUMeshes ma_meshes_;
+    bool announce_ma_{false};
+    quint64 active_camera_id_{0}, highlighted_camera_id_{0}, hidden_image_id_{0};
     bool show_ma_clouds_{false};
     SharedPredictedCameras predicted_cameras_;
     std::vector<CameraTexture> predicted_textures_;
@@ -793,6 +852,7 @@ void main() {
     std::unique_ptr<QOpenGLShaderProgram> program_;
     bool dirty_{true}, right_camera_visible_{false};
     int mode_{1}, count_{}, camera_count_{}, camera_image_count_{};
+    int highlight_first_{0}, highlight_count_{0};
     float camera_radius_{};
     // Behind the camera, above and to its right, looking into the scene.
     static constexpr float kCaptureYaw = -33.6f, kCapturePitch = 40.f;
@@ -833,6 +893,17 @@ void MeshView::setPredictedCameras(SharedPredictedCameras cameras) {
 }
 void MeshView::setMAClouds(SharedGPUClouds clouds) {
     if (canvas_) canvas_->setMAClouds(std::move(clouds));
+}
+void MeshView::setMAMeshes(SharedGPUMeshes meshes) {
+    if (canvas_) canvas_->setMAMeshes(std::move(meshes));
+    else if (offscreen_ma_meshes_!=meshes) {
+        offscreen_ma_meshes_=std::move(meshes);
+        if (offscreen_ma_meshes_ && !offscreen_ma_meshes_->empty())
+            emit renderFailed("MA mesh rendering requires a hardware OpenGL display session.");
+    }
+}
+void MeshView::setCameraPresentation(quint64 active, quint64 highlighted, quint64 hidden) {
+    if (canvas_) canvas_->setCameraPresentation(active,highlighted,hidden);
 }
 void MeshView::setShowMAClouds(bool enabled) {
     if (canvas_) canvas_->setShowMAClouds(enabled);

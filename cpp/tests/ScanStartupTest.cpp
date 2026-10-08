@@ -18,6 +18,7 @@
 #include <QOpenGLWidget>
 #include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QTemporaryDir>
 #include <QTabWidget>
 #include <QTimer>
@@ -68,6 +69,12 @@ void checkCapturePresentation() {
     require(!transition.isRunning() && !transition.isVisible() && finished==2, "Transfer did not cancel cleanly");
     require(!transition.start(input,[&] { return source; },[] { return QPolygonF{}; }),
             "Transfer started without a projected camera plane");
+    MeshView unavailable;
+    int render_errors=0;
+    QObject::connect(&unavailable,&MeshView::renderFailed,[&](const QString&) { ++render_errors; });
+    auto geometry=std::make_shared<std::vector<SharedGPUMesh>>(); geometry->push_back(std::make_shared<GPUMeshFrame>());
+    unavailable.setMAMeshes(geometry); unavailable.setMAMeshes(geometry); unavailable.setMAMeshes({});
+    require(render_errors==1,"Unavailable MA renderer repeated its error on every UI refresh");
     std::cout<<"PASS: static calculation preview, shrinking camera transfer, moving target, completion and cancellation\n";
 }
 
@@ -81,8 +88,16 @@ bool hasSceneContent(QOpenGLWidget* canvas) {
             if (frame.pixel(x,y)!=background) return true;
     return false;
 }
+bool hasGreenCamera(QOpenGLWidget* canvas) {
+    const auto frame=canvas->grabFramebuffer();
+    for (int y=0;y<frame.height();++y) for (int x=0;x<frame.width();++x) {
+        const auto p=frame.pixelColor(x,y);
+        if (p.green()>230 && p.red()<50 && p.blue()<100) return true;
+    }
+    return false;
+}
 
-void checkGeometryExport(const QString& directory, const GPUMeshFrame& source) {
+void checkGeometryExport(const QString& directory, const GPUMeshFrame& source, bool world=false) {
     QFile ply(directory+"/mesh.ply");
     require(ply.open(QIODevice::ReadOnly), "GPU geometry export did not produce mesh.ply");
     quint64 vertices=0, faces=0;
@@ -101,7 +116,7 @@ void checkGeometryExport(const QString& directory, const GPUMeshFrame& source) {
     for (quint64 i=0;i<vertices;++i) {
         float x,y,z; quint8 r,g,b;
         stream>>x>>y>>z>>r>>g>>b;
-        require(std::isfinite(x) && std::isfinite(y) && std::isfinite(z) && z>0, "Invalid exported vertex");
+        require(std::isfinite(x) && std::isfinite(y) && std::isfinite(z) && (world || z>0), "Invalid exported vertex");
     }
     for (quint64 i=0;i<faces;++i) {
         quint8 size; qint32 a,b,c; stream>>size>>a>>b>>c;
@@ -161,10 +176,11 @@ int checkLiveScan(QApplication& app) {
     QPointer<ReconstructionWindow> window;
     bool finished=false, passed=false;
     QString failure;
-    int phase=0, ready_ticks=0, presented=0;
-    QTemporaryDir point_export, mesh_export;
-    require(point_export.isValid() && mesh_export.isValid(), "Cannot create export test directories");
+    int phase=0, ready_ticks=0, presented=0, ma_presented=0, landed=0, expected_views=0;
+    QTemporaryDir point_export, mesh_export, ma_export;
+    require(point_export.isValid() && mesh_export.isValid() && ma_export.isValid(), "Cannot create export test directories");
     SharedGPUMesh exported_geometry;
+    SharedGPUMeshes latest_ma_meshes;
     const auto screenshot=[&](const QString& name) {
         const auto directory=qEnvironmentVariable("FS_SCAN_TEST_SCREENSHOTS");
         if (!directory.isEmpty() && window) {
@@ -221,7 +237,7 @@ int checkLiveScan(QApplication& app) {
                     auto* transfer=window->findChild<CaptureTransition*>();
                     require(transfer, "Capture transfer overlay is missing");
                     QObject::connect(transfer,&CaptureTransition::finished,&app,[&] {
-                        if (finished || phase!=3 || presented!=1) return;
+                        if (finished) return;
                         try {
                             auto* transfer=window->findChild<CaptureTransition*>();
                             auto* view=window->findChild<MeshView*>();
@@ -230,11 +246,36 @@ int checkLiveScan(QApplication& app) {
                             require(actual.size()==4 && expected.size()==4, "Transfer landed without a camera image plane");
                             for (int i=0;i<4;++i)
                                 require(QLineF(actual[i],expected[i]).length()<.5, "Transfer missed the rendered camera corners");
+                            ++landed;
                         } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
                     });
                     QObject::connect(view,&MeshView::renderFailed,&app,[&](QString error) { finish(error); });
+                    QObject::connect(view,&MeshView::maMeshesPresented,&app,[&](SharedGPUMeshes meshes) {
+                        if (finished) return;
+                        try {
+                            require(phase>=7 && meshes && meshes->size()==size_t(captured_views()), "MA renderer did not present the complete current view set");
+                            unsigned long long triangles=0;
+                            for (const auto& mesh:*meshes) {
+                                require(!mesh->point_cloud && mesh->camera.image_size==cv::Size(518,434), "MA result is not a mesh on the predicted grid");
+                                triangles+=mesh->stats.triangle_count;
+                            }
+                            require(triangles>0 && meshes!=latest_ma_meshes, "MA mesh snapshot was empty or reused after new inference");
+                            ++ma_presented; latest_ma_meshes=meshes;
+                            std::cout<<"MA meshes displayed: "<<meshes->size()<<" views, "<<triangles<<" triangles\n";
+                            QTimer::singleShot(350,&app,[&] {
+                                if (finished || !window) return;
+                                try {
+                                    require(window->findChild<CaptureTransition*>()->isRunning(), "MA mesh did not start the camera transfer");
+                                    require(window->findChild<QRadioButton*>("maPointCloud")->isChecked() && window->findChild<QComboBox*>("meshMode")->currentIndex()==1,
+                                            "MA mesh was not selected automatically");
+                                    screenshot(QString("ma-transfer-%1").arg(ma_presented));
+                                } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                            });
+                        } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                    });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
-                        if (finished || !mesh || phase>=7) return;
+                        if (finished || !mesh) return;
+                        if (phase>=7) { finish("Later capture rendered an FS result before the MA meshes"); return; }
                         if (!(mesh->point_cloud ? mesh->stats.point_count : mesh->stats.triangle_count)) {
                             finish("RealSense reconstruction produced empty geometry"); return;
                         }
@@ -279,6 +320,7 @@ int checkLiveScan(QApplication& app) {
                                 auto* tabs=window->findChild<QTabWidget*>("workspaceTabs");
                                 if (presented==1) {
                                     require(!window->findChild<CaptureTransition*>()->isRunning(), "Image transfer did not finish");
+                                    require(hasGreenCamera(canvas),"First FS camera did not turn green after landing");
                                     screenshot("landed");
                                     tabs->setCurrentIndex(1);
                                     auto* editor=window->findChild<MaskEditor*>();
@@ -356,7 +398,7 @@ int checkLiveScan(QApplication& app) {
                 require(hasSceneContent(window->findChild<QOpenGLWidget*>()), "Completed geometry disappeared during live preview");
                 ready_ticks=0; ++phase; capture->click();
                 require(preview->isProcessing(), "Capture did not enter the calculation state");
-                require(!window->findChild<CaptureTransition*>()->isRunning(), "Multi-view capture started the single-view transfer");
+                require(!window->findChild<CaptureTransition*>()->isRunning(), "MA transfer started before computation completed");
                 return;
             }
             if ((phase==8 || phase==10) && capture->isEnabled()) {
@@ -364,9 +406,44 @@ int checkLiveScan(QApplication& app) {
                 require(retake->isVisible() && retake->isEnabled(), "Retake is unavailable for captured images");
                 require(window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Two-view MA reconstruction did not complete");
                 require(!preview->isProcessing(), "Two-view processing animation did not stop");
+                require(ma_presented==(phase==8 ? 1 : 2) && landed==ma_presented+1, "MA mesh or its transfer did not complete for capture/retake");
+                require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Current MA camera did not turn green after landing");
+                screenshot(QString("ma-landed-%1").arg(ma_presented));
                 if (phase==8) { phase=9; ready_ticks=0; retake->click(); }
-                else { phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); }
+                else { phase=12; ready_ticks=0; capture->click(); }
                 return;
+            }
+            if (phase==12 && capture->isEnabled()) {
+                require(!retake->isEnabled(), "Additional MA view did not resume preview");
+                if (++ready_ticks<8) return;
+                expected_views=captured_views()+1; ready_ticks=0; phase=13; capture->click();
+                return;
+            }
+            if (phase==13 && retake->isEnabled()) {
+                require(captured_views()==expected_views && latest_ma_meshes && latest_ma_meshes->size()==size_t(expected_views),
+                        "Additional capture did not replace all MA meshes");
+                require(landed==ma_presented+1,"Additional MA capture skipped its landing animation");
+                require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Additional MA capture lost the green current camera");
+                if (expected_views<PipelineState::kMaxCaptures) { phase=12; ready_ticks=0; capture->click(); }
+                else {
+                    require(!capture->isEnabled(), "Five-view capture limit was lost");
+                    screenshot("ma-five-landed");
+                    window->findChild<QPushButton*>("openSaveResults")->click();
+                    auto* dialog=window->findChild<QDialog*>("saveResultsDialog");
+                    dialog->findChild<QLineEdit*>("saveDirectory")->setText(ma_export.path());
+                    require(dialog->findChild<QPushButton*>("saveSelected")->isEnabled(), "Cannot export the displayed MA meshes");
+                    phase=14; dialog->findChild<QPushButton*>("saveSelected")->click(); dialog->close();
+                }
+                return;
+            }
+            if (phase==14 && retake->isEnabled()) {
+                require(window->findChild<QLabel*>("status")->text().startsWith("Saved "), "MA mesh export failed");
+                GPUMeshFrame total;
+                for (const auto& mesh:*latest_ma_meshes) total.stats.triangle_count+=mesh->stats.triangle_count;
+                checkGeometryExport(ma_export.path(),total,true);
+                QFile ply(ma_export.filePath("mesh.ply")); require(ply.open(QIODevice::ReadOnly),"Cannot read MA PLY");
+                require(ply.read(256).contains("MA world frame"),"MA export did not use world coordinates");
+                phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); return;
             }
             if (phase==11 && capture->isEnabled()) {
                 require(captured_views()==0 && capture->text()=="Capture pair" && !retake->isVisible(),
@@ -401,7 +478,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: D435 calculate → automatic GPU mesh + camera transfer, camera-corner landing, no live 3D projection, reconnect, two-view MA, retake, restart, region updates, GPU wireframe, PLY/depth export and clean shutdown\n";
+    std::cout<<"PASS: D435 first FS mesh, 2–5 MA meshes, retake, per-capture camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
     return 0;
 }
 }

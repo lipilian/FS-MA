@@ -31,7 +31,7 @@ __device__ double squared(double3 p) { return p.x*p.x + p.y*p.y + p.z*p.z; }
 __device__ bool valid(float3 p) {
     return isfinite(p.x) && isfinite(p.y) && isfinite(p.z) && p.z > 0;
 }
-__device__ double triangle(const MeshGPUInputs& in, const int* ids, const float3* p,
+__device__ double triangle(const MeshGPUVertex* samples, const float3* p,
                            int a, int b, int c, double edge,
                            MeshGPUVertex* out) {
     const auto ab = subtract(p[b],p[a]), ac = subtract(p[c],p[a]), bc = subtract(p[c],p[b]);
@@ -40,11 +40,8 @@ __device__ double triangle(const MeshGPUInputs& in, const int* ids, const float3
     const double area = .5 * sqrt(squared(cross));
     if (!(area > 0) || !isfinite(area)) return 0;
     const int corners[3] = {a,b,c};
-    const int plane = in.width * in.height;
     for (int k=0; k<3; ++k) {
-        const int n = corners[k], id = ids[n];
-        out[k] = {p[n].x, p[n].y, p[n].z,
-                  in.rgb[id]/255.f, in.rgb[plane+id]/255.f, in.rgb[2*plane+id]/255.f};
+        out[k] = samples[corners[k]];
     }
     return area;
 }
@@ -58,7 +55,20 @@ __device__ void merge_stats(MeshGPUStats& a, const MeshGPUStats& b) {
     a.point_count+=b.point_count;
     for (int c=0;c<3;++c) { a.low[c]=fminf(a.low[c],b.low[c]); a.high[c]=fmaxf(a.high[c],b.high[c]); }
 }
-__global__ void build_cells(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUStats* partials,
+struct PointGridInputs {
+    const MeshGPUVertex* points;
+    int width, height;
+    cudaStream_t stream;
+};
+__device__ MeshGPUVertex read_vertex(const MeshGPUInputs& in, int id) {
+    if (!in.mask[id]) return {};
+    const int plane=in.width*in.height;
+    return {in.xyz[3*id],in.xyz[3*id+1],in.xyz[3*id+2],
+            in.rgb[id]/255.f,in.rgb[plane+id]/255.f,in.rgb[2*plane+id]/255.f};
+}
+__device__ MeshGPUVertex read_vertex(const PointGridInputs& in, int id) { return in.points[id]; }
+template<class Inputs>
+__global__ void build_cells(Inputs in, MeshGPUVertex* vertices, MeshGPUStats* partials,
                             double edge) {
     const int x = blockIdx.x*blockDim.x+threadIdx.x, y = blockIdx.y*blockDim.y+threadIdx.y;
     const int tid = threadIdx.y*side+threadIdx.x;
@@ -70,18 +80,20 @@ __global__ void build_cells(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUSt
         for (int i=0; i<6; ++i) out[i] = {};
         // Cyclic order A,B,D,C gives consistent winding, also for three corners.
         const int ids[4] = {y*in.width+x, y*in.width+x+1, (y+1)*in.width+x+1, (y+1)*in.width+x};
-        float3 p[4]; int keep[4], n = 0;
+        float3 p[4]; MeshGPUVertex samples[4]; int keep[4], n = 0;
         for (int i=0; i<4; ++i) {
             const int id = ids[i];
-            p[i] = make_float3(in.xyz[3*id],in.xyz[3*id+1],in.xyz[3*id+2]);
-            if (in.mask[id] && valid(p[i])) keep[n++] = i;
+            samples[i]=read_vertex(in,id);
+            const auto& v=samples[i];
+            p[i] = make_float3(v.x,v.y,v.z);
+            if (valid(p[i]) && isfinite(v.r) && isfinite(v.g) && isfinite(v.b)) keep[n++] = i;
         }
         if (n == 4) {
-            const double first = triangle(in,ids,p,0,1,2,edge,out);
-            const double second = triangle(in,ids,p,0,2,3,edge,out+3);
+            const double first = triangle(samples,p,0,1,2,edge,out);
+            const double second = triangle(samples,p,0,2,3,edge,out+3);
             area = first+second; count = (first>0)+(second>0);
         } else if (n == 3) {
-            area = triangle(in,ids,p,keep[0],keep[1],keep[2],edge,out);
+            area = triangle(samples,p,keep[0],keep[1],keep[2],edge,out);
             count = area>0;
         }
         if (count) for (int i=0;i<6;++i) if (out[i].z>0) {
@@ -245,16 +257,10 @@ MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs& inputs, MeshG
     return result;
 }
 
-MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
-                            double max_edge_m) {
-    output.impl_->slots = 0;
-    if (!inputs.xyz || !inputs.rgb || !inputs.mask || !inputs.stream || inputs.width < 2 || inputs.height < 2 ||
-        std::size_t(inputs.width)*inputs.height > std::size_t(std::numeric_limits<int>::max()/3) ||
-        !std::isfinite(max_edge_m) || max_edge_m <= 0)
-        throw std::invalid_argument("GPU mesh needs aligned device XYZ, RGB and mask, dimensions >=2, the FS stream and a positive edge threshold");
+template<class Inputs, class Storage>
+MeshGPUStats build_grid_mesh(const Inputs& inputs, Storage& storage, double max_edge_m) {
     const dim3 block(side,side), grid((inputs.width+side-1)/side,(inputs.height+side-1)/side);
     const std::size_t slots = std::size_t(inputs.width-1)*(inputs.height-1)*6;
-    auto& storage = *output.impl_;
     storage.vertices.reserve(slots);
     storage.partials.reserve(grid.x*grid.y);
     storage.total.reserve(1);
@@ -273,5 +279,23 @@ MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
     }
     storage.slots = slots;
     return result;
+}
+MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output, double max_edge_m) {
+    output.impl_->slots = 0;
+    if (!inputs.xyz || !inputs.rgb || !inputs.mask || !inputs.stream || inputs.width < 2 || inputs.height < 2 ||
+        std::size_t(inputs.width)*inputs.height > std::size_t(std::numeric_limits<int>::max()/3) ||
+        !std::isfinite(max_edge_m) || max_edge_m <= 0)
+        throw std::invalid_argument("GPU mesh needs aligned device XYZ, RGB and mask, dimensions >=2, the FS stream and a positive edge threshold");
+    return build_grid_mesh(inputs,*output.impl_,max_edge_m);
+}
+MeshGPUStats build_mesh_from_point_cloud_gpu(const MeshGPUBuffer& cloud, int width, int height,
+    MeshGPUBuffer& output, cudaStream_t stream, double max_edge_m) {
+    if (&cloud==&output) throw std::invalid_argument("GPU mesh output must not overwrite its source point cloud");
+    output.impl_->slots=0;
+    if (!cloud.vertices() || !stream || width<2 || height<2 ||
+        std::size_t(width)*height>std::size_t(std::numeric_limits<int>::max()/3) ||
+        cloud.vertex_slots()!=std::size_t(width)*height || !std::isfinite(max_edge_m) || max_edge_m<=0)
+        throw std::invalid_argument("GPU mesh needs an organized point cloud, matching dimensions, stream and a positive edge threshold");
+    return build_grid_mesh(PointGridInputs{cloud.vertices(),width,height,stream},*output.impl_,max_edge_m);
 }
 } // namespace fs

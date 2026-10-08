@@ -111,7 +111,46 @@ int main() {
         try { fs::build_ma_point_cloud_gpu({device.dense,device.input,nullptr,width,height,device.stream},buffer); }
         catch (const std::invalid_argument&) { rejected=true; }
         require(rejected && !buffer.vertex_slots(),"Invalid MA inputs retained usable output");
+        // Build triangles directly from MA's organized device output. Deliberately
+        // unrelated input rays ensure the mesh uses the prediction, not calibration.
+        for (int y=0;y<height;++y) for (int x=0;x<width;++x) {
+            const int i=y*width+x;
+            const float px=.002f*x, py=.002f*y, pz=.4f;
+            dense[i]=px; dense[n+i]=py; dense[2*n+i]=pz;
+            dense[3*n+i]=std::log(std::sqrt(px*px+py*py+pz*pz)); dense[5*n+i]=1;
+            input[i]=(.8f-means[0])/deviations[0];
+            input[n+i]=(.2f-means[1])/deviations[1]; input[2*n+i]=(.4f-means[2])/deviations[2];
+            input[6*n+i]=.4f;
+        }
+        upload(0);
+        fs::build_ma_point_cloud_gpu({device.dense,device.input,device.scale,width,height,device.stream},buffer);
+        fs::MeshGPUBuffer mesh;
+        stats=fs::build_mesh_from_point_cloud_gpu(buffer,width,height,mesh,device.stream);
+        const unsigned long long faces=2*(width-1)*(height-1);
+        require(stats.triangle_count==faces && !stats.point_count,"MA planar mesh has incorrect triangle count");
+        require(std::abs(stats.area_m2-(width-1)*(height-1)*.002*.002)<1e-8,"MA mesh area is incorrect");
+        std::vector<fs::MeshGPUVertex> triangles(mesh.vertex_slots());
+        checked(cudaMemcpy(triangles.data(),mesh.vertices(),triangles.size()*sizeof(triangles[0]),cudaMemcpyDeviceToHost));
+        for (const auto& p:triangles) {
+            require(std::abs(p.z-.4f)<1e-5f && std::abs(p.r-.8f)<1e-6f && std::abs(p.g-.2f)<1e-6f && std::abs(p.b-.4f)<1e-6f,
+                    "MA mesh changed decoded geometry or RGB");
+        }
+        require(fs::build_mesh_from_point_cloud_gpu(buffer,width,height,mesh,device.stream,.001).triangle_count==0,
+                "MA mesh ignored the edge threshold");
+        input[6*n]=0; upload(0);
+        fs::build_ma_point_cloud_gpu({device.dense,device.input,device.scale,width,height,device.stream},buffer);
+        require(fs::build_mesh_from_point_cloud_gpu(buffer,width,height,mesh,device.stream).triangle_count==faces-1,
+                "Zero input depth was filled back into the MA mesh");
+        std::fill(input.begin()+6*n,input.begin()+7*n,0.f); upload(0);
+        fs::build_ma_point_cloud_gpu({device.dense,device.input,device.scale,width,height,device.stream},buffer);
+        stats=fs::build_mesh_from_point_cloud_gpu(buffer,width,height,mesh,device.stream);
+        require(!stats.triangle_count && !stats.area_m2,"Empty MA view retained an old surface");
+        rejected=false;
+        try { fs::build_mesh_from_point_cloud_gpu(buffer,width,height,buffer,device.stream); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        require(rejected && buffer.vertex_slots()==n,"In-place meshing corrupted the retained MA cloud");
         std::cout<<"PASS: MA predicted rays, metric depth/scale, RGB, masks, zero/invalid input depth, per-view offsets, partial blocks and buffer reuse\n";
+        std::cout<<"PASS: device MA triangulation, colors, area, edge filtering, zero depth, empty views and input preservation\n";
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
     }

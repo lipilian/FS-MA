@@ -55,6 +55,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     friend MeshGPUStats build_mesh_gpu(const MeshGPUInputs&, MeshGPUBuffer&, double);
+    friend MeshGPUStats build_mesh_from_point_cloud_gpu(const MeshGPUBuffer&, int, int, MeshGPUBuffer&, cudaStream_t, double);
     friend MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs&, MeshGPUBuffer&);
     friend MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs&, MeshGPUBuffer&);
 };
@@ -67,6 +68,12 @@ private:
 // area/count/bounds are downloaded. Geometry and normalized RGB remain on the GPU.
 MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
                             double max_edge_m = .01);
+// Triangulate an organized, decoded GPU cloud (one XYZ/RGB slot per pixel).
+// Reuses MA's predicted rays, metric distance, colors and zero-input-depth mask.
+// The same edge/area rules apply with a 3 mm default edge limit;
+// input and output buffers must be distinct.
+MeshGPUStats build_mesh_from_point_cloud_gpu(const MeshGPUBuffer& cloud, int width, int height,
+    MeshGPUBuffer& output, cudaStream_t stream, double max_edge_m = .003);
 // Preserve every selected finite XYZ sample with Z>0, including isolated points.
 // XYZ/RGB stay on the device; only point count and bounds are downloaded.
 MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output);

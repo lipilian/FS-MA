@@ -20,6 +20,7 @@ class MeshView : public QWidget {
     // A generated GPU mesh can temporarily replace its capture's points.
     void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden = {});
     void setMAClouds(SharedGPUClouds clouds);
+    void setMAMeshes(SharedGPUMeshes meshes);
     void setShowMAClouds(bool enabled);
     void setPredictedCameras(SharedPredictedCameras cameras);
     void setMode(int mode);
@@ -31,15 +32,18 @@ class MeshView : public QWidget {
     void setCamera(const std::optional<fs::MeshCamera>& camera);
     void setCameraImage(QImage image);
     void setRightCameraImage(QImage image);
+    void setCameraPresentation(quint64 active_id, quint64 highlighted_id, quint64 hidden_image_id = 0);
     // Clockwise image corners in logical widget pixels, from the last GL frame.
     // Empty when the active camera has no visible image plane.
     QPolygonF cameraImageQuad() const;
 
   signals:
     void gpuMeshPresented(SharedGPUMesh mesh);
+    void maMeshesPresented(SharedGPUMeshes meshes);
     void renderFailed(QString message);
     void log(QString message);
 
   private:
     MeshCanvas *canvas_{};
+    SharedGPUMeshes offscreen_ma_meshes_;
 };
