@@ -144,12 +144,17 @@ PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, S
     state_.calibration = confirmed_path_;
     state_.calibration_filename = QFileInfo(confirmed_path_).fileName();
     if (state_.calibration_filename.isEmpty()) state_.calibration_filename="calibration.json";
-    camera_calibration_ = confirmed_->calibration;
-    camera_size_ = confirmed_->image_size;
-    state_.live_camera = previewCamera(camera_calibration_, camera_size_);
+    if (confirmed_) {
+        camera_calibration_ = confirmed_->calibration;
+        camera_size_ = confirmed_->image_size;
+        state_.live_camera = previewCamera(camera_calibration_, camera_size_);
+        camera_calibration_json_ = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
+    } else {
+        state_.camera_mode = CameraMode::RealSenseD435;
+        state_.calibration = "RealSense factory calibration will be read when the camera connects.";
+    }
     camera_calibration_description_ = confirmed_path_;
     camera_calibration_filename_ = state_.calibration_filename;
-    camera_calibration_json_ = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
     timer_->setInterval(100);
     connect(timer_, &QTimer::timeout, this, &PipelineWorker::poll);
 }
@@ -240,7 +245,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
             state_.status = liveStatus();
         }
         emit log(QString("FS + SAM 2.1 + MapAnything initialization completed in %1 ms.").arg(elapsed.elapsed()));
-        emit log("Confirmed calibration: " + confirmed_path_);
+        if (confirmed_) emit log("Confirmed calibration: " + confirmed_path_);
     } catch (...) {
         state_.engine = "Initialization failed · check the engine, GPU and TensorRT compatibility";
         throw;
@@ -267,6 +272,8 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     emit log(state_.input + "\nCalibration: " + state_.calibration + "\n" + state_.status);
 }
 void PipelineWorker::importCapture(const QString& directory, bool use_capture_calibration) {
+    if (!use_capture_calibration && !confirmed_)
+        throw std::runtime_error("No confirmed calibration. Import this capture with its own calibration JSON.");
     const QDir dir(directory);
     if (!dir.exists()) throw std::runtime_error("Capture directory does not exist.");
     QStringList calibration_names{"calibration.json", "sentech_stereo_calibration.json"};
@@ -327,6 +334,8 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     if (ma_) ma_->resetInputs();
 }
 void PipelineWorker::connectCameras(CameraMode mode) {
+    if (mode == CameraMode::Sentech && !confirmed_)
+        throw std::runtime_error("Sentech cameras require confirmed calibration. Use fs_gui to calibrate them, or connect an Intel RealSense D435.");
     if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
     disconnectCameras();
     state_.status = mode == CameraMode::RealSenseD435 ? "Connecting Intel RealSense D435…" : "Connecting Sentech stereo cameras…";
@@ -364,6 +373,10 @@ void PipelineWorker::connectCameras(CameraMode mode) {
     preview_left_map_x_.release(); preview_left_map_y_.release();
     preview_right_map_x_.release(); preview_right_map_y_.release();
     source_ = std::move(next); state_.camera_mode = mode; state_.connected = true;
+    if (!state_.has_rectified) {
+        state_.calibration = camera_calibration_description_;
+        state_.calibration_filename = camera_calibration_filename_;
+    }
     emit log(camera_calibration_description_);
     setLive(true); timer_->start();
 }

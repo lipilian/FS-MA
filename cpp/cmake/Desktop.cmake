@@ -40,3 +40,7 @@ target_compile_options(fs_calibration_ui PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(fs_gui app/desktop_main.cpp)
 target_link_libraries(fs_gui PRIVATE fs_calibration_ui)
 set_target_properties(fs_gui PROPERTIES BUILD_RPATH "${FS_SENTECH_ROOT}/lib;${FS_SENTECH_ROOT}/lib/GenICam")
+
+add_executable(scan_gui app/scan_main.cpp)
+target_link_libraries(scan_gui PRIVATE fs_calibration_ui)
+set_target_properties(scan_gui PROPERTIES BUILD_RPATH "${FS_SENTECH_ROOT}/lib;${FS_SENTECH_ROOT}/lib/GenICam")

@@ -51,10 +51,11 @@ QDoubleSpinBox* decimal(double value, double minimum, double maximum, const QStr
 }
 }
 ReconstructionWindow::ReconstructionWindow(PipelineController& controller, ConfirmedCalibration calibration, const QString& path)
-    : controller_(controller), state_(controller.state()) {
+    : controller_(controller), state_(controller.state()), has_confirmed_calibration_(bool(calibration)) {
     if (!state_.engine_ready || !state_.sam_ready || !state_.ma_ready)
         throw std::logic_error("Reconstruction window requires loaded FoundationStereo, SAM and MapAnything sessions.");
     setObjectName("reconstructionWindow"); setWindowTitle("FoundationStereo · Reconstruction"); resize(1500, 950); setMinimumSize(1120, 740);
+    if (!calibration) setWindowTitle("FoundationStereo · RealSense Scan");
     setStyleSheet(R"(
         QMainWindow, QWidget#root { background: #f3f6fa; color: #20314a; }
         QWidget { font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -82,16 +83,20 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     )");
     auto* root = new QWidget; root->setObjectName("root"); setCentralWidget(root);
     auto* outer = new QVBoxLayout(root); outer->setContentsMargins(22,18,22,18); outer->setSpacing(10);
-    auto* step = label("01  /  CALIBRATION  ✓     →     02  /  RECONSTRUCTION"); step->setObjectName("step"); outer->addWidget(step);
-    auto* title = label("Reconstruction workspace"); title->setObjectName("title"); outer->addWidget(title);
+    auto* step = label(calibration ? "01  /  CALIBRATION  ✓     →     02  /  RECONSTRUCTION"
+                                  : "MODELS READY  ✓     →     INTEL REALSENSE SCANNING");
+    step->setObjectName("step"); outer->addWidget(step);
+    auto* title = label(calibration ? "Reconstruction workspace" : "RealSense scan workspace"); title->setObjectName("title"); outer->addWidget(title);
     auto* toolbar = new QHBoxLayout;
     import_ = button("Import capture…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     camera_mode_ = new QComboBox; camera_mode_->setObjectName("cameraMode");
-    camera_mode_->addItem("Sentech stereo", int(CameraMode::Sentech));
+    if (calibration) camera_mode_->addItem("Sentech stereo", int(CameraMode::Sentech));
     camera_mode_->addItem("Intel RealSense D435", int(CameraMode::RealSenseD435));
-    camera_mode_->setToolTip("Sentech: confirmed calibration. D435: factory-calibrated IR pair, center-cropped from 1280 × 800 to 960 × 800. Disconnect before switching.");
+    camera_mode_->setToolTip(calibration
+        ? "Sentech: confirmed calibration. D435: factory-calibrated IR pair, center-cropped from 1280 × 800 to 960 × 800. Disconnect before switching."
+        : "D435: factory-calibrated IR pair, center-cropped from 1280 × 800 to 960 × 800.");
     if (!RealSenseStereoSource::available()) {
-        auto* item = static_cast<QStandardItemModel*>(camera_mode_->model())->item(1);
+        auto* item = static_cast<QStandardItemModel*>(camera_mode_->model())->item(camera_mode_->findData(int(CameraMode::RealSenseD435)));
         item->setEnabled(false); item->setToolTip("Install librealsense2-dev and rebuild to enable D435 support.");
     }
     camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
@@ -128,13 +133,16 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     input_ = label("No stereo pair loaded"); input_->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(input_);
     capture_calibration_ = new QCheckBox("Use capture calibration"); capture_calibration_->setChecked(true); capture_calibration_->setObjectName("captureCalibration");
-    capture_calibration_->setToolTip("The folder must contain left.png, right.png and calibration JSON (calibration.json or sentech_stereo_calibration.json; the confirmed calibration filename is also accepted). Uncheck to use the confirmed calibration with matching image dimensions; all three files are still required.");
+    capture_calibration_->setToolTip(calibration
+        ? "The folder must contain left.png, right.png and calibration JSON (calibration.json or sentech_stereo_calibration.json; the confirmed calibration filename is also accepted). Uncheck to use the confirmed calibration with matching image dimensions; all three files are still required."
+        : "Imported captures must contain left.png, right.png and their own calibration JSON.");
     layout->addWidget(capture_calibration_);
     calibration_ = label(path); calibration_->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(calibration_);
-    layout->addWidget(label(QString("Confirmed camera calibration\nL %1 · R %2\n%3 × %4 · %5")
+    if (calibration) layout->addWidget(label(QString("Confirmed camera calibration\nL %1 · R %2\n%3 × %4 · %5")
         .arg(QString::fromStdString(calibration->left_serial), QString::fromStdString(calibration->right_serial))
         .arg(calibration->image_size.width).arg(calibration->image_size.height)
         .arg(calibration->checked ? "Independent check performed" : "No independent check (optional)")));
+    else layout->addWidget(label("Live capture uses the RealSense factory IR calibration. No manual calibration is required."));
     settings_layout->addWidget(input_group);
     auto* depth = group("Depth range", layout); auto* form = new QFormLayout;
     depth_panel_ = depth;
@@ -494,7 +502,7 @@ void ReconstructionWindow::refresh() {
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
         ? captured_clouds_.back() : SharedGPUMesh{});
     const bool idle = !busy_ && !closing_ && !gpu_upload_pending_, frozen = state_.has_rectified && !state_.live;
-    import_->setEnabled(idle); capture_calibration_->setEnabled(idle); camera_->setEnabled(idle);
+    import_->setEnabled(idle); capture_calibration_->setEnabled(idle && has_confirmed_calibration_); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     camera_mode_->setEnabled(idle && !state_.connected);
     if (state_.connected) {

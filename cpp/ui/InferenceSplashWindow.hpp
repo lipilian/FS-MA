@@ -10,7 +10,7 @@ class QProgressBar;
 class InferenceSplashWindow : public QWidget {
     Q_OBJECT
 public:
-    explicit InferenceSplashWindow();
+    explicit InferenceSplashWindow(bool calibration_completed = true);
     QString enginePath() const;
     QString samEncoderPath() const;
     QString samDecoderPath() const;

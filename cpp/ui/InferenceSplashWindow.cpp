@@ -24,7 +24,7 @@ QLabel* label(const QString& text) {
     auto* result = new QLabel(text); result->setWordWrap(true); result->setTextFormat(Qt::PlainText); return result;
 }
 }
-InferenceSplashWindow::InferenceSplashWindow() : QWidget(nullptr, Qt::Dialog) {
+InferenceSplashWindow::InferenceSplashWindow(bool calibration_completed) : QWidget(nullptr, Qt::Dialog) {
     setObjectName("inferenceSplashWindow"); setWindowTitle("FoundationStereo · Preparing reconstruction");
     resize(820, 650); setMinimumSize(700, 600);
     setStyleSheet(R"(
@@ -42,7 +42,10 @@ InferenceSplashWindow::InferenceSplashWindow() : QWidget(nullptr, Qt::Dialog) {
         QProgressBar::chunk { background: #2464d9; }
     )");
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(28,24,28,24); layout->setSpacing(14);
-    auto* step = label("CALIBRATION  ✓     →     PREPARING INFERENCE     →     RECONSTRUCTION"); step->setObjectName("step"); layout->addWidget(step);
+    auto* step = label(calibration_completed
+        ? "CALIBRATION  ✓     →     PREPARING INFERENCE     →     RECONSTRUCTION"
+        : "PREPARING INFERENCE     →     INTEL REALSENSE SCANNING");
+    step->setObjectName("step"); layout->addWidget(step);
     auto* title = label("Preparing FoundationStereo + SAM 2.1 + MapAnything"); title->setObjectName("title"); layout->addWidget(title);
     layout->addWidget(label("The reconstruction workspace will open when all three models have loaded successfully."));
     auto* path = new QHBoxLayout;

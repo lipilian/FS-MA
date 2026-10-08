@@ -33,6 +33,7 @@ private:
     void refreshWorkspace();
     PipelineController& controller_;
     PipelineState state_;
+    const bool has_confirmed_calibration_;
     quint64 mask_request_id_{0};
     bool reconstruction_valid_{false}, mesh_valid_{false};
     SharedMesh mesh_result_;
