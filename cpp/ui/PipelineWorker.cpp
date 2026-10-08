@@ -676,7 +676,7 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
 }
-void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m, double max_depth_jump_m) {
+void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m) {
     if (!state_.depth_ready || !state_.gpu_ready || state_.live || !frame_ || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("Reconstruct depth before preparing a GPU mesh.");
     if (!selection_mask.isNull() && (selection_mask.width() != frame_->rectified_left().cols ||
@@ -684,7 +684,7 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
         throw std::invalid_argument("GPU mesh requires an aligned rectified-left mask.");
     latest_gpu_mesh_.reset();
     checkpoint();
-    state_.status = "Preparing GPU mesh…"; publish();
+    reportProgress(97, "Building GPU mesh…");
     QElapsedTimer elapsed; elapsed.start();
     QImage grayscale = selection_mask.convertToFormat(QImage::Format_Grayscale8);
     if (grayscale.isNull()) {
@@ -699,7 +699,7 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(inputs.width).arg(inputs.height));
     elapsed.restart();
     if (!gpu_mesh_ || !gpu_mesh_.unique()) gpu_mesh_=std::make_shared<fs::MeshGPUBuffer>();
-    const auto stats = fs::build_mesh_gpu(inputs, *gpu_mesh_, max_edge_m, max_depth_jump_m);
+    const auto stats = fs::build_mesh_gpu(inputs, *gpu_mesh_, max_edge_m);
     checkpoint();
     emit log(QString("GPU mesh build + reduction: %1 ms · %2 triangles · %3 cm²")
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(stats.triangle_count).arg(stats.area_m2*1e4,0,'f',2));

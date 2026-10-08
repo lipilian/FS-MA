@@ -30,6 +30,7 @@ add_library(fs_calibration_ui STATIC
     ui/PipelineController.cpp ui/PipelineController.hpp
     ui/PipelineWorker.cpp ui/PipelineWorker.hpp
     ui/widgets/MeshView.cpp ui/widgets/MeshView.hpp
+    ui/widgets/CaptureTransition.cpp ui/widgets/CaptureTransition.hpp
     ui/widgets/MaskEditor.cpp ui/widgets/MaskEditor.hpp
     ui/widgets/StereoImageView.cpp ui/widgets/StereoImageView.hpp)
 set_target_properties(fs_calibration_ui PROPERTIES AUTOMOC ON)

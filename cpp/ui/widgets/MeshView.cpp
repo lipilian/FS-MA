@@ -9,7 +9,6 @@
 #include <QOpenGLVersionFunctionsFactory>
 #include <QOpenGLVertexArrayObject>
 #include <QElapsedTimer>
-#include <QTimer>
 #include <cuda_gl_interop.h>
 #include <limits>
 #include <stdexcept>
@@ -27,9 +26,6 @@ class MeshCanvas : public QOpenGLWidget {
         : QOpenGLWidget(parent), owner_(parent), buffer_(QOpenGLBuffer::VertexBuffer) {
         setMinimumSize(260, 240);
         setFormat(MeshView::surfaceFormat());
-        animation_timer_.setInterval(33);
-        animation_timer_.setTimerType(Qt::PreciseTimer);
-        connect(&animation_timer_, &QTimer::timeout, this, [this] { if (isVisible()) update(); });
     }
     ~MeshCanvas() override { cleanup(); }
     void setGPUMesh(SharedGPUMesh mesh) {
@@ -76,21 +72,12 @@ class MeshCanvas : public QOpenGLWidget {
         if (camera_.has_value() == camera.has_value() &&
             (!camera || (camera_->image_size == camera->image_size && camera_->intrinsics == camera->intrinsics))) return;
         camera_ = camera;
-        camera_dirty_ = true; preview_geometry_dirty_ = true;
-        if (!hasMesh()) dirty_ = true;
-        update();
-    }
-    void setLivePreview(bool enabled) {
-        if (live_preview_ == enabled) return;
-        live_preview_ = enabled;
         camera_dirty_ = true;
         if (!hasMesh()) dirty_ = true;
         update();
     }
     void setCameraImage(QImage image, int camera = 0) {
         if (camera_images_[camera].cacheKey() == image.cacheKey()) return;
-        if (camera == 0 && !image.isNull() && preview_size_ != image.size())
-            preview_geometry_dirty_ = true;
         camera_images_[camera] = std::move(image);
         image_dirty_[camera] = true;
         update();
@@ -103,7 +90,7 @@ class MeshCanvas : public QOpenGLWidget {
         update();
     }
     void resetView() {
-        if (live_preview_ || !hasMesh()) { resetCaptureView(); return; }
+        if (!hasMesh()) { resetCaptureView(); return; }
         preserve_view_ = false;
         dirty_ = true;
         yaw_ = 0;
@@ -126,22 +113,17 @@ class MeshCanvas : public QOpenGLWidget {
         // Mouse rotation/pan/zoom remain available throughout reconstruction.
         preserve_view_ = true;
     }
-    void setProcessing(bool processing) {
-        if (processing_ == processing) return;
-        if (processing) {
-            processing_camera_ = activeCamera();
-            processing_images_ = camera_images_; // Shared, immutable last preview frame.
-            animation_clock_.start();
-            animation_timer_.start();
-        } else {
-            animation_timer_.stop();
-            processing_images_ = {};
-            processing_camera_.reset();
+    QPolygonF cameraImageQuad() const {
+        if (!ready_ || failed_ || !camera_quad_valid_) return {};
+        QPolygonF quad;
+        for (const auto& corner : camera_image_corners_) {
+            const auto clip = view_projection_ * QVector4D(corner, 1);
+            if (clip.w() <= 0 || !std::isfinite(clip.w())) return {};
+            const auto ndc = clip.toVector3DAffine();
+            if (!std::isfinite(ndc.x()) || !std::isfinite(ndc.y()) || ndc.z() < -1 || ndc.z() > 1) return {};
+            quad << QPointF((ndc.x() + 1) * width() * .5, (1 - ndc.y()) * height() * .5);
         }
-        processing_ = processing;
-        image_dirty_.fill(true); camera_dirty_ = true;
-        if (!hasMesh()) dirty_ = true;
-        update();
+        return quad;
     }
 
   protected:
@@ -179,35 +161,18 @@ uniform mat4 matrix;
 uniform mat4 cameraToWorld;
 uniform bool cameraSpace;
 uniform bool clipInvalid;
-uniform bool previewPoints;
-uniform bool processingPreview;
-uniform float processingTime;
-uniform sampler2D cameraImage;
 uniform vec3 center;
 uniform float scale;
 out vec3 tint;
 out vec3 point;
 out vec2 uv;
-out float scanGlow;
 void main() {
     point=position;
-    vec3 displayed=position;
-    scanGlow=0.0;
     gl_PointSize=1.0;
     tint=color;
     uv=color.xy;
-    if (previewPoints) {
-        ivec2 size=textureSize(cameraImage,0);
-        uv=(vec2(gl_VertexID%size.x,gl_VertexID/size.x)+0.5)/vec2(size);
-        if (processingPreview) {
-            // A 600 ms scan, with a small display-only lift in camera-space Z.
-            float scan=fract(processingTime/0.6)*1.24-0.12;
-            scanGlow=1.0-smoothstep(0.0,0.10,abs(uv.x-scan));
-            displayed.z+=0.008*scanGlow;
-        }
-    }
-    vec3 world=(cameraToWorld*vec4(displayed,1.0)).xyz;
-    vec3 p=cameraSpace ? (world-center)/scale*vec3(1.0,-1.0,-1.0) : displayed;
+    vec3 world=(cameraToWorld*vec4(position,1.0)).xyz;
+    vec3 p=cameraSpace ? (world-center)/scale*vec3(1.0,-1.0,-1.0) : position;
     // Invalid slots have zero camera-space Z. Valid world-space Z may be negative.
     gl_Position=clipInvalid && position.z<=0.0 ? vec4(2.0,2.0,2.0,1.0) : matrix*vec4(p,1.0);
 })";
@@ -216,7 +181,6 @@ void main() {
 in vec3 tint;
 in vec3 point;
 in vec2 uv;
-in float scanGlow;
 layout(location = 0) out vec4 fragmentColor;
 uniform bool shaded;
 uniform bool wireframe;
@@ -225,7 +189,6 @@ uniform sampler2D cameraImage;
 void main() {
     if (textured) {
         fragmentColor=texture(cameraImage,uv);
-        fragmentColor.rgb=mix(fragmentColor.rgb,vec3(0.65,0.88,1.0),0.35*scanGlow);
         return;
     }
     float light=1.0;
@@ -242,31 +205,7 @@ void main() {
             failInitialization(QString("Unable to compile/link the OpenGL 4.6 shaders: %1").arg(program_->log()));
             return;
         }
-        // Generate camera-space XYZ once on the GPU. Drawing and color updates
-        // reuse this buffer until the image grid or calibration changes.
-        const char *preview_compute = R"(
-#version 460 core
-layout(local_size_x=16,local_size_y=16) in;
-layout(std430,binding=0) writeonly buffer PreviewPositions { vec4 positions[]; };
-uniform ivec2 imageSize;
-uniform vec2 calibrationSize;
-uniform vec4 intrinsics; // fx, fy, cx, cy
-uniform float depth;
-void main() {
-    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
-    if (any(greaterThanEqual(pixel,imageSize))) return;
-    vec2 uv=(vec2(pixel)+0.5)*calibrationSize/vec2(imageSize)-0.5;
-    vec2 xy=(uv-intrinsics.zw)*depth/intrinsics.xy;
-    positions[pixel.y*imageSize.x+pixel.x]=vec4(xy,depth,1.0);
-})";
-        preview_program_ = std::make_unique<QOpenGLShaderProgram>();
-        if (!preview_program_->addShaderFromSourceCode(QOpenGLShader::Compute, preview_compute) ||
-            !preview_program_->link()) {
-            failInitialization(QString("Unable to compile/link the preview projection shader: %1").arg(preview_program_->log()));
-            return;
-        }
-        if (!buffer_.create() || !vao_.create() || !camera_buffer_.create() || !camera_vao_.create() ||
-            !preview_buffer_.create() || !preview_vao_.create()) {
+        if (!buffer_.create() || !vao_.create() || !camera_buffer_.create() || !camera_vao_.create()) {
             failInitialization("Unable to create the OpenGL vertex buffer/array.");
             return;
         }
@@ -280,14 +219,9 @@ void main() {
             vao.release(); buffer.release();
         };
         configure(buffer_, vao_); configure(camera_buffer_, camera_vao_);
-        preview_vao_.bind(); preview_buffer_.bind();
-        gl_->glEnableVertexAttribArray(0);
-        gl_->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
-        preview_vao_.release(); preview_buffer_.release();
         for (auto& texture : textures_) texture=createTexture();
         ready_ = true;
         camera_dirty_ = true; image_dirty_.fill(true);
-        preview_geometry_dirty_ = true;
         captures_dirty_=true;
         dirty_ = true; failed_=false; announce_gpu_=bool(gpu_mesh_);
         emit owner_->log(QString("3D renderer: OpenGL %1 (Core), %2")
@@ -316,24 +250,12 @@ void main() {
                 return;
             }
         }
-        // Switch directly to the completed cloud once its VBO handoff succeeds.
-        // Do not wait for another animation cycle or worker completion signal.
-        if (processing_ && announce_gpu_ && gpu_mesh_) setProcessing(false);
         if (camera_dirty_) uploadCamera();
         for (int camera = 0; camera < (right_camera_visible_ ? 2 : 1); ++camera)
             if (image_dirty_[camera]) uploadImage(camera);
-        if ((live_preview_ || processing_) && preview_geometry_dirty_) {
-            try { uploadPreviewPoints(); }
-            catch (const std::exception& e) {
-                failed_ = true;
-                emit owner_->renderFailed(QString("Preview projection failed: %1").arg(e.what()));
-                return;
-            }
-        }
         QMatrix4x4 projection;
         const float aspect = float(width()) / std::max(1, height());
-        // Capture must keep the physical viewpoint as well as the orbit angles:
-        // changing the fitted distance would otherwise move the camera.
+        // Keep the fitted viewpoint stable while adding captures.
         const float half_angle = std::atan(
             std::tan(20.f * float(CV_PI) / 180.f) * std::min(1.f, aspect));
         if (!preserve_view_) view_distance_ =
@@ -349,14 +271,13 @@ void main() {
         view.rotate(pitch_, 1, 0, 0);
         view.rotate(yaw_, 0, 1, 0);
         const auto matrix = projection * view;
+        view_projection_ = matrix;
         program_->bind();
         program_->setUniformValue("matrix", matrix);
         program_->setUniformValue("center",center_);
         program_->setUniformValue("scale",scale_);
         program_->setUniformValue("textured",false);
-        program_->setUniformValue("previewPoints",false);
-        program_->setUniformValue("processingPreview",false);
-        // Captures have independent VBOs. Live images never upload these again.
+        // Captures have independent VBOs, retained while new views are acquired.
         program_->setUniformValue("cameraSpace",true);
         program_->setUniformValue("clipInvalid",true);
         program_->setUniformValue("shaded",false);
@@ -379,27 +300,6 @@ void main() {
             gl_->glDrawArrays(mode_==0 ? GL_POINTS : GL_TRIANGLES,0,count_);
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         vao_.release();
-        if ((live_preview_ || processing_) && preview_count_ > 0 && !displayCameraImage(0).isNull() && texture_sizes_[0] == preview_size_) {
-            program_->setUniformValue("cameraToWorld",QMatrix4x4());
-            program_->setUniformValue("clipInvalid",true);
-            program_->setUniformValue("shaded",false);
-            program_->setUniformValue("wireframe",false);
-            program_->setUniformValue("textured",true);
-            program_->setUniformValue("previewPoints",true);
-            program_->setUniformValue("processingPreview",processing_);
-            program_->setUniformValue("processingTime",processing_ ? float(animation_clock_.elapsed()%600)/1000.f : 0.f);
-            program_->setUniformValue("cameraImage",0);
-            preview_vao_.bind();
-            // Only the left image supplies the fixed-depth preview points.
-            gl_->glActiveTexture(GL_TEXTURE0);
-            gl_->glBindTexture(GL_TEXTURE_2D,textures_[0]);
-            gl_->glDrawArrays(GL_POINTS,0,preview_count_);
-            preview_vao_.release();
-            gl_->glBindTexture(GL_TEXTURE_2D,0);
-            program_->setUniformValue("previewPoints",false);
-            program_->setUniformValue("processingPreview",false);
-            program_->setUniformValue("textured",false);
-        }
         if (camera_count_>0) {
             camera_vao_.bind();
             program_->setUniformValue("cameraSpace",false);
@@ -419,7 +319,7 @@ void main() {
                 program_->setUniformValue("textured",false);
             };
             for (int camera = 0; camera < camera_image_count_; ++camera)
-                if (!displayCameraImage(camera).isNull()) draw_image(textures_[camera],camera_count_+camera*6);
+                if (!camera_images_[camera].isNull()) draw_image(textures_[camera],camera_count_+camera*6);
             for (const auto& texture:predicted_textures_)
                 if (texture.first_vertex>=0) draw_image(texture.id,texture.first_vertex);
             gl_->glDrawArrays(GL_LINES,0,camera_count_);
@@ -523,8 +423,6 @@ void main() {
             buffer_.destroy();
             camera_vao_.destroy();
             camera_buffer_.destroy();
-            preview_vao_.destroy(); preview_buffer_.destroy();
-            preview_count_ = 0; preview_geometry_dirty_ = true;
             if (gl_) {
                 gl_->glDeleteTextures(int(textures_.size()), textures_.data());
                 for (const auto& texture:predicted_textures_) gl_->glDeleteTextures(1,&texture.id);
@@ -533,7 +431,6 @@ void main() {
             textures_ = {}; texture_sizes_ = {};
             uploaded_image_keys_ = {};
             program_.reset();
-            preview_program_.reset();
             doneCurrent();
         }
         if (context())
@@ -583,12 +480,12 @@ void main() {
             const auto camera=activeCamera();
             if (validCamera(camera)) {
                 const auto& k=camera->intrinsics;
-                const float z=(live_preview_ || processing_) ? kPreviewDepth : .06f;
+                const float z=.06f;
                 const float width=float(camera->image_size.width*z/k(0,0));
                 const float height=float(camera->image_size.height*z/k(1,1));
                 center_=QVector3D(float((camera->image_size.width*.5-k(0,2))*z/k(0,0)),
                                   float((camera->image_size.height*.5-k(1,2))*z/k(1,1)),z*.8f);
-                if (right_camera_visible_ && !live_preview_ && !processing_) center_.setX(center_.x()+width*.6f);
+                if (right_camera_visible_) center_.setX(center_.x()+width*.6f);
                 scale_=std::max({width,height,z*1.6f});
             }
             return;
@@ -703,13 +600,9 @@ void main() {
     }
     void uploadImage(int camera) {
         image_dirty_[camera] = false;
-        uploadTexture(textures_[camera],displayCameraImage(camera),texture_sizes_[camera],uploaded_image_keys_[camera]);
-    }
-    const QImage& displayCameraImage(int camera) const {
-        return processing_ ? processing_images_[camera] : camera_images_[camera];
+        uploadTexture(textures_[camera],camera_images_[camera],texture_sizes_[camera],uploaded_image_keys_[camera]);
     }
     std::optional<fs::MeshCamera> activeCamera() const {
-        if (processing_) return processing_camera_;
         return camera_ ? camera_ : gpu_mesh_ ? std::optional<fs::MeshCamera>(gpu_mesh_->camera) : std::nullopt;
     }
     static bool validCamera(const std::optional<fs::MeshCamera>& camera) {
@@ -718,62 +611,21 @@ void main() {
         return std::isfinite(k(0,0)) && k(0,0)>0 && std::isfinite(k(1,1)) && k(1,1)>0 &&
                std::isfinite(k(0,2)) && std::isfinite(k(1,2));
     }
-    void uploadPreviewPoints() {
-        const auto camera=activeCamera();
-        if (!validCamera(camera)) { preview_count_=0; return; }
-        if (displayCameraImage(0).isNull()) return;
-        const auto size=displayCameraImage(0).size();
-        // Retake / capture-more and frozen image-mode changes can revisit the
-        // same grid. Keep its XYZ rather than dispatching the projection again.
-        if (preview_count_>0 && preview_size_==size && preview_camera_ &&
-            preview_camera_->image_size==camera->image_size && preview_camera_->intrinsics==camera->intrinsics) {
-            preview_geometry_dirty_=false;
-            return;
-        }
-        preview_count_=0;
-        const auto count=static_cast<size_t>(size.width())*size.height();
-        if (count>static_cast<size_t>(std::numeric_limits<int>::max())/(4*sizeof(float)))
-            throw std::runtime_error("Preview image exceeds the OpenGL vertex buffer limit");
-        const auto& k=camera->intrinsics;
-        preview_buffer_.bind();
-        preview_buffer_.allocate(nullptr,int(count*4*sizeof(float)));
-        preview_buffer_.release();
-        gl_->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,preview_buffer_.bufferId());
-        preview_program_->bind();
-        gl_->glUniform2i(preview_program_->uniformLocation("imageSize"),size.width(),size.height());
-        preview_program_->setUniformValue("calibrationSize",QVector2D(camera->image_size.width,camera->image_size.height));
-        preview_program_->setUniformValue("intrinsics",QVector4D(k(0,0),k(1,1),k(0,2),k(1,2)));
-        preview_program_->setUniformValue("depth",kPreviewDepth);
-        gl_->glDispatchCompute((size.width()+15)/16,(size.height()+15)/16,1);
-        gl_->glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
-        preview_program_->release();
-        gl_->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,0);
-        if (gl_->glGetError()!=GL_NO_ERROR)
-            throw std::runtime_error("Unable to allocate/project the preview point grid");
-        preview_size_=size;
-        preview_camera_=camera;
-        preview_count_=int(count);
-        preview_geometry_dirty_=false;
-        emit owner_->log(QString("GPU preview: cached %1 × %2 points at 0.40 m; subsequent frames update color only.")
-                             .arg(size.width()).arg(size.height()));
-    }
     void uploadCamera() {
-        // The live frustum has its own buffer: new images never re-upload mesh
-        // geometry or touch CUDA/OpenGL interop resources.
+        // Camera frustums use a separate buffer from CUDA/OpenGL geometry.
         const auto metadata = activeCamera();
         const cv::Vec3f center(center_.x(), center_.y(), center_.z());
         auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_,
                                cv::Matx44d::eye(),cv::Vec3f(1.f,.65f,.12f),right_camera_visible_ ? 2 : 1);
         camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
-        // The original image remains on the short camera frustum. Also fit the
-        // separate 40 cm point plane, without extending/moving that image.
-        if ((live_preview_ || processing_) && validCamera(metadata)) {
-            const auto& k=metadata->intrinsics;
-            const auto size=metadata->image_size;
-            for (int u : {0,size.width}) for (int v : {0,size.height}) {
-                const cv::Vec3f world(float((u-k(0,2))*kPreviewDepth/k(0,0)),
-                                     float((v-k(1,2))*kPreviewDepth/k(1,1)),kPreviewDepth);
-                camera_radius_=std::max(camera_radius_,float(cv::norm((world-center)/scale_)));
+        // Reuse the exact image-plane vertices supplied to OpenGL. Project only
+        // these four corners on the CPU for the 2D capture transfer animation.
+        camera_quad_valid_ = camera_image_count_ > 0;
+        if (camera_quad_valid_) {
+            const int vertices[] = {0,1,2,5}; // First image: triangles 0,1,2 / 0,2,3.
+            for (int i = 0; i < 4; ++i) {
+                const auto offset = (camera_count_ + vertices[i]) * 6;
+                camera_image_corners_[i] = QVector3D(data[offset], data[offset+1], data[offset+2]);
             }
         }
         // Retain immutable MA-sized textures when only poses change. Clean
@@ -842,8 +694,7 @@ void main() {
             if (camera.image_size.width > 0 && camera.image_size.height > 0 &&
                 std::isfinite(fx) && fx > 0 && std::isfinite(fy) && fy > 0 &&
                 std::isfinite(cx) && std::isfinite(cy)) {
-                // Keep the original short frustum and textured image near the
-                // camera, independently of the live point plane at 40 cm.
+                // Keep the captured image on a short frustum near its camera.
                 const float z = hasMesh() ? std::clamp(center[2] * .12f, .015f, .06f) : .06f;
                 const auto ray = [&](double u, double v) {
                     return cv::Vec3f(float((u - cx) * z / fx),
@@ -929,19 +780,6 @@ void main() {
     QOpenGLVertexArrayObject vao_;
     QOpenGLBuffer camera_buffer_{QOpenGLBuffer::VertexBuffer};
     QOpenGLVertexArrayObject camera_vao_;
-    static constexpr float kPreviewDepth = .40f; // Optical-axis depth, in metres.
-    QOpenGLBuffer preview_buffer_{QOpenGLBuffer::VertexBuffer};
-    QOpenGLVertexArrayObject preview_vao_;
-    std::unique_ptr<QOpenGLShaderProgram> preview_program_;
-    std::optional<fs::MeshCamera> preview_camera_;
-    QSize preview_size_;
-    int preview_count_{};
-    bool live_preview_{false}, preview_geometry_dirty_{true};
-    bool processing_{false};
-    QTimer animation_timer_;
-    QElapsedTimer animation_clock_;
-    std::optional<fs::MeshCamera> processing_camera_;
-    std::array<QImage, 2> processing_images_;
     std::optional<fs::MeshCamera> camera_;
     std::array<QImage, 2> camera_images_;
     std::array<GLuint, 2> textures_{};
@@ -949,6 +787,9 @@ void main() {
     std::array<qint64, 2> uploaded_image_keys_{};
     std::array<bool, 2> image_dirty_{{true, true}};
     bool camera_dirty_{true};
+    bool camera_quad_valid_{false};
+    std::array<QVector3D,4> camera_image_corners_;
+    QMatrix4x4 view_projection_;
     std::unique_ptr<QOpenGLShaderProgram> program_;
     bool dirty_{true}, right_camera_visible_{false};
     int mode_{1}, count_{}, camera_count_{}, camera_image_count_{};
@@ -1013,10 +854,6 @@ void MeshView::preserveView() {
     if (canvas_) canvas_->preserveView();
 }
 
-void MeshView::setProcessing(bool processing) {
-    if (canvas_) canvas_->setProcessing(processing);
-}
-
 void MeshView::setRightCameraVisible(bool visible) {
     if (canvas_)
         canvas_->setRightCameraVisible(visible);
@@ -1026,14 +863,15 @@ void MeshView::setCamera(const std::optional<fs::MeshCamera>& camera) {
     if (canvas_) canvas_->setCamera(camera);
 }
 
-void MeshView::setLivePreview(bool enabled) {
-    if (canvas_) canvas_->setLivePreview(enabled);
-}
-
 void MeshView::setCameraImage(QImage image) {
     if (canvas_) canvas_->setCameraImage(std::move(image));
 }
 
 void MeshView::setRightCameraImage(QImage image) {
     if (canvas_) canvas_->setCameraImage(std::move(image), 1);
+}
+
+QPolygonF MeshView::cameraImageQuad() const {
+    if (!canvas_) return {};
+    return canvas_->cameraImageQuad().translated(canvas_->mapTo(this, QPoint()));
 }

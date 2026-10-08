@@ -54,7 +54,7 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    friend MeshGPUStats build_mesh_gpu(const MeshGPUInputs&, MeshGPUBuffer&, double, double);
+    friend MeshGPUStats build_mesh_gpu(const MeshGPUInputs&, MeshGPUBuffer&, double);
     friend MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs&, MeshGPUBuffer&);
     friend MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs&, MeshGPUBuffer&);
 };
@@ -62,12 +62,11 @@ private:
 // One 16x16-block thread per pixel cell. Four valid corners produce ABD/ADC;
 // three valid corners produce one triangle. Fewer produce none. Point validity:
 // selected mask, finite XYZ, Z>0. Reject each triangle independently on all three
-// 3D edge lengths, max(Z)-min(Z), or zero area. No links beyond the 2x2 cell.
+// 3D edge lengths (10 mm by default), or zero/nonfinite area. No links beyond the 2x2 cell.
 // All GPU work uses inputs.stream. Completes before returning; only the final
 // area/count/bounds are downloaded. Geometry and normalized RGB remain on the GPU.
 MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
-                            double max_edge_m = .02,
-                            double max_depth_jump_m = .01);
+                            double max_edge_m = .01);
 // Preserve every selected finite XYZ sample with Z>0, including isolated points.
 // XYZ/RGB stay on the device; only point count and bounds are downloaded.
 MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output);

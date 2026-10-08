@@ -3,6 +3,7 @@
 #include <QEventLoop>
 #include <QOpenGLWidget>
 #include <QTimer>
+#include <QTransform>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -116,7 +117,37 @@ int main(int argc, char** argv) {
         view.setMAClouds({}); view.setCapturedClouds({}); view.setGPUMesh({}); view.setPredictedCameras({});
         view.setShowMAClouds(false);
         require(snapshot()==no_points,"Clean retained point-cloud geometry");
+        // Compare the animation destination against actual textured GL pixels,
+        // including the top/bottom orientation, perspective and a resized view.
+        view.setCamera(fs::MeshCamera{cv::Matx33d(240,0,120,0,255,85,0,0,1),{320,240}});
+        QImage image(320,240,QImage::Format_RGB32);
+        const QColor colors[] = {QColor(220,40,180),QColor(40,210,220),QColor(230,220,30),QColor(70,80,220)};
+        for (int y=0;y<240;++y) for (int x=0;x<320;++x)
+            image.setPixelColor(x,y,colors[(y>=120 ? 2 : 0)+(x>=160 ? 1 : 0)]);
+        view.setCameraImage(image); view.resetCaptureView();
+        for (const auto size : {QSize(800,600),QSize(640,720)}) {
+            view.resize(size);
+            const auto frame=snapshot();
+            const auto quad=view.cameraImageQuad();
+            require(quad.size()==4,"Active camera has no screen-space image corners");
+            QTransform transform;
+            require(QTransform::quadToQuad(QPolygonF{{0,0},{1,0},{1,1},{0,1}},quad,transform),"Degenerate camera projection");
+            auto* canvas=view.findChild<QOpenGLWidget*>();
+            for (int y=0;y<2;++y) for (int x=0;x<2;++x) {
+                const auto logical=transform.map(QPointF(.25+.5*x,.25+.5*y))-canvas->mapTo(&view,QPoint());
+                const QPoint pixel(qRound(logical.x()*frame.width()/canvas->width()),qRound(logical.y()*frame.height()/canvas->height()));
+                require(frame.rect().contains(pixel),"Projected camera lies outside the framebuffer");
+                const auto actual=frame.pixelColor(pixel), expected=colors[y*2+x];
+                require(std::abs(actual.red()-expected.red())<4 && std::abs(actual.green()-expected.green())<4 &&
+                        std::abs(actual.blue()-expected.blue())<4,"Camera projection does not match the rendered texture");
+            }
+        }
+        view.setCameraImage({}); snapshot();
+        require(view.cameraImageQuad().size()==4,"Hiding the texture removed the animation's wireframe destination");
+        view.setCamera({}); snapshot();
+        require(view.cameraImageQuad().isEmpty(),"Clearing the camera retained a stale animation destination");
         std::cout<<"PASS: CUDA/OpenGL uploads, exclusive FS/MA rendering, stable view/poses, cached switches, retake, empty clouds and clean\n";
+        std::cout<<"PASS: projected camera corners match textured GL pixels, perspective, orientation and resizing\n";
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
     }

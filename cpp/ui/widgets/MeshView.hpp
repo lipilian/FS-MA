@@ -1,6 +1,7 @@
 #pragma once
 #include <QSurfaceFormat>
 #include <QImage>
+#include <QPolygonF>
 #include <QWidget>
 #include <memory>
 #include <optional>
@@ -24,14 +25,15 @@ class MeshView : public QWidget {
     void setMode(int mode);
     void resetView();
     void resetCaptureView();
-    // Keep the current scene framing while Capture replaces preview geometry.
+    // Keep the current scene framing while a new capture is reconstructed.
     void preserveView();
-    void setProcessing(bool processing);
     void setRightCameraVisible(bool visible);
     void setCamera(const std::optional<fs::MeshCamera>& camera);
-    void setLivePreview(bool enabled);
     void setCameraImage(QImage image);
     void setRightCameraImage(QImage image);
+    // Clockwise image corners in logical widget pixels, from the last GL frame.
+    // Empty when the active camera has no visible image plane.
+    QPolygonF cameraImageQuad() const;
 
   signals:
     void gpuMeshPresented(SharedGPUMesh mesh);

@@ -2,6 +2,8 @@
 #include "fs/capture/RealSenseStereoSource.hpp"
 #include "widgets/MaskEditor.hpp"
 #include "widgets/MeshView.hpp"
+#include "widgets/StereoImageView.hpp"
+#include "widgets/CaptureTransition.hpp"
 #include <QCheckBox>
 #include <QButtonGroup>
 #include <QCloseEvent>
@@ -161,10 +163,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     denoise_ = new QCheckBox("3 × 3 neighbour filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
     neighbor_distance_ = decimal(0.01,0.001,1," m"); neighbor_distance_->setObjectName("neighborDistance"); neighbor_distance_->setSingleStep(0.001);
     auto* neighbor_form=new QFormLayout; neighbor_form->addRow("Neighbour distance",neighbor_distance_); layout->addLayout(neighbor_form);
-    mesh_edge_=decimal(.02,.001,1," m"); mesh_jump_=decimal(.01,.001,1," m");
-    mesh_edge_->setObjectName("meshMaxEdge"); mesh_jump_->setObjectName("meshMaxDepthJump");
-    mesh_edge_->setSingleStep(.001); mesh_jump_->setSingleStep(.001);
-    auto* mesh_form=new QFormLayout; mesh_form->addRow("Max mesh edge",mesh_edge_); mesh_form->addRow("Max depth jump",mesh_jump_);
+    mesh_edge_=decimal(.01,.001,1," m");
+    mesh_edge_->setObjectName("meshMaxEdge");
+    mesh_edge_->setSingleStep(.001);
+    auto* mesh_form=new QFormLayout; mesh_form->addRow("Max mesh edge",mesh_edge_);
     layout->addLayout(mesh_form); settings_layout->addWidget(filters);
     auto* settings_panel=scrollPanel(settings,260); settings_panel->setObjectName("workspaceTools");
     split->addWidget(settings_panel);
@@ -181,26 +183,43 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     scene_layout->addLayout(cloud_controls);
     camera_image_mode_ = new QComboBox; camera_image_mode_->setObjectName("cameraImageMode");
     camera_image_mode_->addItems({"Left image", "Depth map"});
-    camera_image_mode_->setToolTip("Display the rectified left image or Jet depth map on the camera image plane.");
+    camera_image_mode_->setToolTip("Display the rectified left image or Jet depth map in the preview and captured camera image plane.");
     mesh_mode_=new QComboBox; mesh_mode_->addItems({"Point cloud","Mesh","Wireframe"}); mesh_mode_->setCurrentIndex(0); mesh_mode_->setObjectName("meshMode");
     auto* reset=button("Reset view","resetMeshView");
     auto* show_right_camera=new QCheckBox("Show right camera"); show_right_camera->setObjectName("showRightCamera");
-    show_right_camera->setToolTip("Show only the rectified right image beside the left camera, with the same image-plane size.");
+    show_right_camera->setToolTip("Show the right image below the left preview and beside the captured left camera in 3D.");
     scene_controls->addWidget(camera_image_mode_); scene_controls->addWidget(show_right_camera);
     scene_controls->addWidget(mesh_mode_); scene_controls->addWidget(reset); scene_controls->addStretch();
     scene_layout->addLayout(scene_controls);
-    mesh_view_=new MeshView; mesh_view_->setObjectName("meshView"); scene_layout->addWidget(mesh_view_,1);
+    auto* scene_split = new QSplitter(Qt::Horizontal); scene_split->setObjectName("previewSceneSplit");
+    scene_split->setChildrenCollapsible(false);
+    auto* previews = new QWidget; auto* preview_layout = new QVBoxLayout(previews);
+    preview_layout->setContentsMargins(0,0,0,0);
+    preview_ = new StereoImageView("Left preview"); preview_->setObjectName("capturePreview");
+    right_preview_ = new StereoImageView("Right preview"); right_preview_->setObjectName("rightCapturePreview");
+    preview_layout->addWidget(preview_,1); preview_layout->addWidget(right_preview_,1);
+    right_preview_->hide(); scene_split->addWidget(previews);
+    mesh_view_=new MeshView; mesh_view_->setObjectName("meshView"); scene_split->addWidget(mesh_view_);
+    scene_split->setStretchFactor(0,1); scene_split->setStretchFactor(1,2);
+    scene_split->setSizes({360,720}); scene_layout->addWidget(scene_split,1);
+    capture_transition_ = new CaptureTransition(scene);
+    connect(capture_transition_, &CaptureTransition::finished, this, [this] {
+        preview_->setImageVisible(true);
+        refresh(); // Hand the landed image to the actual OpenGL camera texture.
+    });
     mesh_view_->setMode(0);
-    scene_status_=label("Connect cameras to see the left live image in 3D, or import a capture.");
+    scene_status_=label("Connect cameras to preview on the left, or import a capture.");
     scene_status_->setObjectName("meshStatus"); scene_layout->addWidget(scene_status_);
     depth_status_ = label(""); depth_status_->setObjectName("depthRange"); scene_layout->addWidget(depth_status_);
     scene_layout->addWidget(label("Left drag: rotate · Right drag: pan · Wheel: zoom"));
     tabs_->addTab(scene,"3D workspace");
-    tabs_->setTabToolTip(SceneTab,"Live images, depth map and mesh in one 3D scene.");
+    tabs_->setTabToolTip(SceneTab,"Image preview on the left; captured point clouds and mesh on the right.");
     connect(camera_image_mode_,&QComboBox::currentIndexChanged,this,[this] { showImages(); });
     connect(mesh_mode_,&QComboBox::currentIndexChanged,this,[this](int mode) { mesh_view_->setMode(mode); });
     connect(reset,&QPushButton::clicked,this,[this] { mesh_view_->resetView(); });
-    connect(show_right_camera,&QCheckBox::toggled,this,[this](bool visible) { mesh_view_->setRightCameraVisible(visible); });
+    connect(show_right_camera,&QCheckBox::toggled,this,[this](bool visible) {
+        right_preview_->setVisible(visible); mesh_view_->setRightCameraVisible(visible);
+    });
     connect(ma_cloud_,&QRadioButton::toggled,this,[this] { refresh(); });
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
@@ -308,7 +327,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (state.capture_count==0) captured_clouds_.clear();
         state_ = std::move(state);
         if (clean_preview) {
-            capture_processing_=false; mesh_view_->setProcessing(false);
+            cancelCapturePresentation();
             mesh_valid_=false; gpu_upload_pending_=false;
             gpu_mesh_result_.reset(); mesh_view_->setGPUMesh({});
             rectified_left_={}; rectified_right_={}; live_left_={}; live_right_={}; depth_image_={};
@@ -326,8 +345,23 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (busy) { render_error_.clear(); elapsed_.start(); }
         else {
             time_->setText(QString("Last task: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1));
-            if (capture_processing_ && (state_.action_failed || !gpu_upload_pending_)) {
-                capture_processing_=false; mesh_view_->setProcessing(false);
+            if (capture_mesh_requested_) {
+                capture_mesh_requested_=false;
+                setCaptureProcessing(false);
+                // Do not present the intermediate FS point cloud. Wait until
+                // the entire first-capture job (including meshing) has finished.
+                if (!state_.action_failed && pending_capture_mesh_) {
+                    captured_clouds_={pending_capture_cloud_};
+                    capture_transition_pending_=true;
+                    presentGeometry(std::move(pending_capture_mesh_));
+                } else if (pending_capture_cloud_) {
+                    // Meshing may reject every triangle; retain usable points
+                    // and the worker's failure message without a success animation.
+                    presentGeometry(pending_capture_cloud_);
+                }
+                pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
+            } else if (capture_processing_ && (state_.action_failed || !gpu_upload_pending_)) {
+                setCaptureProcessing(false);
             }
         }
         refresh();
@@ -335,6 +369,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::images,this,[this](QImage rl,QImage rr) {
         rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
         reconstruction_valid_=false; mask_->setImage(rectified_left_); save_mask_->setChecked(false); tabs_->setCurrentIndex(SceneTab);
+        if (capture_processing_) {
+            // Replace the last live frame with the exact pair used for inference.
+            preview_->setImage(rectified_left_); right_preview_->setImage(rectified_right_);
+        }
+        showImages();
     });
     connect(&controller_,&PipelineController::maskReady,this,[this](quint64 image_id,quint64 request_id,QImage mask,QString message) {
         if (closing_ || image_id!=state_.image_id || request_id!=mask_request_id_) return;
@@ -342,23 +381,22 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(&controller_,&PipelineController::gpuMeshReady,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_) return;
-        mesh_valid_=false;
-        gpu_mesh_result_=std::move(mesh); gpu_upload_pending_=true;
-        if (gpu_mesh_result_->point_cloud && state_.capture_count>0) {
-            captured_clouds_.resize(state_.capture_count);
-            captured_clouds_.back()=gpu_mesh_result_;
+        if (capture_mesh_requested_) {
+            if (mesh->point_cloud) pending_capture_cloud_=std::move(mesh);
+            else pending_capture_mesh_=std::move(mesh);
+            return;
         }
-        mesh_mode_->setCurrentIndex(gpu_mesh_result_->point_cloud ? 0 : 1);
-        tabs_->setCurrentIndex(SceneTab);
-        mesh_view_->setGPUMesh(gpu_mesh_result_); refresh();
+        presentGeometry(std::move(mesh));
     });
     connect(mesh_view_,&MeshView::gpuMeshPresented,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_ || mesh!=gpu_mesh_result_) return;
-        capture_processing_=false; mesh_view_->setProcessing(false);
-        gpu_upload_pending_=false; mesh_valid_=true; refresh();
+        if (!busy_) setCaptureProcessing(false);
+        gpu_upload_pending_=false; mesh_valid_=true;
+        if (capture_transition_pending_) startCaptureTransition();
+        refresh();
     },Qt::QueuedConnection); // Updating the progress bar may repaint; wait until paintGL returns.
     connect(mesh_view_,&MeshView::renderFailed,this,[this](const QString& message) {
-        capture_processing_=false; mesh_view_->setProcessing(false);
+        cancelCapturePresentation();
         render_error_=message; gpu_upload_pending_=false; mesh_valid_=false; refresh();
         scene_status_->setText(message); status_->setText(message);
         log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss")+"  "+message);
@@ -376,7 +414,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         tabs_->setCurrentIndex(SceneTab);
     });
     connect(&controller_,&PipelineController::preview,this,[this](QImage l,QImage r) {
-        if (!state_.live) return;
+        if (!state_.live || capture_processing_) return;
         live_left_ = std::move(l); live_right_ = std::move(r);
         showImages();
     });
@@ -412,12 +450,19 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             controller_.submit([](auto& worker) { worker.startCapturePreview(true); });
             return;
         }
-        mesh_view_->preserveView();
-        capture_processing_=true; mesh_view_->setProcessing(true);
+        if (!captured_clouds_.empty()) mesh_view_->preserveView();
+        const bool single_capture=state_.capture_count==0;
+        capture_mesh_requested_=single_capture;
+        pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
+        setCaptureProcessing(true);
         reconstruction_valid_=false; refresh();
         const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
         const bool denoise=denoise_->isChecked();
-        controller_.submit([=](auto& w) { w.captureAndReconstruct(low,high,denoise,distance); });
+        const double edge=mesh_edge_->value();
+        controller_.submit([=](auto& w) {
+            w.captureAndReconstruct(low,high,denoise,distance);
+            if (single_capture) w.buildMeshGPU({},edge);
+        });
     });
     connect(browse_save_,&QPushButton::clicked,this,[this] {
         const auto directory=QFileDialog::getExistingDirectory(this,"Choose output folder",save_directory_->text());
@@ -458,7 +503,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         refresh();
     };
     connect(mesh_edge_,&QDoubleSpinBox::valueChanged,this,mesh_settings_changed);
-    connect(mesh_jump_,&QDoubleSpinBox::valueChanged,this,mesh_settings_changed);
     const auto depth_settings_changed = [this] {
         // Changing parameters invalidates derived results even if the old values are restored later.
         reconstruction_valid_=false;
@@ -509,15 +553,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     refresh();
 }
 void ReconstructionWindow::buildMeshGPU() {
-    if (busy_ || closing_ || gpu_upload_pending_ || state_.live || !reconstruction_valid_ ||
+    if (busy_ || closing_ || gpu_upload_pending_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !reconstruction_valid_ ||
         !state_.depth_ready || !state_.gpu_ready || !state_.engine_ready) return;
     mesh_valid_=false; refresh();
     const QImage selected=mask_->mask();
-    const double edge=mesh_edge_->value(), jump=mesh_jump_->value();
-    controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge,jump); });
+    const double edge=mesh_edge_->value();
+    controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge); });
 }
 void ReconstructionWindow::reconstructCurrent() {
-    if (busy_ || closing_ || state_.live || !state_.has_rectified || !state_.engine_ready) return;
+    if (busy_ || closing_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !state_.has_rectified || !state_.engine_ready) return;
     reconstruction_valid_=false; refresh();
     const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
     const QImage selected=mask_->mask();
@@ -545,7 +589,8 @@ void ReconstructionWindow::refresh() {
     const bool replacement=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && !gpu_mesh_result_->point_cloud;
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
         ? captured_clouds_.back() : SharedGPUMesh{});
-    const bool idle = !busy_ && !closing_ && !gpu_upload_pending_, frozen = state_.has_rectified && !state_.live;
+    const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
+    const bool idle = !busy_ && !closing_ && !gpu_upload_pending_ && !transferring, frozen = state_.has_rectified && !state_.live;
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle && has_confirmed_calibration_); camera_->setEnabled(idle);
     camera_->setText(state_.connected ? "Disconnect cameras" : "Connect cameras");
     camera_mode_->setEnabled(idle && !state_.connected);
@@ -561,12 +606,13 @@ void ReconstructionWindow::refresh() {
     capture_->setEnabled(idle && state_.connected && state_.engine_ready && depth_valid && (state_.live || can_append));
     capture_->setText(state_.capture_count>0 ? "Capture more" : "Capture pair");
     capture_->setToolTip(state_.live
-        ? "Capture this stereo pair, reconstruct and display valid points automatically."
+        ? (state_.capture_count==0 ? "Capture this stereo pair and automatically display the FS GPU mesh."
+                                   : "Capture this stereo pair, reconstruct and display valid points automatically.")
         : state_.capture_count>=PipelineState::kMaxCaptures
             ? "Five captures are complete. Retake the latest view or restart."
             : "Keep completed captures and preview the next view, then press again to capture it. Up to five pairs.");
     minimum_->setEnabled(idle); maximum_->setEnabled(idle);
-    mesh_edge_->setEnabled(idle); mesh_jump_->setEnabled(idle);
+    mesh_edge_->setEnabled(idle);
     denoise_->setEnabled(idle); neighbor_distance_->setEnabled(idle && denoise_->isChecked());
     if (manual_reconstruct_) {
         manual_reconstruct_->setEnabled(idle && frozen && state_.engine_ready && depth_valid);
@@ -614,7 +660,7 @@ void ReconstructionWindow::refresh() {
     const bool point_cloud=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && gpu_mesh_result_->point_cloud;
     save_mesh_->setText(point_cloud ? "FS point cloud (mesh.ply)" : "FS mesh (mesh.ply)");
     save_mesh_->setToolTip("Save the current FS points or mesh as PLY; the FS / MA selector controls the 3D display.");
-    mesh_mode_->setEnabled(mesh_valid_ && !show_ma);
+    mesh_mode_->setEnabled(mesh_valid_ && !show_ma && !transferring);
     for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(!point_cloud);
     browse_save_->setEnabled(idle);
     if (open_save_) open_save_->setEnabled(idle && frozen);
@@ -631,18 +677,19 @@ void ReconstructionWindow::refresh() {
         (!save_mesh_->isChecked() || (mesh_valid_ && gpu_mesh_result_));
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
     save_all_->setEnabled(idle && frozen && result_current && mesh_valid_ && gpu_mesh_result_ && !save_directory_->text().isEmpty());
-    scene_status_->setText(capture_processing_ ? "Processing · Reconstructing the captured point cloud…"
+    scene_status_->setText(transferring ? "Capture complete · Placing the image in its camera frame…"
+        : capture_processing_ ? "Calculating · Reconstructing the captured surface…"
         : point_cloud ? QString("GPU point cloud · %1 valid points%2")
         .arg(gpu_mesh_result_->stats.point_count)
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "")
         : gpu_mesh_result_ ? QString("GPU mesh · %1 triangles · %2 cm²%3")
         .arg(gpu_mesh_result_->stats.triangle_count).arg(gpu_mesh_result_->stats.area_m2*1e4,0,'f',2)
         .arg(gpu_upload_pending_ ? " · preparing OpenGL" : "")
-        : state_.live ? "LIVE · Pixel point cloud at 40 cm · Capture a pair to reconstruct depth."
+        : state_.live ? "LIVE · Preview on the left · Capture a pair to reconstruct depth."
         : result_current ? "Depth ready. Switch the camera image or generate a GPU mesh."
         : frozen ? (has_confirmed_calibration_ ? "Captured left image · Reconstruct to display valid points. Mask drawing is optional."
                                               : "Captured left image · Confirm a region, retake or import a pair to update the point cloud.")
-        : "Connect cameras to see the left live image in 3D, or import a capture.");
+        : "Connect cameras to preview on the left, or import a capture.");
     if (show_ma) {
         unsigned long long points=0;
         for (const auto& cloud:*state_.ma_clouds) points+=cloud->stats.point_count;
@@ -656,7 +703,7 @@ void ReconstructionWindow::refresh() {
 void ReconstructionWindow::refreshWorkspace() {
     const bool frozen=state_.has_rectified && !state_.live;
     if (!frozen && tabs_->currentIndex()==RegionTab) tabs_->setCurrentIndex(SceneTab);
-    tabs_->setTabEnabled(RegionTab,frozen && !busy_);
+    tabs_->setTabEnabled(RegionTab,frozen && !busy_ && !capture_transition_pending_ && !capture_transition_->isRunning());
     tabs_->setTabToolTip(RegionTab,frozen ? "Optional: draw and confirm a mask for region measurement." : "Capture or import a stereo pair first.");
 
     const bool scene=tabs_->currentIndex()==SceneTab;
@@ -671,24 +718,67 @@ void ReconstructionWindow::refreshWorkspace() {
     if (open_save_) open_save_->setVisible(scene && frozen);
 }
 void ReconstructionWindow::showImages() {
-    const bool depth_available = !state_.live && reconstruction_valid_ && state_.depth_ready && !depth_image_.isNull();
+    const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
+    camera_image_mode_->setEnabled(!capture_processing_ && !transferring);
+    const bool depth_available = !state_.live && !capture_processing_ && !transferring && reconstruction_valid_ && state_.depth_ready && !depth_image_.isNull();
     static_cast<QStandardItemModel*>(camera_image_mode_->model())->item(1)->setEnabled(depth_available);
     if (!depth_available && camera_image_mode_->currentIndex()==1) {
         const QSignalBlocker blocker(camera_image_mode_);
         camera_image_mode_->setCurrentIndex(0);
     }
     const bool show_depth = depth_available && camera_image_mode_->currentIndex()==1;
-    const auto camera = state_.live || !state_.has_rectified ? state_.live_camera : state_.image_camera;
-    mesh_view_->setCamera(camera);
-    mesh_view_->setLivePreview(state_.live);
-    mesh_view_->setCameraImage(show_depth ? depth_image_ : state_.live ? live_left_ : rectified_left_);
-    mesh_view_->setRightCameraImage(state_.live ? live_right_ : rectified_right_);
+    if (!capture_processing_) {
+        preview_->setImage(show_depth ? depth_image_ : state_.live ? live_left_ : rectified_left_);
+        right_preview_->setImage(state_.live ? live_right_ : rectified_right_);
+    }
+    // The transfer lands on this camera's image plane. Keep its wireframe visible
+    // with the mesh, and show the actual texture only after the overlay arrives.
+    const bool captured = !state_.live && state_.has_rectified && !capture_processing_;
+    mesh_view_->setCamera(captured ? state_.image_camera : std::nullopt);
+    mesh_view_->setCameraImage(captured && !transferring ? (show_depth ? depth_image_ : rectified_left_) : QImage{});
+    mesh_view_->setRightCameraImage(captured ? rectified_right_ : QImage{});
     depth_status_->setVisible(show_depth);
+}
+void ReconstructionWindow::setCaptureProcessing(bool processing) {
+    capture_processing_=processing;
+    preview_->setProcessing(processing);
+    right_preview_->setProcessing(processing);
+}
+void ReconstructionWindow::presentGeometry(SharedGPUMesh mesh) {
+    mesh_valid_=false;
+    gpu_mesh_result_=std::move(mesh); gpu_upload_pending_=true;
+    if (gpu_mesh_result_->point_cloud && state_.capture_count>0) {
+        captured_clouds_.resize(state_.capture_count);
+        captured_clouds_.back()=gpu_mesh_result_;
+    }
+    mesh_mode_->setCurrentIndex(gpu_mesh_result_->point_cloud ? 0 : 1);
+    tabs_->setCurrentIndex(SceneTab);
+    mesh_view_->setGPUMesh(gpu_mesh_result_);
+    if (capture_transition_pending_) mesh_view_->resetCaptureView();
+    refresh();
+}
+void ReconstructionWindow::startCaptureTransition() {
+    capture_transition_pending_=false;
+    const auto source=[this] {
+        const QRectF rect=QRectF(preview_->imageRect()).translated(preview_->mapTo(capture_transition_->parentWidget(),QPoint()));
+        return QPolygonF{rect.topLeft(),rect.topRight(),rect.bottomRight(),rect.bottomLeft()};
+    };
+    const auto destination=[this] {
+        return mesh_view_->cameraImageQuad().translated(mesh_view_->mapTo(capture_transition_->parentWidget(),QPoint()));
+    };
+    if (capture_transition_->start(rectified_left_,source,destination)) preview_->setImageVisible(false);
+}
+void ReconstructionWindow::cancelCapturePresentation() {
+    capture_mesh_requested_=false; capture_transition_pending_=false;
+    pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
+    setCaptureProcessing(false);
+    capture_transition_->cancel();
+    preview_->setImageVisible(true);
 }
 void ReconstructionWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }
     event->ignore(); if (closing_) return;
-    capture_processing_=false; mesh_view_->setProcessing(false);
-    closing_ = true; gpu_upload_pending_=false; mesh_valid_=false; mask_request_id_=controller_.requestMask(state_.image_id,{}); refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
+    closing_=true; cancelCapturePresentation();
+    gpu_upload_pending_=false; mesh_valid_=false; mask_request_id_=controller_.requestMask(state_.image_id,{}); refresh(); status_->setText("Closing · waiting for background work and releasing cameras / GPU…"); emit closeRequested();
 }
 void ReconstructionWindow::allowClose() { allow_close_ = true; close(); }

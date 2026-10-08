@@ -13,6 +13,8 @@ class QPlainTextEdit;
 class QTabWidget;
 class MaskEditor;
 class MeshView;
+class StereoImageView;
+class CaptureTransition;
 class QComboBox;
 class QLineEdit;
 class QRadioButton;
@@ -32,6 +34,10 @@ private:
     enum WorkspaceTab { SceneTab, RegionTab };
     void refresh();
     void showImages();
+    void setCaptureProcessing(bool processing);
+    void presentGeometry(SharedGPUMesh mesh);
+    void startCaptureTransition();
+    void cancelCapturePresentation();
     void refreshWorkspace();
     void reconstructCurrent();
     PipelineController& controller_;
@@ -43,6 +49,8 @@ private:
     std::vector<SharedGPUMesh> captured_clouds_;
     bool gpu_upload_pending_{false};
     bool capture_processing_{false};
+    bool capture_mesh_requested_{false}, capture_transition_pending_{false};
+    SharedGPUMesh pending_capture_cloud_, pending_capture_mesh_;
     QString render_error_;
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
@@ -52,7 +60,7 @@ private:
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *denoise_;
-    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_, *mesh_edge_, *mesh_jump_;
+    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_, *mesh_edge_;
     QLabel *input_, *calibration_, *status_, *time_, *scene_status_, *depth_status_, *steps_;
     QProgressBar* progress_;
     std::array<QWidget*,PipelineState::kMaxCaptures> capture_segments_{};
@@ -66,6 +74,8 @@ private:
     QLineEdit* save_directory_;
     QLabel* save_calibration_name_;
     MeshView* mesh_view_;
+    StereoImageView *preview_, *right_preview_;
+    CaptureTransition* capture_transition_;
     QRadioButton *fs_cloud_, *ma_cloud_;
     QComboBox* mesh_mode_;
     QComboBox* camera_image_mode_;

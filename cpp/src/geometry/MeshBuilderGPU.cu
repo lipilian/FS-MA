@@ -32,11 +32,8 @@ __device__ bool valid(float3 p) {
     return isfinite(p.x) && isfinite(p.y) && isfinite(p.z) && p.z > 0;
 }
 __device__ double triangle(const MeshGPUInputs& in, const int* ids, const float3* p,
-                           int a, int b, int c, double edge, double jump,
+                           int a, int b, int c, double edge,
                            MeshGPUVertex* out) {
-    const double low = fmin(double(p[a].z), fmin(double(p[b].z), double(p[c].z)));
-    const double high = fmax(double(p[a].z), fmax(double(p[b].z), double(p[c].z)));
-    if (high-low > jump) return 0;
     const auto ab = subtract(p[b],p[a]), ac = subtract(p[c],p[a]), bc = subtract(p[c],p[b]);
     if (sqrt(squared(ab)) > edge || sqrt(squared(ac)) > edge || sqrt(squared(bc)) > edge) return 0;
     const auto cross = make_double3(ab.y*ac.z-ab.z*ac.y, ab.z*ac.x-ab.x*ac.z, ab.x*ac.y-ab.y*ac.x);
@@ -62,7 +59,7 @@ __device__ void merge_stats(MeshGPUStats& a, const MeshGPUStats& b) {
     for (int c=0;c<3;++c) { a.low[c]=fminf(a.low[c],b.low[c]); a.high[c]=fmaxf(a.high[c],b.high[c]); }
 }
 __global__ void build_cells(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUStats* partials,
-                            double edge, double jump) {
+                            double edge) {
     const int x = blockIdx.x*blockDim.x+threadIdx.x, y = blockIdx.y*blockDim.y+threadIdx.y;
     const int tid = threadIdx.y*side+threadIdx.x;
     double area = 0;
@@ -80,11 +77,11 @@ __global__ void build_cells(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUSt
             if (in.mask[id] && valid(p[i])) keep[n++] = i;
         }
         if (n == 4) {
-            const double first = triangle(in,ids,p,0,1,2,edge,jump,out);
-            const double second = triangle(in,ids,p,0,2,3,edge,jump,out+3);
+            const double first = triangle(in,ids,p,0,1,2,edge,out);
+            const double second = triangle(in,ids,p,0,2,3,edge,out+3);
             area = first+second; count = (first>0)+(second>0);
         } else if (n == 3) {
-            area = triangle(in,ids,p,keep[0],keep[1],keep[2],edge,jump,out);
+            area = triangle(in,ids,p,keep[0],keep[1],keep[2],edge,out);
             count = area>0;
         }
         if (count) for (int i=0;i<6;++i) if (out[i].z>0) {
@@ -249,13 +246,12 @@ MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs& inputs, MeshG
 }
 
 MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
-                            double max_edge_m, double max_depth_jump_m) {
+                            double max_edge_m) {
     output.impl_->slots = 0;
     if (!inputs.xyz || !inputs.rgb || !inputs.mask || !inputs.stream || inputs.width < 2 || inputs.height < 2 ||
         std::size_t(inputs.width)*inputs.height > std::size_t(std::numeric_limits<int>::max()/3) ||
-        !std::isfinite(max_edge_m) || max_edge_m <= 0 ||
-        !std::isfinite(max_depth_jump_m) || max_depth_jump_m <= 0)
-        throw std::invalid_argument("GPU mesh needs aligned device XYZ, RGB and mask, dimensions >=2, the FS stream and positive thresholds");
+        !std::isfinite(max_edge_m) || max_edge_m <= 0)
+        throw std::invalid_argument("GPU mesh needs aligned device XYZ, RGB and mask, dimensions >=2, the FS stream and a positive edge threshold");
     const dim3 block(side,side), grid((inputs.width+side-1)/side,(inputs.height+side-1)/side);
     const std::size_t slots = std::size_t(inputs.width-1)*(inputs.height-1)*6;
     auto& storage = *output.impl_;
@@ -264,7 +260,7 @@ MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
     storage.total.reserve(1);
     MeshGPUStats result;
     try {
-        build_cells<<<grid,block,0,inputs.stream>>>(inputs,storage.vertices.data,storage.partials.data,max_edge_m,max_depth_jump_m);
+        build_cells<<<grid,block,0,inputs.stream>>>(inputs,storage.vertices.data,storage.partials.data,max_edge_m);
         checked(cudaGetLastError(), "launch GPU mesh cells");
         reduce_stats<<<1,threads,0,inputs.stream>>>(storage.partials.data,grid.x*grid.y,storage.total.data);
         checked(cudaGetLastError(), "launch GPU mesh area reduction");

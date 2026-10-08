@@ -38,9 +38,51 @@ std::vector<fs::MeshGPUVertex> download(const fs::MeshGPUBuffer& buffer) {
     checked(cudaMemcpy(result.data(),buffer.vertices(),result.size()*sizeof(result[0]),cudaMemcpyDeviceToHost));
     return result;
 }
+void checkMeshEdgeFilter() {
+    Inputs device(4);
+    fs::MeshGPUInputs inputs{device.xyz,device.rgb,device.mask,2,2,device.stream};
+    fs::MeshGPUBuffer output;
+    const std::vector<float> rgb(12,128);
+    const std::vector<unsigned char> mask{255,255,255,0};
+    // A 10 mm edge and two shorter edges; the fourth cell corner is unselected.
+    const std::vector<float> triangle{0,0,1, .01f,0,1, .005f,.004f,1, 0,0,0};
+    device.upload(triangle,rgb,mask);
+    auto stats=fs::build_mesh_gpu(inputs,output);
+    require(stats.triangle_count==1 && stats.area_m2>0,"10 mm edge should survive the default mesh filter");
+
+    auto points=triangle;
+    points[3]=std::nextafter(.01f,std::numeric_limits<float>::infinity());
+    device.upload(points,rgb,mask);
+    stats=fs::build_mesh_gpu(inputs,output);
+    require(stats.triangle_count==0 && stats.area_m2==0,"Edge just above 10 mm was not rejected");
+    for (auto v : download(output)) require(v.z==0,"Rejected triangle left stale GPU vertices");
+
+    // Even with 8 mm horizontal/vertical edges, the cell diagonal is too long.
+    points={0,0,1, .008f,0,1, 0,.008f,1, .008f,.008f,1};
+    device.upload(points,rgb,{255,255,255,255});
+    require(fs::build_mesh_gpu(inputs,output).triangle_count==0,"Mesh filter did not check the diagonal edge");
+
+    points=triangle; points[7]=0; // Three collinear points, all edges <= 10 mm.
+    device.upload(points,rgb,mask);
+    require(fs::build_mesh_gpu(inputs,output).triangle_count==0,"Zero-area triangle was retained");
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()}) {
+        points=triangle; points[0]=invalid;
+        device.upload(points,rgb,mask);
+        require(fs::build_mesh_gpu(inputs,output).triangle_count==0,"Nonfinite triangle was retained");
+    }
+
+    // A caller may choose a larger edge limit. A 12 mm Z span must not trigger
+    // the removed 10 mm depth-jump filter when all three 3D edges fit the limit.
+    points={0,0,1, .001f,0,1.012f, 0,.001f,1.006f, 0,0,0};
+    device.upload(points,rgb,mask);
+    require(fs::build_mesh_gpu(inputs,output,.02).triangle_count==1,"Mesh still applies an independent depth-jump filter");
+    require(fs::build_mesh_gpu(inputs,output).triangle_count==0,"Edge filtering ignored the Z component of 3D distance");
+    std::cout<<"PASS: 10 mm mesh edge boundary, diagonal/3D edges, zero area, nonfinite vertices and no depth-jump filter\n";
+}
 }
 int main() {
     try {
+        checkMeshEdgeFilter();
         // Non-multiples of 16 exercise partial CUDA blocks and the last pixel.
         constexpr int width=17, height=19, count=width*height;
         Inputs device(count);
@@ -86,7 +128,7 @@ int main() {
         // Sharing the buffer and reduction implementation must preserve meshes.
         xyz={0,0,1, .01f,0,1, 0,.01f,1, .01f,.01f,1}; rgb.assign(12,128); mask.assign(4,255);
         device.upload(xyz,rgb,mask); inputs.width=inputs.height=2;
-        stats=fs::build_mesh_gpu(inputs,output,.02,.01);
+        stats=fs::build_mesh_gpu(inputs,output,.02);
         require(stats.triangle_count==2 && stats.point_count==0 && output.vertex_slots()==6,"Mesh regression after point cloud reuse");
         stats=fs::build_point_cloud_gpu(inputs,output);
         require(stats.point_count==4 && stats.triangle_count==0 && output.vertex_slots()==4,"Point cloud regression after mesh reuse");

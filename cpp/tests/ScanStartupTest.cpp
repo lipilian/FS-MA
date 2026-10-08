@@ -1,13 +1,18 @@
 #include "DesktopController.hpp"
 #include "widgets/MeshView.hpp"
 #include "widgets/MaskEditor.hpp"
+#include "widgets/StereoImageView.hpp"
+#include "widgets/CaptureTransition.hpp"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLabel>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QDataStream>
 #include <QFile>
+#include <QDir>
+#include <QEventLoop>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QOpenGLWidget>
@@ -23,6 +28,59 @@
 
 namespace {
 void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+
+void checkCapturePresentation() {
+    StereoImageView preview("Preview");
+    preview.resize(360,320);
+    QImage input(96,80,QImage::Format_RGB32); input.fill(QColor(70,80,90));
+    preview.setImage(input); preview.show();
+    const auto idle=preview.grab().toImage();
+    require(!preview.isProcessing(), "Preview animates before capture");
+    preview.setProcessing(true);
+    const auto first=preview.grab().toImage();
+    QEventLoop wait;
+    QTimer::singleShot(250,&wait,&QEventLoop::quit); wait.exec();
+    require(preview.isProcessing() && preview.grab().toImage()==first,
+            "Preview must remain still while calculating");
+    require(preview.image()==input, "Processing modified the captured image");
+    preview.setProcessing(false);
+    require(!preview.isProcessing() && preview.grab().toImage()==idle,
+            "Preview did not return to its original image after processing");
+    QWidget scene; scene.resize(900,600); scene.show();
+    CaptureTransition transition(&scene);
+    const QPolygonF source{{20,40},{320,40},{320,290},{20,290}};
+    QPolygonF destination{{650,150},{690,160},{680,190},{640,180}};
+    int finished=0;
+    QObject::connect(&transition,&CaptureTransition::finished,[&] { ++finished; });
+    require(transition.start(input,[&] { return source; },[&] { return destination; }), "Transfer did not start");
+    require(transition.imageQuad()==source, "Transfer did not start at the preview image");
+    QTimer::singleShot(400,&wait,&QEventLoop::quit); wait.exec();
+    const auto middle=transition.imageQuad().boundingRect();
+    require(transition.isRunning() && middle.left()>source.boundingRect().left() &&
+            middle.width()<source.boundingRect().width() && middle.width()>destination.boundingRect().width(),
+            "Transfer did not translate and shrink the image");
+    destination.translate(20,10); // Follow the real camera projection if the view or splitter moves.
+    QTimer::singleShot(650,&wait,&QEventLoop::quit); wait.exec();
+    require(!transition.isRunning() && !transition.isVisible() && finished==1 && transition.imageQuad()==destination,
+            "Transfer did not land on the updated camera corners and finish");
+    require(transition.start(input,[&] { return source; },[&] { return destination; }), "Transfer cannot restart");
+    transition.cancel();
+    require(!transition.isRunning() && !transition.isVisible() && finished==2, "Transfer did not cancel cleanly");
+    require(!transition.start(input,[&] { return source; },[] { return QPolygonF{}; }),
+            "Transfer started without a projected camera plane");
+    std::cout<<"PASS: static calculation preview, shrinking camera transfer, moving target, completion and cancellation\n";
+}
+
+bool hasSceneContent(QOpenGLWidget* canvas) {
+    require(canvas && canvas->isValid(), "No valid OpenGL canvas");
+    const auto frame=canvas->grabFramebuffer();
+    require(!frame.isNull(), "No OpenGL framebuffer");
+    const auto background=frame.pixel(0,0);
+    for (int y=0;y<frame.height();y+=4)
+        for (int x=0;x<frame.width();x+=4)
+            if (frame.pixel(x,y)!=background) return true;
+    return false;
+}
 
 void checkGeometryExport(const QString& directory, const GPUMeshFrame& source) {
     QFile ply(directory+"/mesh.ply");
@@ -107,6 +165,13 @@ int checkLiveScan(QApplication& app) {
     QTemporaryDir point_export, mesh_export;
     require(point_export.isValid() && mesh_export.isValid(), "Cannot create export test directories");
     SharedGPUMesh exported_geometry;
+    const auto screenshot=[&](const QString& name) {
+        const auto directory=qEnvironmentVariable("FS_SCAN_TEST_SCREENSHOTS");
+        if (!directory.isEmpty() && window) {
+            QDir().mkpath(directory);
+            require(window->grab().save(directory+"/"+name+".png"), "Cannot save UI verification screenshot");
+        }
+    };
     const auto captured_views=[&] {
         int count=0;
         for (int i=1;i<=PipelineState::kMaxCaptures;++i)
@@ -138,6 +203,9 @@ int checkLiveScan(QApplication& app) {
                     require(!window->findChild<QPushButton*>("buildMeshCPU"), "CPU mesh button still exists");
                     require(!window->findChild<QPushButton*>("buildMeshGPU"), "GPU mesh toolbar button still exists");
                     require(!window->findChild<QPushButton*>("captureMore"), "Capture more still has a separate button");
+                    const auto* mesh_edge=window->findChild<QDoubleSpinBox*>("meshMaxEdge");
+                    require(mesh_edge && mesh_edge->value()==.01, "GPU mesh edge limit must default to 10 mm");
+                    require(!window->findChild<QDoubleSpinBox*>("meshMaxDepthJump"), "Removed mesh depth-jump control still exists");
                     const auto* mode=window->findChild<QComboBox*>("cameraMode");
                     require(mode && mode->count()==1 && mode->currentData().toInt()==int(CameraMode::RealSenseD435),
                             "Scan workspace must default to RealSense only");
@@ -146,6 +214,24 @@ int checkLiveScan(QApplication& app) {
                             "Capture import must use the capture's calibration");
                     auto* view=window->findChild<MeshView*>();
                     require(view, "No OpenGL mesh view");
+                    auto* preview=window->findChild<StereoImageView*>("capturePreview");
+                    require(preview && preview->isVisible() &&
+                            preview->mapTo(window,QPoint(preview->width(),0)).x()<=view->mapTo(window,QPoint()).x(),
+                            "2D preview must be visible to the left of the 3D scene");
+                    auto* transfer=window->findChild<CaptureTransition*>();
+                    require(transfer, "Capture transfer overlay is missing");
+                    QObject::connect(transfer,&CaptureTransition::finished,&app,[&] {
+                        if (finished || phase!=3 || presented!=1) return;
+                        try {
+                            auto* transfer=window->findChild<CaptureTransition*>();
+                            auto* view=window->findChild<MeshView*>();
+                            const auto expected=view->cameraImageQuad().translated(view->mapTo(transfer->parentWidget(),QPoint()));
+                            const auto actual=transfer->imageQuad();
+                            require(actual.size()==4 && expected.size()==4, "Transfer landed without a camera image plane");
+                            for (int i=0;i<4;++i)
+                                require(QLineF(actual[i],expected[i]).length()<.5, "Transfer missed the rendered camera corners");
+                        } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                    });
                     QObject::connect(view,&MeshView::renderFailed,&app,[&](QString error) { finish(error); });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
                         if (finished || !mesh || phase>=7) return;
@@ -153,9 +239,22 @@ int checkLiveScan(QApplication& app) {
                             finish("RealSense reconstruction produced empty geometry"); return;
                         }
                         ++presented;
+                        if (presented==1 && mesh->point_cloud) { finish("First capture displayed intermediate points instead of the automatic GPU mesh"); return; }
                         std::cout<<"RealSense geometry displayed: "<<mesh->stats.point_count<<" points, "<<mesh->stats.triangle_count<<" triangles\n";
+                        if (presented==1) QTimer::singleShot(350,&app,[&] {
+                            if (finished || !window) return;
+                            try {
+                                auto* transfer=window->findChild<CaptureTransition*>();
+                                require(transfer->isRunning() && transfer->isVisible(), "Camera transfer did not run after GPU mesh presentation");
+                                require(!window->findChild<StereoImageView*>("capturePreview")->isProcessing(), "Transfer started before calculation finished");
+                                require(window->findChild<QComboBox*>("meshMode")->currentIndex()==1 && hasSceneContent(window->findChild<QOpenGLWidget*>()),
+                                        "GPU mesh is not rendered during the image transfer");
+                                require(!window->findChild<QPushButton*>("capturePair")->isEnabled(), "A new capture can interrupt the image transfer");
+                                screenshot("transfer");
+                            } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                        });
                         // Inspect the framebuffer after the presentation callback returns.
-                        QTimer::singleShot(250,&app,[&,mesh] {
+                        QTimer::singleShot(presented==1 ? 1200 : 250,&app,[&,mesh] {
                             auto* canvas=window ? window->findChild<QOpenGLWidget*>() : nullptr;
                             try {
                                 require(canvas && canvas->isValid() && !canvas->grabFramebuffer().isNull(),
@@ -164,6 +263,8 @@ int checkLiveScan(QApplication& app) {
                                         "Scan settings sidebar reappeared after capture");
                                 require(!window->findChild<QPushButton*>("run"),
                                         "Scan still creates an unused manual reconstruction button");
+                                require(!window->findChild<StereoImageView*>("capturePreview")->isProcessing(),
+                                        "Preview animation continued after capture completed");
                                 auto* restart=window->findChild<QPushButton*>("restartCaptures");
                                 auto* retake=window->findChild<QPushButton*>("retake");
                                 auto* capture=window->findChild<QPushButton*>("capturePair");
@@ -177,6 +278,8 @@ int checkLiveScan(QApplication& app) {
                                         "Retake must be above Capture more, with Restart to the left");
                                 auto* tabs=window->findChild<QTabWidget*>("workspaceTabs");
                                 if (presented==1) {
+                                    require(!window->findChild<CaptureTransition*>()->isRunning(), "Image transfer did not finish");
+                                    screenshot("landed");
                                     tabs->setCurrentIndex(1);
                                     auto* editor=window->findChild<MaskEditor*>();
                                     window->findChild<QPushButton*>("maskBrush")->click();
@@ -240,17 +343,27 @@ int checkLiveScan(QApplication& app) {
             auto* camera=window->findChild<QPushButton*>("connectCameras");
             auto* capture=window->findChild<QPushButton*>("capturePair");
             auto* retake=window->findChild<QPushButton*>("retake");
+            auto* preview=window->findChild<StereoImageView*>("capturePreview");
+            if (phase==3 && preview->isProcessing()) {
+                require(!window->findChild<CaptureTransition*>()->isRunning(), "Transfer ran during FS computation");
+                require(!hasSceneContent(window->findChild<QOpenGLWidget*>()), "First capture rendered intermediate geometry during computation");
+            }
             if ((phase==7 || phase==9) && capture->isEnabled()) {
                 require(!retake->isEnabled(), "Next-view or retake action did not resume preview");
                 require(captured_views()==(phase==7 ? 1 : 2), "Starting preview changed completed views");
                 if (++ready_ticks<8) return;
+                require(!preview->image().isNull() && !preview->isProcessing(), "Next-view preview is missing or still animating");
+                require(hasSceneContent(window->findChild<QOpenGLWidget*>()), "Completed geometry disappeared during live preview");
                 ready_ticks=0; ++phase; capture->click();
+                require(preview->isProcessing(), "Capture did not enter the calculation state");
+                require(!window->findChild<CaptureTransition*>()->isRunning(), "Multi-view capture started the single-view transfer");
                 return;
             }
             if ((phase==8 || phase==10) && capture->isEnabled()) {
                 require(captured_views()==2, "Capture more did not append, or Retake appended instead of replacing");
                 require(retake->isVisible() && retake->isEnabled(), "Retake is unavailable for captured images");
                 require(window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Two-view MA reconstruction did not complete");
+                require(!preview->isProcessing(), "Two-view processing animation did not stop");
                 if (phase==8) { phase=9; ready_ticks=0; retake->click(); }
                 else { phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); }
                 return;
@@ -259,16 +372,23 @@ int checkLiveScan(QApplication& app) {
                 require(captured_views()==0 && capture->text()=="Capture pair" && !retake->isVisible(),
                         "Restart did not restore the empty capture toolbar");
                 require(!window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Restart retained MA geometry");
+                require(!preview->isProcessing(), "Restart retained the processing animation");
+                require(!hasSceneContent(window->findChild<QOpenGLWidget*>()), "Restart retained geometry or projected the live preview in 3D");
                 finish({}); return;
             }
             const bool connected=camera->isEnabled() && camera->text()=="Disconnect cameras" && capture->isEnabled();
             if ((phase==0 || phase==2) && connected) {
                 require(capture->text()=="Capture pair" && !retake->isVisible(), "Initial toolbar shows Retake or Capture more without an image");
                 if (++ready_ticks<8) return; // Allow fresh camera frames to arrive.
+                require(!preview->image().isNull() && !preview->isProcessing(), "Live camera frames are missing from the left preview");
+                require(!hasSceneContent(window->findChild<QOpenGLWidget*>()), "Live preview still renders projected geometry in 3D");
                 ready_ticks=0;
                 if (phase==0) { camera->click(); phase=1; }
                 else {
                     capture->click(); phase=3;
+                    require(preview->isProcessing(), "Capture did not enter the calculation state");
+                    require(!window->findChild<CaptureTransition*>()->isRunning(), "Transfer started before calculation");
+                    screenshot("calculating");
                 }
             } else if (phase==1 && camera->isEnabled() && camera->text()=="Connect cameras") {
                 camera->click(); phase=2;
@@ -281,7 +401,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: D435 capture/reconnect, merged capture button, two-view MA, retake replacement, restart, automatic region updates, GPU mesh API/wireframe, PLY/depth export and clean shutdown\n";
+    std::cout<<"PASS: D435 calculate → automatic GPU mesh + camera transfer, camera-corner landing, no live 3D projection, reconnect, two-view MA, retake, restart, region updates, GPU wireframe, PLY/depth export and clean shutdown\n";
     return 0;
 }
 }
@@ -294,6 +414,7 @@ int main(int argc, char** argv) {
     cv::setNumThreads(4);
     try {
         if (live) return checkLiveScan(app);
+        checkCapturePresentation();
         checkUncalibratedPipeline();
         return 0;
     } catch (const std::exception& error) {
