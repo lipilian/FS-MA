@@ -178,7 +178,7 @@ int checkLiveScan(QApplication& app) {
     QPointer<ReconstructionWindow> window;
     bool finished=false, passed=false;
     QString failure;
-    int phase=0, ready_ticks=0, presented=0, ma_presented=0, landed=0, expected_views=0;
+    int phase=0, ready_ticks=0, presented=0, fs_captures=0, ma_presented=0, landed=0, expected_views=0;
     QTemporaryDir point_export, mesh_export, ma_export;
     require(point_export.isValid() && mesh_export.isValid() && ma_export.isValid(), "Cannot create export test directories");
     SharedGPUMesh exported_geometry;
@@ -264,22 +264,35 @@ int checkLiveScan(QApplication& app) {
                             require(points>0 && clouds!=latest_ma_clouds, "MA point cloud snapshot was empty or reused after new inference");
                             ++ma_presented; latest_ma_clouds=clouds;
                             std::cout<<"MA point clouds displayed: "<<clouds->size()<<" views, "<<points<<" points\n";
-                            QTimer::singleShot(350,&app,[&] {
-                                if (finished || !window) return;
-                                try {
-                                    require(window->findChild<CaptureTransition*>()->isRunning(), "MA point cloud did not start the camera transfer");
-                                    require(window->findChild<QRadioButton*>("maPointCloud")->isChecked() && window->findChild<QComboBox*>("meshMode")->currentIndex()==0,
-                                            "MA point cloud was not selected automatically");
-                                    auto* modes=window->findChild<QComboBox*>("meshMode");
-                                    require(!modes->isEnabled(), "MA point clouds still expose mesh modes");
-                                    screenshot(QString("ma-transfer-%1").arg(ma_presented));
-                                } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
-                            });
+                            require(!window->findChild<CaptureTransition*>()->isRunning(), "Switching to MA restarted the capture transfer");
+                            require(window->findChild<QRadioButton*>("maPointCloud")->isChecked() && window->findChild<QComboBox*>("meshMode")->currentIndex()==0,
+                                    "Manual MA selection did not display point clouds");
                         } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
                     });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
                         if (finished || !mesh) return;
-                        if (phase>=7) { finish("Later capture rendered an FS result before the MA point clouds"); return; }
+                        if (phase>=7) {
+                            try {
+                                require((phase==8 || phase==10 || phase==13) && mesh->point_cloud && mesh->stats.point_count,
+                                        "Unexpected FS result outside capture completion");
+                                require(!window->findChild<StereoImageView*>("capturePreview")->isProcessing(),
+                                        "FS points appeared before capture computation finished");
+                                require(window->findChild<QRadioButton*>("fsPointCloud")->isChecked() &&
+                                        !window->findChild<QWidget*>("maPointCloud")->isEnabled(),
+                                        "FS was not selected during the completed capture transfer");
+                                ++fs_captures;
+                                QTimer::singleShot(350,&app,[&] {
+                                    if (finished || !window) return;
+                                    try {
+                                        require(window->findChild<CaptureTransition*>()->isRunning(), "FS points did not start the camera transfer");
+                                        require(window->findChild<QComboBox*>("meshMode")->currentIndex()==0 &&
+                                                hasSceneContent(window->findChild<QOpenGLWidget*>()),
+                                                "FS point clouds are not visible during the camera transfer");
+                                    } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                                });
+                            } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                            return;
+                        }
                         if (!(mesh->point_cloud ? mesh->stats.point_count : mesh->stats.triangle_count)) {
                             finish("RealSense reconstruction produced empty geometry"); return;
                         }
@@ -412,10 +425,18 @@ int checkLiveScan(QApplication& app) {
                 require(retake->isVisible() && retake->isEnabled(), "Retake is unavailable for captured images");
                 require(window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Two-view MA reconstruction did not complete");
                 require(!preview->isProcessing(), "Two-view processing animation did not stop");
-                require(ma_presented==(phase==8 ? 1 : 2) && landed==ma_presented+1, "MA point cloud or its transfer did not complete for capture/retake");
-                require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Current MA camera did not turn green after landing");
-                screenshot(QString("ma-landed-%1").arg(ma_presented));
-                if (phase==8) { phase=9; ready_ticks=0; retake->click(); }
+                require(fs_captures==(phase==8 ? 1 : 2) && landed==fs_captures+1, "FS point cloud or its transfer did not complete for capture/retake");
+                require(window->findChild<QRadioButton*>("fsPointCloud")->isChecked(), "Capture/retake must default to FS even after viewing MA");
+                require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Current camera did not turn green after landing");
+                screenshot(QString("fs-landed-%1").arg(fs_captures));
+                phase=phase==8 ? 15 : 16;
+                window->findChild<QRadioButton*>("maPointCloud")->click();
+                return;
+            }
+            if ((phase==15 || phase==16) && retake->isEnabled() && ma_presented==fs_captures) {
+                require(window->findChild<QRadioButton*>("maPointCloud")->isChecked(), "Manual MA selection was not retained");
+                require(!window->findChild<QComboBox*>("meshMode")->isEnabled(), "MA point clouds still expose mesh modes");
+                if (phase==15) { phase=9; ready_ticks=0; retake->click(); }
                 else { phase=12; ready_ticks=0; capture->click(); }
                 return;
             }
@@ -426,10 +447,17 @@ int checkLiveScan(QApplication& app) {
                 return;
             }
             if (phase==13 && retake->isEnabled()) {
-                require(captured_views()==expected_views && latest_ma_clouds && latest_ma_clouds->size()==size_t(expected_views),
-                        "Additional capture did not replace all MA point clouds");
-                require(landed==ma_presented+1,"Additional MA capture skipped its landing animation");
-                require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Additional MA capture lost the green current camera");
+                require(captured_views()==expected_views && window->findChild<QRadioButton*>("fsPointCloud")->isChecked(),
+                        "Additional capture did not default to FS point clouds");
+                require(landed==fs_captures+1,"Additional capture skipped its landing animation");
+                require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Additional capture lost the green current camera");
+                phase=17; window->findChild<QRadioButton*>("maPointCloud")->click();
+                return;
+            }
+            if (phase==17 && retake->isEnabled() && ma_presented==fs_captures) {
+                require(latest_ma_clouds && latest_ma_clouds->size()==size_t(expected_views),
+                        "Manual MA selection did not display all current views");
+                require(!window->findChild<QComboBox*>("meshMode")->isEnabled(), "MA point clouds still expose mesh modes");
                 if (expected_views<PipelineState::kMaxCaptures) { phase=12; ready_ticks=0; capture->click(); }
                 else {
                     require(!capture->isEnabled(), "Five-view capture limit was lost");
@@ -484,7 +512,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: D435 first FS mesh, 2–5 MA point clouds, retake, per-capture camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
+    std::cout<<"PASS: D435 first FS mesh, default FS points for 2–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
     return 0;
 }
 }

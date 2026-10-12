@@ -14,6 +14,8 @@
 #include <stdexcept>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
+#include <QPainter>
+#include <QPainterPath>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
@@ -242,6 +244,11 @@ void main() {
     }
     void paintGL() override {
         if (!gl_) return;
+        // QPainter's label overlay changes GL state between frames.
+        gl_->glEnable(GL_DEPTH_TEST);
+        gl_->glDepthMask(GL_TRUE);
+        gl_->glDisable(GL_BLEND);
+        gl_->glDisable(GL_SCISSOR_TEST);
         gl_->glClearColor(.067f, .11f, .17f, 1);
         gl_->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         if (!ready_ || failed_) return;
@@ -348,6 +355,7 @@ void main() {
             camera_vao_.release();
         }
         program_->release();
+        drawCameraLabels();
         if (announce_gpu_ && gpu_mesh_) {
             announce_gpu_=false;
             const auto error=gl_->glGetError();
@@ -643,11 +651,16 @@ void main() {
     }
     void uploadCamera() {
         // Camera frustums use a separate buffer from CUDA/OpenGL geometry.
+        camera_labels_.clear();
         const bool predicted=predicted_cameras_ && !predicted_cameras_->empty();
         const auto metadata = predicted ? std::nullopt : activeCamera();
         const cv::Vec3f center(center_.x(), center_.y(), center_.z());
+        const auto active=std::find_if(captured_clouds_.begin(),captured_clouds_.end(),
+            [&](const auto& frame) { return frame && frame->image_id==active_camera_id_; });
+        const int active_view=active==captured_clouds_.end() ? std::max(1,int(captured_clouds_.size()))
+            : int(active-captured_clouds_.begin())+1;
         auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_,
-                               cv::Matx44d::eye(),cameraColor(active_camera_id_),right_camera_visible_ ? 2 : 1);
+                               cv::Matx44d::eye(),cameraColor(active_camera_id_),right_camera_visible_ ? 2 : 1,active_view);
         camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
         const int base_highlight=active_camera_id_ && active_camera_id_==highlighted_camera_id_ ? camera_count_ : 0;
         highlight_first_=0; highlight_count_=0;
@@ -675,7 +688,7 @@ void main() {
                 auto& texture=predicted_textures_[i];
                 int count=0; float radius=0;
                 const auto predicted=cameraData(frame.camera,center,scale_,count,radius,
-                    frame.camera_to_world,cameraColor(frame.image_id),frame.image.isNull() ? 0 : 1);
+                    frame.camera_to_world,cameraColor(frame.image_id),frame.image.isNull() ? 0 : 1,int(i)+1);
                 if (frame.image_id && frame.image_id==highlighted_camera_id_) {
                     highlight_first_=int(lines.size()/6); highlight_count_=count;
                 }
@@ -690,12 +703,13 @@ void main() {
                 camera_radius_=std::max(camera_radius_,radius);
             }
         } else {
-            for (const auto& frame:captured_clouds_) {
+            for (std::size_t i=0;i<captured_clouds_.size();++i) {
+                const auto& frame=captured_clouds_[i];
                 if (!frame) continue;
                 if (metadata && frame->image_id==active_camera_id_) continue;
                 int count=0; float radius=0;
                 const auto captured=cameraData(frame->camera,center,scale_,count,radius,
-                    cv::Matx44d::eye(),cameraColor(frame->image_id),0);
+                    cv::Matx44d::eye(),cameraColor(frame->image_id),0,int(i)+1);
                 if (frame->image_id && frame->image_id==highlighted_camera_id_) {
                     highlight_first_=int(lines.size()/6); highlight_count_=count;
                 }
@@ -717,6 +731,33 @@ void main() {
     cv::Vec3f cameraColor(quint64 id) const {
         return id && id==highlighted_camera_id_ ? cv::Vec3f(.1f,1.f,.25f) : cv::Vec3f(.1f,.45f,1.f);
     }
+    void drawCameraLabels() {
+        if (camera_labels_.empty()) return;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QFont label_font=font(); label_font.setPixelSize(15); label_font.setWeight(QFont::DemiBold);
+        const QFontMetricsF metrics(label_font);
+        std::vector<QRectF> occupied;
+        for (const auto& label:camera_labels_) {
+            const auto clip=view_projection_*QVector4D(label.anchor,1);
+            if (!std::isfinite(clip.w()) || clip.w()<=0) continue;
+            const auto ndc=clip.toVector3DAffine();
+            if (!std::isfinite(ndc.x()) || !std::isfinite(ndc.y()) || !std::isfinite(ndc.z()) ||
+                ndc.z()<-1 || ndc.z()>1) continue;
+            const QPointF anchor((ndc.x()+1)*width()*.5,(1-ndc.y())*height()*.5);
+            const qreal text_width=metrics.horizontalAdvance(label.text);
+            QRectF rect(anchor.x()-text_width*.5-3,anchor.y()-metrics.height()-3,text_width+6,metrics.height()+6);
+            if (!rect.intersects(QRectF(this->rect()))) continue;
+            // Nearby/overlapping camera poses still need distinct view numbers.
+            while (std::any_of(occupied.begin(),occupied.end(),[&](const auto& other) { return rect.intersects(other); }))
+                rect.translate(0,-rect.height()-2);
+            occupied.push_back(rect);
+            QPainterPath text;
+            text.addText(QPointF(rect.left()+3,rect.top()+3+metrics.ascent()),label_font,label.text);
+            painter.strokePath(text,QPen(QColor(17,28,43),3,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+            painter.fillPath(text,label.color);
+        }
+    }
     void rememberCameraQuad(const std::vector<float>& data, int lines) {
         const int vertices[] = {0,1,2,5};
         for (int i=0;i<4;++i) {
@@ -727,7 +768,7 @@ void main() {
     std::vector<float> cameraData(const std::optional<fs::MeshCamera>& metadata, cv::Vec3f center, float scale,
                                   int& line_count, float& radius,
                                   const cv::Matx44d& pose = cv::Matx44d::eye(),
-                                  const cv::Vec3f& color = cv::Vec3f(.1f,.45f,1.f), int image_count = 1) {
+                                  const cv::Vec3f& color = cv::Vec3f(.1f,.45f,1.f), int image_count = 1, int view_number = 1) {
         std::vector<float> data;
         line_count = 0;
         radius = .87f; // Radius of the mesh's normalized bounding box.
@@ -781,11 +822,15 @@ void main() {
                 line(origin, tip);
                 line(tip, cv::Vec3f(-z * .12f, 0, z * 1.35f));
                 line(tip, cv::Vec3f(z * .12f, 0, z * 1.35f));
-                // Up marker distinguishes the image top from the bottom.
+                // Replace the triangular up marker with a screen-facing label
+                // anchored above the image plane. Use the capture slot, not ID,
+                // so retakes retain their view number.
                 const auto top = (corners[0] + corners[1]) * .5f;
                 const auto up = top + cv::Vec3f(0, -z * .2f, 0);
-                line(corners[0], up);
-                line(up, corners[1]);
+                const auto anchor=(to_world(up)-center)/scale;
+                radius=std::max(radius,float(cv::norm(anchor)));
+                camera_labels_.push_back({QVector3D(anchor[0],-anchor[1],-anchor[2]),
+                    QString("view %1").arg(view_number),QColor::fromRgbF(color[0],color[1],color[2])});
                 line_count = int(data.size() / 6);
                 if (!image_count) return data;
                 // QImage row zero is the image top. Upload unchanged and give
@@ -810,6 +855,8 @@ void main() {
     quint64 active_camera_id_{0}, highlighted_camera_id_{0}, hidden_image_id_{0};
     bool show_ma_clouds_{false};
     SharedPredictedCameras predicted_cameras_;
+    struct CameraLabel { QVector3D anchor; QString text; QColor color; };
+    std::vector<CameraLabel> camera_labels_;
     std::vector<CameraTexture> predicted_textures_;
     SharedGPUMesh hidden_capture_;
     std::vector<std::unique_ptr<CloudResource>> cloud_resources_;

@@ -226,7 +226,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(show_right_camera,&QCheckBox::toggled,this,[this](bool visible) {
         right_preview_->setVisible(visible); mesh_view_->setRightCameraVisible(visible);
     });
-    connect(ma_cloud_,&QRadioButton::toggled,this,[this] { refresh(); });
+    connect(ma_cloud_,&QRadioButton::toggled,this,[this](bool checked) {
+        ma_upload_pending_=checked && displayed_ma_clouds_ && !ma_cloud_valid_;
+        refresh();
+    });
     auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
@@ -354,8 +357,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             if (capture_mesh_requested_) {
                 capture_mesh_requested_=false;
                 setCaptureProcessing(false);
-                // Do not present the intermediate FS point cloud. Wait until
-                // the entire capture job (including FS meshing or MA inference) has finished.
+                // Wait for FS meshing on the first capture, or for the current
+                // MA camera poses before presenting multi-view FS points.
                 if (!state_.action_failed && state_.capture_count>=2 && state_.ma_clouds &&
                     state_.ma_clouds!=displayed_ma_clouds_) {
                     capture_transition_pending_=true;
@@ -637,7 +640,7 @@ void ReconstructionWindow::refresh() {
     capture_->setText(state_.capture_count>0 ? "Capture more" : "Capture pair");
     capture_->setToolTip(state_.live
         ? (state_.capture_count==0 ? "Capture this stereo pair and automatically display the FS GPU mesh."
-                                   : "Capture this stereo pair, update all MA point clouds and display them automatically.")
+                                   : "Capture this stereo pair and display FS point clouds at the updated MA camera poses. MA point clouds remain available.")
         : state_.capture_count>=PipelineState::kMaxCaptures
             ? "Five captures are complete. Retake the latest view or restart."
             : "Keep completed captures and preview the next view, then press again to capture it. Up to five pairs.");
@@ -795,19 +798,12 @@ void ReconstructionWindow::presentGeometry(SharedGPUMesh mesh) {
 void ReconstructionWindow::presentMAResult() {
     displayed_ma_clouds_=state_.ma_clouds;
     displayed_cameras_=state_.predicted_cameras;
-    if (pending_capture_cloud_) {
-        captured_clouds_.resize(state_.capture_count); captured_clouds_.back()=pending_capture_cloud_;
-        gpu_mesh_result_=pending_capture_cloud_; mesh_valid_=true;
-    }
-    gpu_upload_pending_=false;
-    ma_cloud_valid_=false; ma_upload_pending_=true;
+    ma_cloud_valid_=false; ma_upload_pending_=false;
     {
-        const QSignalBlocker fs_blocker(fs_cloud_), ma_blocker(ma_cloud_), mode_blocker(mesh_mode_);
-        ma_cloud_->setChecked(true); mesh_mode_->setCurrentIndex(0);
+        const QSignalBlocker fs_blocker(fs_cloud_), ma_blocker(ma_cloud_);
+        fs_cloud_->setChecked(true);
     }
-    mesh_view_->setGPUMesh({}); mesh_view_->setShowMAClouds(true); mesh_view_->setMode(0);
-    tabs_->setCurrentIndex(SceneTab);
-    refresh();
+    presentGeometry(pending_capture_cloud_ ? pending_capture_cloud_ : gpu_mesh_result_);
     // MA may change the world origin and every pose. Fit the completed snapshot
     // so the active camera and its transfer destination stay in view.
     mesh_view_->resetCaptureView();
