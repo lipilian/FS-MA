@@ -556,13 +556,13 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     reportProgress(65, "Computing valid XYZ on GPU…"); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint();
     if (denoise) {
-        reportProgress(75, "Filtering XYZ neighbours on GPU…");
-        fs_->denoise_xyz_map(max_neighbor_distance_m,3,2); checkpoint();
+        reportProgress(75, "Filtering 5 × 5 XYZ neighbours and normals on GPU…");
+        fs_->denoise_xyz_map(max_neighbor_distance_m,7,60.0F); checkpoint();
     }
     // Both XYZ and denoising APIs synchronize before returning.
     const double xyz_ms=elapsed.nsecsElapsed()/1e6;
     state_.gpu_ready = true;
-    emit log(denoise ? QString("Full-image XYZ + selected-region 3 × 3 denoising · %1 m · interior 3 / boundary up to 2 neighbours").arg(max_neighbor_distance_m)
+    emit log(denoise ? QString("Full-image XYZ + selected-region 5 × 5 denoising · at least 7 neighbours < %1 m · normal/view angle < 60°").arg(max_neighbor_distance_m)
                     : "Full-image XYZ · neighbourhood denoising disabled.");
     reportProgress(85, "Preparing depth display…"); elapsed.restart();
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();

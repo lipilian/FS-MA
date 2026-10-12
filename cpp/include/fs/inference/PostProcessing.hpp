@@ -30,16 +30,20 @@ cudaError_t compute_xyz_map(
     float min_depth_m, float max_depth_m,
     cudaStream_t stream) noexcept;
 
-/** Single 3x3 pass matching Python _local_xyz_denoise. Input/output must be distinct.
- * Nonzero selection pixels define interior/boundary independently of XYZ validity.
- * Null selection means the whole image; out-of-image neighbours are unselected.
+/** Single 5x5 pass. Input/output must be distinct; the centre is not a neighbour.
+ * Require min_neighbors selected, valid neighbours strictly closer than the 3D
+ * distance limit, including at image/mask boundaries. Fit a least-squares plane
+ * to those neighbours (smallest covariance eigenvector); reject undefined normals.
+ * The unsigned angle between its normal and the point-to-left-camera ray must be
+ * strictly below max_normal_angle_degrees. XYZ must be in the left-camera frame.
+ * Null selection means the whole image; out-of-image neighbours do not count.
  * Valid input points have finite XYZ and positive Z. Invalid/unsupported outputs
  * within the selection are zero; unselected XYZ is copied unchanged.
- * Only selected neighbours contribute. No allocations or synchronization. Distance must be finite/positive;
- * neighbour requirements must be positive. All input buffers remain unchanged.
+ * No allocations or synchronization. Distance must be finite/positive, neighbour
+ * count in [3,24], angle finite and in (0,90). All input buffers remain unchanged.
  */
 cudaError_t denoise_xyz_map(const float* xyz, float* output, const unsigned char* selection_mask,
                            int width, int height, float max_neighbor_distance_m,
-                           int min_neighbors, int edge_min_neighbors, cudaStream_t stream) noexcept;
+                           int min_neighbors, float max_normal_angle_degrees, cudaStream_t stream) noexcept;
 
 } // namespace fs::postprocessing

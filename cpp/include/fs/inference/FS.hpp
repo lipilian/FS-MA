@@ -78,15 +78,16 @@ public:
      */
     void set_selection_mask(const cv::Mat& rectified_mask);
 
-    /** One 3x3 XYZ denoising pass matching Python within the selection on FS's stream, then synchronize.
+    /** One 5x5 XYZ denoising pass within the selection on FS's stream, then synchronize.
      * XYZ outside the selection is copied unchanged; only selected neighbours count.
-     * Call compute_xyz_map first. Counts valid neighbours within the Euclidean
-     * distance limit; mask-interior points require min_neighbors, boundary points
-     * require max(1, min(selected_neighbour_count, edge_min_neighbors)).
+     * Call compute_xyz_map first. Require min_neighbors other valid points strictly
+     * within the Euclidean distance limit, also at image/mask boundaries. Fit their
+     * plane normal and require its unsigned angle to the point-to-left-camera ray
+     * strictly below max_normal_angle_degrees. Undefined normals are rejected.
      * Uses a separate preallocated output so removed points do not affect neighbours.
      */
-    void denoise_xyz_map(float max_neighbor_distance_m = 0.01F,
-                         int min_neighbors = 3, int edge_min_neighbors = 2);
+    void denoise_xyz_map(float max_neighbor_distance_m = 0.003F,
+                         int min_neighbors = 7, float max_normal_angle_degrees = 60.0F);
 
     /** Download the last computed XYZ map as an owned CV_32FC3 matrix (800 rows × 960 columns, metres).
      * Call compute_xyz_map first. Completes the transfer before returning.

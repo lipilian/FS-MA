@@ -63,9 +63,9 @@ public:
     const std::vector<CapturedStereoPair>& capturedPairs() const { return captures_; }
     void freeze();
     void captureAndReconstruct(float minimum, float maximum, bool denoise = true,
-                               float max_neighbor_distance_m = 0.01F);
+                               float max_neighbor_distance_m = 0.003F);
     void reconstruct(float minimum, float maximum, const QImage& selection_mask,
-                     bool denoise = true, float max_neighbor_distance_m = 0.01F);
+                     bool denoise = true, float max_neighbor_distance_m = 0.003F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
                  const std::shared_ptr<std::atomic_uint64_t>& current_request);
     // Triangle meshes are available only for single-view FS geometry.

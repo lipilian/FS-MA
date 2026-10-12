@@ -403,13 +403,13 @@ void FS::set_selection_mask(const cv::Mat& rectified_mask) {
                               cudaMemcpyHostToDevice,stream_),"failed to upload selection mask");
     synchronize(); selection_mask_ready_=true;
 }
-void FS::denoise_xyz_map(float max_neighbor_distance_m, int min_neighbors, int edge_min_neighbors) {
+void FS::denoise_xyz_map(float max_neighbor_distance_m, int min_neighbors, float max_normal_angle_degrees) {
     if (!isEngineLoaded() || !xyz_ready_ || !xyz_map_device_ || !xyz_scratch_device_)
         throw std::logic_error("loadEngine and compute_xyz_map must complete before denoising");
     xyz_ready_ = false;
     check_cuda(fs::postprocessing::denoise_xyz_map(
         xyz_map_device_.get(),xyz_scratch_device_.get(),selection_mask_ready_ ? selection_mask_device_.get() : nullptr,
-        kTensorRtInputWidth,kTensorRtInputHeight,max_neighbor_distance_m,min_neighbors,edge_min_neighbors,stream_),
+        kTensorRtInputWidth,kTensorRtInputHeight,max_neighbor_distance_m,min_neighbors,max_normal_angle_degrees,stream_),
         "failed to launch XYZ denoising");
     synchronize(); xyz_map_device_.swap(xyz_scratch_device_);
     xyz_ready_ = true;

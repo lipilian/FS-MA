@@ -163,8 +163,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     layout->addWidget(label("Applied to full-image XYZ.")); settings_layout->addWidget(depth);
     auto* filters = group("Geometry", layout);
     geometry_panel_ = filters;
-    denoise_ = new QCheckBox("3 × 3 neighbour filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
-    neighbor_distance_ = decimal(0.01,0.001,1," m"); neighbor_distance_->setObjectName("neighborDistance"); neighbor_distance_->setSingleStep(0.001);
+    denoise_ = new QCheckBox("5 × 5 neighbour + normal filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
+    denoise_->setToolTip("Keep points with at least 7 neighbours strictly within the distance limit and a fitted normal less than 60° from the viewing ray. The same rules apply at boundaries.");
+    neighbor_distance_ = decimal(0.003,0.001,1," m"); neighbor_distance_->setObjectName("neighborDistance"); neighbor_distance_->setSingleStep(0.001);
     auto* neighbor_form=new QFormLayout; neighbor_form->addRow("Neighbour distance",neighbor_distance_); layout->addLayout(neighbor_form);
     mesh_edge_=decimal(.01,.001,1," m");
     mesh_edge_->setObjectName("meshMaxEdge");
