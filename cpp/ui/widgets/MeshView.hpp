@@ -20,7 +20,6 @@ class MeshView : public QWidget {
     // A generated GPU mesh can temporarily replace its capture's points.
     void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden = {});
     void setMAClouds(SharedGPUClouds clouds);
-    void setMAMeshes(SharedGPUMeshes meshes);
     void setShowMAClouds(bool enabled);
     void setPredictedCameras(SharedPredictedCameras cameras);
     void setMode(int mode);
@@ -39,11 +38,11 @@ class MeshView : public QWidget {
 
   signals:
     void gpuMeshPresented(SharedGPUMesh mesh);
-    void maMeshesPresented(SharedGPUMeshes meshes);
+    void maCloudsPresented(SharedGPUClouds clouds);
     void renderFailed(QString message);
     void log(QString message);
 
   private:
     MeshCanvas *canvas_{};
-    SharedGPUMeshes offscreen_ma_meshes_;
+    SharedGPUClouds offscreen_ma_clouds_;
 };

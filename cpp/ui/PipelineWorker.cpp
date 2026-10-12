@@ -193,7 +193,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
                                 const QString& ma_engine) {
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset(); state_.ma_meshes.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release();
     state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
     ma_.reset(); fs_.reset(); sam_.reset(); gpu_mesh_.reset();
@@ -333,7 +333,7 @@ void PipelineWorker::importCapture(const QString& directory, bool use_capture_ca
     // A successfully imported input starts a new capture sequence. Failed imports
     // leave the existing sequence intact.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset(); state_.ma_meshes.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     if (ma_) ma_->resetInputs();
 }
 void PipelineWorker::connectCameras(CameraMode mode) {
@@ -407,7 +407,7 @@ void PipelineWorker::startCapturePreview(bool append) {
     if (append) capture_slot_=int(captures_.size());
     else if (clear_single_view) {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
-        state_.predicted_cameras.reset(); state_.ma_clouds.reset(); state_.ma_meshes.reset();
+        state_.predicted_cameras.reset(); state_.ma_clouds.reset();
         if (ma_) ma_->resetInputs();
         state_.gpu_ready=false; state_.depth_ready=false;
         latest_gpu_mesh_.reset(); gpu_mesh_.reset(); depth_.release();
@@ -421,7 +421,7 @@ void PipelineWorker::startCapturePreview(bool append) {
 void PipelineWorker::cleanCaptures() {
     setLive(true); // Check the live source before discarding the current sequence.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset(); state_.ma_meshes.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     frame_.reset(); state_.image_camera.reset();
     state_.has_rectified=false; state_.gpu_ready=false; state_.depth_ready=false;
     latest_gpu_mesh_.reset(); gpu_mesh_.reset(); depth_.release();
@@ -628,17 +628,15 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
             checkpoint();
         }
         checkpoint();
-        const auto meshes=buildMAMeshes(clouds);
         // Publish complete immutable geometry and matching poses together. A failed
         // inference/build leaves the previous MA scene available during retakes.
         state_.ma_clouds = std::move(clouds);
-        state_.ma_meshes = meshes;
         state_.predicted_cameras = std::move(cameras);
         emit log(QString("MA GPU point clouds: %1 valid points · predicted rays/depth/scale decoded on device · XYZ/RGB stay on GPU")
             .arg(point_count));
         emit log(QString("MA poses ready · %1 views with 518 × 434 image textures · predicted camera-to-world poses in metres")
             .arg(views));
-        state_.status = QString("Capture complete · MA GPU meshes ready for %1 views.").arg(views);
+        state_.status = QString("Capture complete · MA GPU point clouds ready for %1 views.").arg(views);
         publish();
     } else {
         emit log("MA input ready for view 1 · inference starts at 2 views.");
@@ -678,35 +676,11 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
 }
-SharedGPUMeshes PipelineWorker::buildMAMeshes(const SharedGPUClouds& clouds, double max_edge_m) {
-    if (!clouds || clouds->empty()) throw std::runtime_error("No MA point clouds available for meshing.");
-    auto meshes=std::make_shared<std::vector<SharedGPUMesh>>();
-    unsigned long long triangles=0;
-    QElapsedTimer elapsed; elapsed.start();
-    for (const auto& cloud:*clouds) {
-        checkpoint();
-        auto buffer=std::make_shared<fs::MeshGPUBuffer>();
-        auto mesh=std::make_shared<GPUMeshFrame>(*cloud);
-        mesh->stats=fs::build_mesh_from_point_cloud_gpu(*cloud->buffer,cloud->camera.image_size.width,
-            cloud->camera.image_size.height,*buffer,cloud->stream,max_edge_m);
-        mesh->buffer=std::move(buffer); mesh->point_cloud=false;
-        triangles+=mesh->stats.triangle_count;
-        meshes->push_back(std::move(mesh));
-    }
-    if (!triangles) throw std::runtime_error("MA meshes have no valid triangles after edge filtering.");
-    emit log(QString("MA GPU meshes: %1 views · %2 triangles · %3 ms · predicted XYZ/RGB stay on GPU · max edge %4 mm")
-        .arg(meshes->size()).arg(triangles).arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(max_edge_m*1000));
-    return meshes;
-}
 void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_m) {
     if (!state_.depth_ready || !state_.gpu_ready || state_.live || !frame_ || !fs_ || !fs_->isEngineLoaded())
         throw std::runtime_error("Reconstruct depth before preparing a GPU mesh.");
-    if (captures_.size()>=2) {
-        reportProgress(97,"Building MA meshes on GPU…");
-        state_.ma_meshes=buildMAMeshes(state_.ma_clouds);
-        state_.status="MA GPU meshes ready."; publish();
-        return;
-    }
+    if (captures_.size()>=2)
+        throw std::runtime_error("Triangle meshes are available only for single-view FS geometry. Multi-view results use point clouds.");
     if (!selection_mask.isNull() && (selection_mask.width() != frame_->rectified_left().cols ||
         selection_mask.height() != frame_->rectified_left().rows))
         throw std::invalid_argument("GPU mesh requires an aligned rectified-left mask.");
@@ -744,7 +718,7 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
     publish(); emit log(state_.status); emit gpuMeshReady(std::move(mesh));
 }
 void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOptions options,
-                                 const QImage& selection, SharedGPUMesh gpu_mesh, bool overwrite, SharedGPUMeshes ma_geometry) {
+                                 const QImage& selection, SharedGPUMesh gpu_mesh, bool overwrite, SharedGPUClouds ma_geometry) {
     if (!frame_ || state_.live) throw std::runtime_error("Capture or import a frozen pair before saving.");
     if (!options.images && !options.calibration && !options.mask && !options.mesh && !options.depth)
         throw std::runtime_error("Select at least one item to save.");
@@ -761,7 +735,7 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
         const bool current_gpu=gpu_mesh && gpu_mesh==latest_gpu_mesh_.lock() &&
             (gpu_mesh->point_cloud ? gpu_mesh->stats.point_count : gpu_mesh->stats.triangle_count);
         const bool current_ma=ma_geometry && !ma_geometry->empty() && state_.predicted_cameras &&
-            (ma_geometry==state_.ma_meshes || ma_geometry==state_.ma_clouds);
+            ma_geometry==state_.ma_clouds;
         if (!state_.depth_ready || (ma_geometry ? !current_ma : !current_gpu))
             throw std::runtime_error("Generate the current displayed mesh before saving it.");
     }
@@ -894,7 +868,7 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
 }
 void PipelineWorker::shutdown() {
     disconnectCameras(); captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset(); state_.ma_meshes.reset();
+    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     latest_gpu_mesh_.reset(); gpu_mesh_.reset(); ma_.reset(); state_.ma_ready = false;
     sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }

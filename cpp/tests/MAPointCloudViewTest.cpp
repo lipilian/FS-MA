@@ -117,40 +117,39 @@ int main(int argc, char** argv) {
         view.setMAClouds({}); view.setCapturedClouds({}); view.setGPUMesh({}); view.setPredictedCameras({});
         view.setShowMAClouds(false);
         require(snapshot()==no_points,"Clean retained point-cloud geometry");
-        // Render five MA meshes at distinct poses, with negative world-space Z.
-        // The red FS source must disappear while MA triangles are selected.
-        auto surface=std::make_shared<GPUMeshFrame>(*ma);
-        auto mesh_buffer=std::make_shared<fs::MeshGPUBuffer>();
-        // This rendering fixture uses 6 mm spacing, independent of MA's production limit.
-        surface->stats=fs::build_mesh_from_point_cloud_gpu(*ma->buffer,31,23,*mesh_buffer,ma->stream,.01);
-        surface->buffer=mesh_buffer; surface->point_cloud=false;
-        auto surfaces=std::make_shared<std::vector<SharedGPUMesh>>();
-        auto mesh_poses=std::make_shared<std::vector<PredictedCameraFrame>>();
-        auto mesh_clouds=std::make_shared<std::vector<SharedGPUMesh>>();
+        // Render five MA clouds at distinct poses, with negative world-space Z.
+        // Mesh/wireframe requests must keep MA in point-cloud mode.
+        auto cloud_poses=std::make_shared<std::vector<PredictedCameraFrame>>();
+        auto multi_clouds=std::make_shared<std::vector<SharedGPUMesh>>();
         for (int i=0;i<5;++i) {
-            auto part=std::make_shared<GPUMeshFrame>(*surface); part->image_id=i+1; surfaces->push_back(part);
-            auto points=std::make_shared<GPUMeshFrame>(*ma); points->image_id=i+1; mesh_clouds->push_back(points);
+            auto points=std::make_shared<GPUMeshFrame>(*ma); points->image_id=i+1; multi_clouds->push_back(points);
             auto pose=cv::Matx44d::eye(); pose(0,3)=i*.25; pose(2,3)=-.5;
-            mesh_poses->push_back({{},pose,quint64(i+1),{}});
+            cloud_poses->push_back({{},pose,quint64(i+1),{}});
         }
-        int presented_meshes=0;
-        QObject::connect(&view,&MeshView::maMeshesPresented,[&](SharedGPUMeshes result) {
-            require(result==surfaces,"Renderer presented an outdated MA mesh snapshot"); ++presented_meshes;
+        int presented_clouds=0;
+        QObject::connect(&view,&MeshView::maCloudsPresented,[&](SharedGPUClouds result) {
+            require(result==multi_clouds,"Renderer presented an outdated MA point-cloud snapshot"); ++presented_clouds;
         });
-        view.setCapturedClouds({fs}); view.setMAClouds(mesh_clouds); view.setMAMeshes(surfaces);
-        view.setPredictedCameras(mesh_poses); view.setShowMAClouds(true); view.setMode(1); view.resetView();
-        const auto mesh_image=snapshot();
-        require(presented_meshes==1 && pixels(mesh_image,false)>500 && pixels(mesh_image,true)==0,
-                "MA meshes were not presented, lost negative world Z, or overlapped FS geometry");
-        view.setMode(2); const auto wire=snapshot(); require(wire!=mesh_image,"MA wireframe rendered filled triangles");
-        view.setMode(0); require(snapshot()!=mesh_image,"MA point-cloud mode still draws mesh surfaces");
-        auto updated_poses=std::make_shared<std::vector<PredictedCameraFrame>>(*mesh_poses);
+        const int uploads_before=uploads;
+        view.setCapturedClouds({fs}); view.setMAClouds(multi_clouds);
+        view.setPredictedCameras(cloud_poses); view.setShowMAClouds(true); view.setMode(0); view.resetView();
+        const auto cloud_image=snapshot();
+        require(presented_clouds==1 && pixels(cloud_image,false)>500 && pixels(cloud_image,true)==0,
+                "MA clouds were not presented, lost negative world Z, or overlapped FS geometry");
+        require(uploads==uploads_before+6,"Five MA clouds and one FS cloud should upload without extra mesh buffers");
+        for (int mode : {1,2,0}) {
+            view.setMode(mode);
+            require(snapshot()==cloud_image,"A mesh/wireframe request changed MA point-cloud rendering");
+        }
+        view.setMAClouds(multi_clouds); snapshot();
+        require(presented_clouds==1 && uploads==uploads_before+6,"Unchanged MA clouds were reuploaded or announced again");
+        auto updated_poses=std::make_shared<std::vector<PredictedCameraFrame>>(*cloud_poses);
         updated_poses->back().camera_to_world(1,3)=.2;
         view.setPredictedCameras(updated_poses); view.setMode(1);
-        require(snapshot()!=mesh_image,"MA mesh ignored an updated camera pose");
-        view.setMAClouds({}); view.setMAMeshes({}); view.setCapturedClouds({}); view.setPredictedCameras({});
+        require(snapshot()!=cloud_image,"MA point cloud ignored an updated camera pose");
+        view.setMAClouds({}); view.setCapturedClouds({}); view.setPredictedCameras({});
         view.setShowMAClouds(false);
-        require(snapshot()==no_points,"Clean retained MA mesh geometry");
+        require(snapshot()==no_points,"Clean retained MA point-cloud geometry");
         // Compare the animation destination against actual textured GL pixels,
         // including the top/bottom orientation, perspective and a resized view.
         view.setCamera(fs::MeshCamera{cv::Matx33d(240,0,120,0,255,85,0,0,1),{320,240}});
@@ -213,7 +212,7 @@ int main(int argc, char** argv) {
                 "Clean retained camera highlighting");
         std::cout<<"PASS: CUDA/OpenGL uploads, exclusive FS/MA rendering, stable view/poses, cached switches, retake, empty clouds and clean\n";
         std::cout<<"PASS: projected camera corners match textured GL pixels, perspective, orientation and resizing\n";
-        std::cout<<"PASS: five MA meshes, negative world Z, exclusive source/mode rendering, pose updates and green/blue camera selection\n";
+        std::cout<<"PASS: five MA point clouds, point-only modes, presentation notifications, negative world Z, pose updates and green/blue camera selection\n";
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
     }

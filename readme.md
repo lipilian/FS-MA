@@ -20,6 +20,11 @@ to reconstruct, then **Capture more** for up to five views. If the camera is not
 connected at startup, attach it and click **Connect cameras**. A model load failure
 keeps the loading window open so engine paths can be corrected and retried.
 
+The first capture displays an FS triangle mesh. From the second capture onward,
+MapAnything predicts camera poses and displays each view as a point cloud; MA
+triangle meshes are not computed. MA results export as a world-space point-cloud
+PLY without faces. FS point clouds remain available through the source selector.
+
 The scan workspace uses fixed depth and geometry defaults and a full-width view.
 Captures, imported pairs and confirmed or cleared regions reconstruct automatically.
 Use **Save results…** in the bottom-right corner to export; region drawing tools are inside

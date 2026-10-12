@@ -41,7 +41,6 @@ struct PipelineState {
     std::optional<fs::MeshCamera> live_camera, image_camera;
     SharedPredictedCameras predicted_cameras;
     SharedGPUClouds ma_clouds;
-    SharedGPUMeshes ma_meshes;
 };
 Q_DECLARE_METATYPE(PipelineState)
 
@@ -69,11 +68,11 @@ public:
                      bool denoise = true, float max_neighbor_distance_m = 0.01F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
                  const std::shared_ptr<std::atomic_uint64_t>& current_request);
-    // max_edge_m controls FS meshes; MA meshes use their own 3 mm limit.
+    // Triangle meshes are available only for single-view FS geometry.
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,
-                     SharedGPUMeshes ma_geometry = {});
+                     SharedGPUClouds ma_geometry = {});
     void shutdown();
 signals:
     void stateChanged(PipelineState state);
@@ -93,7 +92,6 @@ private:
     void checkpoint() const;
     void reportProgress(int percent, const QString& stage);
     void buildPointCloud(const cv::Mat& selection);
-    SharedGPUMeshes buildMAMeshes(const SharedGPUClouds& clouds, double max_edge_m = .003);
     void retainCapture(SharedGPUMesh point_cloud);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
                  QString calibration_filename, QByteArray calibration_json);

@@ -53,9 +53,8 @@ private:
     bool capture_mesh_requested_{false}, capture_transition_pending_{false};
     SharedGPUMesh pending_capture_cloud_, pending_capture_mesh_;
     SharedGPUClouds displayed_ma_clouds_;
-    SharedGPUMeshes displayed_ma_meshes_;
     SharedPredictedCameras displayed_cameras_;
-    bool ma_mesh_valid_{false}, ma_upload_pending_{false};
+    bool ma_cloud_valid_{false}, ma_upload_pending_{false};
     quint64 highlighted_camera_id_{0}, transition_camera_id_{0};
     QString render_error_;
     bool busy_{false}, closing_{false}, allow_close_{false};
