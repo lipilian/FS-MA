@@ -217,7 +217,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     scene_status_=label("Connect cameras to preview on the left, or import a capture.");
     scene_status_->setObjectName("meshStatus"); scene_layout->addWidget(scene_status_);
     depth_status_ = label(""); depth_status_->setObjectName("depthRange"); scene_layout->addWidget(depth_status_);
-    scene_layout->addWidget(label("Left drag: rotate · Right drag: pan · Wheel: zoom"));
+    scene_layout->addWidget(label("Click camera / view label: show image · Left drag: rotate · Right drag: pan · Wheel: zoom"));
     tabs_->addTab(scene,"3D workspace");
     tabs_->setTabToolTip(SceneTab,"Image preview on the left; captured point clouds and mesh on the right.");
     connect(camera_image_mode_,&QComboBox::currentIndexChanged,this,[this] { showImages(); });
@@ -332,8 +332,11 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::stateChanged,this,[this](PipelineState state) {
         const bool just_connected = state.connected && !state_.connected;
         const bool clean_preview = state.live && !state.has_rectified && state.image_id!=state_.image_id;
-        if (state.live || state.image_id != state_.image_id) reconstruction_valid_ = false;
-        if (state.capture_count==0) captured_clouds_.clear();
+        if (state.live || state.image_id != state_.image_id) {
+            reconstruction_valid_ = false;
+            preview_camera_id_=0;
+        }
+        if (state.capture_count==0) { captured_clouds_.clear(); capture_previews_.clear(); }
         state_ = std::move(state);
         if (clean_preview) {
             cancelCapturePresentation();
@@ -397,12 +400,25 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     });
     connect(&controller_,&PipelineController::gpuMeshReady,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_) return;
+        if (mesh->point_cloud && mesh->image_id==state_.image_id)
+            capture_previews_.insert(mesh->image_id,{rectified_left_,rectified_right_,depth_image_,depth_description_});
         if (capture_mesh_requested_) {
             if (mesh->point_cloud) pending_capture_cloud_=std::move(mesh);
             else pending_capture_mesh_=std::move(mesh);
             return;
         }
         presentGeometry(std::move(mesh));
+    });
+    connect(mesh_view_,&MeshView::cameraClicked,this,[this](quint64 image_id) {
+        if (busy_ || closing_ || state_.live || capture_processing_ || capture_transition_pending_ ||
+            capture_transition_->isRunning() || !displayed_cameras_ || displayed_cameras_->size()<2 ||
+            !capture_previews_.contains(image_id)) return;
+        if (std::none_of(displayed_cameras_->begin(),displayed_cameras_->end(),
+            [=](const auto& camera) { return camera.image_id==image_id; })) return;
+        preview_camera_id_=image_id;
+        const QSignalBlocker blocker(camera_image_mode_);
+        camera_image_mode_->setCurrentIndex(0);
+        showImages();
     });
     connect(mesh_view_,&MeshView::gpuMeshPresented,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_ || mesh!=gpu_mesh_result_) return;
@@ -431,8 +447,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (closing_) return;
         reconstruction_valid_=true;
         depth_image_ = std::move(depth);
-        depth_status_->setText(QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid, out of range or filtered")
-            .arg(minimum,0,'f',3).arg(maximum,0,'f',3));
+        depth_description_=QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid, out of range or filtered")
+            .arg(minimum,0,'f',3).arg(maximum,0,'f',3);
         refresh();
         tabs_->setCurrentIndex(SceneTab);
     });
@@ -756,9 +772,18 @@ void ReconstructionWindow::refreshWorkspace() {
 }
 void ReconstructionWindow::showImages() {
     const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
-    mesh_view_->setCameraPresentation(state_.image_id,highlighted_camera_id_,transferring ? transition_camera_id_ : 0);
+    const auto selected=capture_previews_.constFind(preview_camera_id_);
+    const bool reviewing=!state_.live && !capture_processing_ && !transferring && selected!=capture_previews_.cend();
+    const auto& left=reviewing ? selected->left : rectified_left_;
+    const auto& right=reviewing ? selected->right : rectified_right_;
+    const auto& depth=reviewing ? selected->depth : depth_image_;
+    mesh_view_->setCameraPresentation(reviewing ? preview_camera_id_ : state_.image_id,
+        reviewing ? preview_camera_id_ : highlighted_camera_id_,transferring ? transition_camera_id_ : 0);
+    mesh_view_->setCameraInteractionEnabled(!busy_ && !closing_ && !state_.live && !capture_processing_ &&
+        !transferring && displayed_cameras_ && displayed_cameras_->size()>=2);
     camera_image_mode_->setEnabled(!capture_processing_ && !transferring);
-    const bool depth_available = !state_.live && !capture_processing_ && !transferring && reconstruction_valid_ && state_.depth_ready && !depth_image_.isNull();
+    const bool depth_available = !state_.live && !capture_processing_ && !transferring &&
+        (reviewing || (reconstruction_valid_ && state_.depth_ready)) && !depth.isNull();
     static_cast<QStandardItemModel*>(camera_image_mode_->model())->item(1)->setEnabled(depth_available);
     if (!depth_available && camera_image_mode_->currentIndex()==1) {
         const QSignalBlocker blocker(camera_image_mode_);
@@ -766,19 +791,21 @@ void ReconstructionWindow::showImages() {
     }
     const bool show_depth = depth_available && camera_image_mode_->currentIndex()==1;
     if (!capture_processing_) {
-        preview_->setImage(show_depth ? depth_image_ : state_.live ? live_left_ : rectified_left_);
-        right_preview_->setImage(state_.live ? live_right_ : rectified_right_);
+        preview_->setImage(show_depth ? depth : state_.live ? live_left_ : left);
+        right_preview_->setImage(state_.live ? live_right_ : right);
     }
     // The transfer lands on this camera's image plane. Keep its wireframe visible
     // with the mesh, and show the actual texture only after the overlay arrives.
     const bool captured = !state_.live && state_.has_rectified && !capture_processing_;
     mesh_view_->setCamera(captured ? state_.image_camera : std::nullopt);
-    mesh_view_->setCameraImage(captured && !transferring ? (show_depth ? depth_image_ : rectified_left_) : QImage{});
-    mesh_view_->setRightCameraImage(captured ? rectified_right_ : QImage{});
+    mesh_view_->setCameraImage(captured && !transferring ? (show_depth ? depth : left) : QImage{});
+    mesh_view_->setRightCameraImage(captured ? right : QImage{});
+    depth_status_->setText(reviewing ? selected->depth_description : depth_description_);
     depth_status_->setVisible(show_depth);
 }
 void ReconstructionWindow::setCaptureProcessing(bool processing) {
     capture_processing_=processing;
+    if (processing) preview_camera_id_=0;
     preview_->setProcessing(processing);
     right_preview_->setProcessing(processing);
 }
@@ -788,6 +815,13 @@ void ReconstructionWindow::presentGeometry(SharedGPUMesh mesh) {
     if (gpu_mesh_result_->point_cloud && state_.capture_count>0) {
         captured_clouds_.resize(state_.capture_count);
         captured_clouds_.back()=gpu_mesh_result_;
+    }
+    // QImages share their existing owned storage. Keep only completed slots,
+    // dropping the previous image of a retaken view.
+    for (auto it=capture_previews_.begin();it!=capture_previews_.end();) {
+        if (std::none_of(captured_clouds_.begin(),captured_clouds_.end(),
+            [&](const auto& cloud) { return cloud && cloud->image_id==it.key(); })) it=capture_previews_.erase(it);
+        else ++it;
     }
     mesh_mode_->setCurrentIndex(gpu_mesh_result_->point_cloud ? 0 : 1);
     tabs_->setCurrentIndex(SceneTab);

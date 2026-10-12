@@ -2,6 +2,7 @@
 #include "PipelineController.hpp"
 #include <QMainWindow>
 #include <QElapsedTimer>
+#include <QHash>
 #include <array>
 class QPushButton;
 class QLabel;
@@ -56,6 +57,10 @@ private:
     SharedPredictedCameras displayed_cameras_;
     bool ma_cloud_valid_{false}, ma_upload_pending_{false};
     quint64 highlighted_camera_id_{0}, transition_camera_id_{0};
+    struct CapturePreview { QImage left, right, depth; QString depth_description; };
+    QHash<quint64,CapturePreview> capture_previews_;
+    quint64 preview_camera_id_{0};
+    QString depth_description_;
     QString render_error_;
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;

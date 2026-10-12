@@ -183,6 +183,31 @@ int checkLiveScan(QApplication& app) {
     require(point_export.isValid() && mesh_export.isValid() && ma_export.isValid(), "Cannot create export test directories");
     SharedGPUMesh exported_geometry;
     SharedGPUClouds latest_ma_clouds;
+    QHash<quint64,QImage> captured_left, captured_right;
+    std::vector<quint64> preview_ids;
+    quint64 replaced_view_id=0;
+    const auto check_previews=[&] {
+        auto* view=window->findChild<MeshView*>();
+        auto* left=window->findChild<StereoImageView*>("capturePreview");
+        auto* right=window->findChild<StereoImageView*>("rightCapturePreview");
+        auto* mode=window->findChild<QComboBox*>("cameraImageMode");
+        // Renderer picking is exercised in MAPointCloudViewTest. Here verify
+        // the receiver against the full-resolution images seen at capture time.
+        for (const auto id:preview_ids) {
+            view->cameraClicked(id);
+            require(mode->currentIndex()==0 && left->image()==captured_left.value(id) &&
+                    right->image()==captured_right.value(id), "Camera click did not restore its original stereo pair");
+            mode->setCurrentIndex(1);
+            require(mode->currentIndex()==1 && left->image().size()==captured_left.value(id).size() &&
+                    left->image()!=captured_left.value(id), "Selected view did not retain its own depth preview");
+        }
+        view->cameraClicked(preview_ids.back());
+        if (replaced_view_id) {
+            const auto before=left->image();
+            view->cameraClicked(replaced_view_id);
+            require(left->image()==before,"Retaken camera still exposes the replaced image");
+        }
+    };
     const auto screenshot=[&](const QString& name) {
         const auto directory=qEnvironmentVariable("FS_SCAN_TEST_SCREENSHOTS");
         if (!directory.isEmpty() && window) {
@@ -271,6 +296,13 @@ int checkLiveScan(QApplication& app) {
                     });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
                         if (finished || !mesh) return;
+                        captured_left.insert(mesh->image_id,window->findChild<StereoImageView*>("capturePreview")->image());
+                        captured_right.insert(mesh->image_id,window->findChild<StereoImageView*>("rightCapturePreview")->image());
+                        preview_ids.resize(captured_views());
+                        if (!preview_ids.empty()) {
+                            if (preview_ids.back() && preview_ids.back()!=mesh->image_id) replaced_view_id=preview_ids.back();
+                            preview_ids.back()=mesh->image_id;
+                        }
                         if (phase>=7) {
                             try {
                                 require((phase==8 || phase==10 || phase==13) && mesh->point_cloud && mesh->stats.point_count,
@@ -429,6 +461,7 @@ int checkLiveScan(QApplication& app) {
                 require(window->findChild<QRadioButton*>("fsPointCloud")->isChecked(), "Capture/retake must default to FS even after viewing MA");
                 require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Current camera did not turn green after landing");
                 screenshot(QString("fs-landed-%1").arg(fs_captures));
+                check_previews();
                 phase=phase==8 ? 15 : 16;
                 window->findChild<QRadioButton*>("maPointCloud")->click();
                 return;
@@ -436,6 +469,7 @@ int checkLiveScan(QApplication& app) {
             if ((phase==15 || phase==16) && retake->isEnabled() && ma_presented==fs_captures) {
                 require(window->findChild<QRadioButton*>("maPointCloud")->isChecked(), "Manual MA selection was not retained");
                 require(!window->findChild<QComboBox*>("meshMode")->isEnabled(), "MA point clouds still expose mesh modes");
+                check_previews();
                 if (phase==15) { phase=9; ready_ticks=0; retake->click(); }
                 else { phase=12; ready_ticks=0; capture->click(); }
                 return;
@@ -451,6 +485,7 @@ int checkLiveScan(QApplication& app) {
                         "Additional capture did not default to FS point clouds");
                 require(landed==fs_captures+1,"Additional capture skipped its landing animation");
                 require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Additional capture lost the green current camera");
+                check_previews();
                 phase=17; window->findChild<QRadioButton*>("maPointCloud")->click();
                 return;
             }
@@ -458,6 +493,7 @@ int checkLiveScan(QApplication& app) {
                 require(latest_ma_clouds && latest_ma_clouds->size()==size_t(expected_views),
                         "Manual MA selection did not display all current views");
                 require(!window->findChild<QComboBox*>("meshMode")->isEnabled(), "MA point clouds still expose mesh modes");
+                check_previews();
                 if (expected_views<PipelineState::kMaxCaptures) { phase=12; ready_ticks=0; capture->click(); }
                 else {
                     require(!capture->isEnabled(), "Five-view capture limit was lost");
@@ -485,6 +521,9 @@ int checkLiveScan(QApplication& app) {
                 require(!window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Restart retained MA geometry");
                 require(!preview->isProcessing(), "Restart retained the processing animation");
                 require(!hasSceneContent(window->findChild<QOpenGLWidget*>()), "Restart retained geometry or projected the live preview in 3D");
+                const auto live_image=preview->image();
+                window->findChild<MeshView*>()->cameraClicked(preview_ids.front());
+                require(preview->image()==live_image,"Restart retained a selectable captured preview");
                 finish({}); return;
             }
             const bool connected=camera->isEnabled() && camera->text()=="Disconnect cameras" && capture->isEnabled();
@@ -513,6 +552,7 @@ int checkLiveScan(QApplication& app) {
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
     std::cout<<"PASS: D435 first FS mesh, default FS points for 2–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
+    std::cout<<"PASS: camera selection restores each original stereo pair and depth in FS/MA modes, replaces retaken images and clears on restart\n";
     return 0;
 }
 }

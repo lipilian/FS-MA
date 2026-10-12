@@ -32,11 +32,13 @@ class MeshView : public QWidget {
     void setCameraImage(QImage image);
     void setRightCameraImage(QImage image);
     void setCameraPresentation(quint64 active_id, quint64 highlighted_id, quint64 hidden_image_id = 0);
+    void setCameraInteractionEnabled(bool enabled);
     // Clockwise image corners in logical widget pixels, from the last GL frame.
     // Empty when the active camera has no visible image plane.
     QPolygonF cameraImageQuad() const;
 
   signals:
+    void cameraClicked(quint64 image_id);
     void gpuMeshPresented(SharedGPUMesh mesh);
     void maCloudsPresented(SharedGPUClouds clouds);
     void renderFailed(QString message);

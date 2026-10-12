@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QEventLoop>
 #include <QOpenGLWidget>
+#include <QMouseEvent>
 #include <QTimer>
 #include <QTransform>
 #include <cmath>
@@ -210,9 +211,144 @@ int main(int argc, char** argv) {
         const auto cleared=snapshot();
         require(color_count(cleared,true)==0 && color_count(cleared,false)==0 && view.cameraImageQuad().isEmpty(),
                 "Clean retained camera highlighting");
+        // Pick using the rendered image planes, independent of FS/MA selection.
+        auto* canvas=view.findChild<QOpenGLWidget*>();
+        const auto mouse=[&](QEvent::Type type,QPointF point,Qt::MouseButton button,Qt::MouseButtons buttons) {
+            QMouseEvent event(type,point,canvas->mapToGlobal(point.toPoint()),button,buttons,Qt::NoModifier);
+            QApplication::sendEvent(canvas,&event);
+        };
+        const auto hover=[&](QPointF point) { mouse(QEvent::MouseMove,point,Qt::NoButton,Qt::NoButton); };
+        const auto click=[&](QPointF point) {
+            mouse(QEvent::MouseButtonPress,point,Qt::LeftButton,Qt::LeftButton);
+            mouse(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton);
+        };
+        const auto purple_count=[](const QImage& frame) {
+            int count=0;
+            for (int y=0;y<frame.height();++y) for (int x=0;x<frame.width();++x) {
+                const auto p=frame.pixelColor(x,y);
+                if (p.red()>150 && p.red()<180 && p.green()>60 && p.green()<95 && p.blue()>240) ++count;
+            }
+            return count;
+        };
+        std::vector<quint64> clicked;
+        QObject::connect(&view,&MeshView::cameraClicked,[&](quint64 id) { clicked.push_back(id); });
+        auto five=std::make_shared<std::vector<PredictedCameraFrame>>();
+        for (int i=0;i<5;++i) {
+            auto pose=cv::Matx44d::eye(); pose(0,3)=(i%3-1)*.15; pose(1,3)=(i/3)*.15;
+            five->push_back({camera,pose,quint64(i+1),dark});
+        }
+        view.setPredictedCameras(five); view.resetCaptureView();
+        std::vector<QPointF> centers;
+        for (quint64 id=1;id<=5;++id) {
+            view.setCameraPresentation(id,id); snapshot();
+            const auto quad=view.cameraImageQuad();
+            require(quad.size()==4,"Five-view camera projection missing");
+            QPointF center;
+            for (const auto& corner:quad) center+=corner*.25;
+            centers.push_back(center-canvas->mapTo(&view,QPoint()));
+        }
+        const int before_hover_uploads=uploads;
+        view.setCameraInteractionEnabled(true);
+        for (bool show_ma : {false,true}) {
+            view.setShowMAClouds(show_ma);
+            for (int i=0;i<5;++i) {
+                hover(centers[i]);
+                require(purple_count(snapshot())>10 && canvas->cursor().shape()==Qt::PointingHandCursor,
+                        "Hover did not turn a selectable camera purple");
+                click(centers[i]);
+                require(clicked.size()==size_t((show_ma ? 5 : 0)+i+1) && clicked.back()==quint64(i+1),
+                        "Click selected the wrong camera or depended on the geometry source");
+            }
+        }
+        require(uploads==before_hover_uploads,"Camera hover/click reuploaded point clouds");
+        QEvent leave(QEvent::Leave); QApplication::sendEvent(canvas,&leave);
+        require(purple_count(snapshot())==0 && canvas->cursor().shape()==Qt::ArrowCursor,"Leaving retained hover state");
+        mouse(QEvent::MouseButtonPress,centers[0],Qt::LeftButton,Qt::LeftButton);
+        mouse(QEvent::MouseMove,centers[0]+QPointF(30,0),Qt::NoButton,Qt::LeftButton);
+        mouse(QEvent::MouseMove,centers[0],Qt::NoButton,Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease,centers[0],Qt::LeftButton,Qt::NoButton);
+        require(clicked.size()==10,"Rotating the scene triggered a camera click");
+        view.setCameraInteractionEnabled(false); hover(centers[0]); click(centers[0]);
+        require(clicked.size()==10 && purple_count(snapshot())==0,"Disabled camera interaction still picked or highlighted");
+        auto retaken=std::make_shared<std::vector<PredictedCameraFrame>>(*five);
+        retaken->back().image_id=99;
+        view.setPredictedCameras(retaken); view.setCameraPresentation(99,99); snapshot();
+        view.setCameraInteractionEnabled(true); hover(centers.back()); click(centers.back());
+        require(clicked.size()==11 && clicked.back()==99,"Retake kept the previous capture ID in its hit target");
+        // With coincident poses, click both non-overlapping numbered labels.
+        view.setPredictedCameras(overlapping); view.setCameraPresentation(20,20); view.resetCaptureView();
+        snapshot();
+        const auto quad=view.cameraImageQuad().translated(-canvas->mapTo(&view,QPoint()));
+        const auto scan=quad.boundingRect().adjusted(-80,-120,80,20).intersected(canvas->rect());
+        bool label_one=false, label_two=false;
+        // Probe above the image plane, where only the displaced labels can hit.
+        for (int y=int(scan.top());y<int(quad.boundingRect().top());y+=3)
+            for (int x=int(scan.left());x<int(scan.right());x+=3) {
+                const auto before=clicked.size(); click(QPointF(x,y));
+                if (clicked.size()>before) {
+                    label_one|=clicked.back()==10; label_two|=clicked.back()==20;
+                }
+            }
+        require(label_one && label_two,"Coincident camera poses cannot both be selected via their labels");
+        view.setPredictedCameras({}); snapshot();
+        const auto before_clear=clicked.size(); hover(centers.back()); click(centers.back());
+        require(clicked.size()==before_clear && purple_count(snapshot())==0,"Cleared cameras retained pick targets");
+        view.setPredictedCameras(std::make_shared<std::vector<PredictedCameraFrame>>(1,five->front()));
+        view.setCameraPresentation(1,1); snapshot();
+        click(view.cameraImageQuad().boundingRect().center()-canvas->mapTo(&view,QPoint()));
+        require(clicked.size()==before_clear,"Single-view camera unexpectedly enabled multi-view picking");
+        // Hover must tint only the matching FS points and restore their original
+        // RGB on leave, without uploading or changing the immutable GPU buffers.
+        const auto fs_left=cloud(101,true), fs_right=cloud(202,false);
+        auto fs_cameras=std::make_shared<std::vector<PredictedCameraFrame>>();
+        auto fs_left_pose=cv::Matx44d::eye(), fs_right_pose=cv::Matx44d::eye();
+        fs_left_pose(0,3)=-.18; fs_right_pose(0,3)=.18;
+        fs_cameras->push_back({camera,fs_left_pose,101,dark});
+        fs_cameras->push_back({camera,fs_right_pose,202,dark});
+        view.setShowMAClouds(false); view.setCapturedClouds({fs_left,fs_right}); view.setGPUMesh(fs_right);
+        view.setPredictedCameras(fs_cameras); view.resetView();
+        std::vector<QPointF> fs_centers;
+        for (const auto& frame:*fs_cameras) {
+            view.setCameraPresentation(frame.image_id,0); snapshot();
+            fs_centers.push_back(view.cameraImageQuad().boundingRect().center()-canvas->mapTo(&view,QPoint()));
+        }
+        const auto original_fs=snapshot();
+        const int fs_uploads=uploads;
+        require(pixels(original_fs,true)>300 && pixels(original_fs,false)>300,"FS hover fixture lost a view's points");
+        for (int i=0;i<2;++i) {
+            hover(fs_centers[i]); const auto highlighted=snapshot();
+            int tinted=0, preserved=0;
+            for (int y=0;y<original_fs.height();++y) for (int x=0;x<original_fs.width();++x) {
+                const auto before=original_fs.pixelColor(x,y), after=highlighted.pixelColor(x,y);
+                const bool red=before.red()>240 && before.green()<10 && before.blue()<10;
+                const bool green=before.green()>240 && before.red()<10 && before.blue()<10;
+                if (i==0 ? red : green) {
+                    // Pale purple: high blue/red and a lifted green channel.
+                    if (after.blue()>200 && after.red()>160 && after.green()>120 && after.green()<200) ++tinted;
+                }
+                if ((i==0 ? green : red) && after==before) ++preserved;
+            }
+            require(tinted>300 && preserved>300,"Hover did not tint exactly the matching FS point cloud pale purple");
+            QApplication::sendEvent(canvas,&leave);
+            require(snapshot()==original_fs,"Leaving did not restore the FS scene's exact original colors");
+        }
+        require(uploads==fs_uploads,"FS hover reuploaded point-cloud geometry");
+        // Identical world points still highlight when the hovered view is drawn
+        // after an unhovered view that has already written the same depth.
+        auto coincident=std::make_shared<std::vector<PredictedCameraFrame>>(*fs_cameras);
+        coincident->back().camera_to_world=coincident->front().camera_to_world;
+        view.setPredictedCameras(coincident); view.setCameraPresentation(101,0); view.resetView(); snapshot();
+        hover(view.cameraImageQuad().boundingRect().center()-canvas->mapTo(&view,QPoint()));
+        const auto same_depth=snapshot();
+        require(pixels(same_depth,true)==0 && pixels(same_depth,false)==0,
+                "An overlapping view hid the hovered FS cloud at equal depth");
+        QApplication::sendEvent(canvas,&leave);
+        require(pixels(snapshot(),true)>300,"Overlapping FS points did not restore after hover");
         std::cout<<"PASS: CUDA/OpenGL uploads, exclusive FS/MA rendering, stable view/poses, cached switches, retake, empty clouds and clean\n";
         std::cout<<"PASS: projected camera corners match textured GL pixels, perspective, orientation and resizing\n";
         std::cout<<"PASS: five MA point clouds, point-only modes, presentation notifications, negative world Z, pose updates and green/blue camera selection\n";
+        std::cout<<"PASS: five clickable cameras, purple hover, FS/MA selection, drag rejection, disabled/cleared picks, retakes and overlapping labels\n";
+        std::cout<<"PASS: matching FS cloud pale-purple hover, unchanged other views, exact RGB restoration, overlapping points and cached GPU geometry\n";
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
     }

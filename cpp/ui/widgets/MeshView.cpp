@@ -1,5 +1,6 @@
 #include "MeshView.hpp"
 #include <QGuiApplication>
+#include <QApplication>
 #include <QLabel>
 #include <QMatrix4x4>
 #include <QMouseEvent>
@@ -28,6 +29,7 @@ class MeshCanvas : public QOpenGLWidget {
         : QOpenGLWidget(parent), owner_(parent), buffer_(QOpenGLBuffer::VertexBuffer) {
         setMinimumSize(260, 240);
         setFormat(MeshView::surfaceFormat());
+        setMouseTracking(true);
     }
     ~MeshCanvas() override { cleanup(); }
     void setGPUMesh(SharedGPUMesh mesh) {
@@ -73,10 +75,17 @@ class MeshCanvas : public QOpenGLWidget {
     }
     void setPredictedCameras(SharedPredictedCameras cameras) {
         if (predicted_cameras_ == cameras) return;
+        setHoveredCamera(0);
+        pressed_camera_id_=0;
+        camera_targets_.clear(); label_targets_.clear();
         predicted_cameras_ = std::move(cameras);
         camera_dirty_ = true;
         if (predicted_cameras_) preserveView();
         update();
+    }
+    void setCameraInteractionEnabled(bool enabled) {
+        camera_interaction_enabled_=enabled;
+        if (!enabled) { setHoveredCamera(0); pressed_camera_id_=0; }
     }
     void setCamera(const std::optional<fs::MeshCamera>& camera) {
         if (camera_.has_value() == camera.has_value() &&
@@ -195,6 +204,7 @@ layout(location = 0) out vec4 fragmentColor;
 uniform bool shaded;
 uniform bool wireframe;
 uniform bool textured;
+uniform bool hoveredCloud;
 uniform sampler2D cameraImage;
 void main() {
     if (textured) {
@@ -206,7 +216,9 @@ void main() {
         vec3 n=cross(dFdx(point),dFdy(point));
         light=0.45+0.55*abs(n.z)/max(length(n),1e-20);
     }
-    fragmentColor=vec4(wireframe ? vec3(0.0) : tint*light,1.0);
+    vec3 color=wireframe ? vec3(0.0) : tint*light;
+    if (hoveredCloud) color=mix(color,vec3(0.82,0.68,1.0),0.85);
+    fragmentColor=vec4(color,1.0);
 })";
         if (!program_->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex) ||
             !program_->addShaderFromSourceCode(QOpenGLShader::Fragment,
@@ -246,6 +258,7 @@ void main() {
         if (!gl_) return;
         // QPainter's label overlay changes GL state between frames.
         gl_->glEnable(GL_DEPTH_TEST);
+        gl_->glDepthFunc(GL_LESS);
         gl_->glDepthMask(GL_TRUE);
         gl_->glDisable(GL_BLEND);
         gl_->glDisable(GL_SCISSOR_TEST);
@@ -293,15 +306,18 @@ void main() {
         program_->setUniformValue("center",center_);
         program_->setUniformValue("scale",scale_);
         program_->setUniformValue("textured",false);
+        program_->setUniformValue("hoveredCloud",false);
         // Captures have independent VBOs, retained while new views are acquired.
         program_->setUniformValue("cameraSpace",true);
         program_->setUniformValue("clipInvalid",true);
         program_->setUniformValue("shaded",false);
         program_->setUniformValue("wireframe",false);
+        CloudResource* hovered_capture=nullptr;
         for (const auto& capture:cloud_resources_) {
             const bool ma_cloud=isMACloud(capture->frame);
             if (show_ma_clouds_ != ma_cloud) continue;
             if (!show_ma_clouds_ && capture->frame==hidden_capture_) continue;
+            if (isHoveredFSCloud(capture->frame)) { hovered_capture=capture.get(); continue; }
             const bool surface=!ma_cloud && !capture->frame->point_cloud && mode_!=0;
             program_->setUniformValue("shaded",surface && mode_==1);
             program_->setUniformValue("wireframe",surface && mode_==2);
@@ -318,10 +334,26 @@ void main() {
         program_->setUniformValue("wireframe",mode_==2);
         vao_.bind();
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-        if (!show_ma_clouds_)
+        const bool hovered_active=count_>0 && isHoveredFSCloud(gpu_mesh_);
+        if (!show_ma_clouds_ && !hovered_active)
             gl_->glDrawArrays(mode_==0 ? GL_POINTS : GL_TRIANGLES,0,count_);
         if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
         vao_.release();
+        if (hovered_capture || hovered_active) {
+            // Draw the matching FS view last, including exactly coincident
+            // points. Keep depth testing so nearer surfaces still occlude it.
+            program_->setUniformValue("shaded",false);
+            program_->setUniformValue("wireframe",false);
+            program_->setUniformValue("hoveredCloud",true);
+            program_->setUniformValue("cameraToWorld",cameraPose(hovered_capture ? hovered_capture->frame : gpu_mesh_));
+            auto& hovered_vao=hovered_capture ? hovered_capture->vao : vao_;
+            hovered_vao.bind();
+            gl_->glDepthFunc(GL_LEQUAL);
+            gl_->glDrawArrays(GL_POINTS,0,hovered_capture ? hovered_capture->count : count_);
+            gl_->glDepthFunc(GL_LESS);
+            hovered_vao.release();
+            program_->setUniformValue("hoveredCloud",false);
+        }
         if (camera_count_>0) {
             camera_vao_.bind();
             program_->setUniformValue("cameraSpace",false);
@@ -352,6 +384,11 @@ void main() {
                 gl_->glDrawArrays(GL_LINES,highlight_first_,highlight_count_);
                 gl_->glEnable(GL_DEPTH_TEST);
             }
+            if (hover_count_>0) {
+                gl_->glDisable(GL_DEPTH_TEST);
+                gl_->glDrawArrays(GL_LINES,hover_first_,hover_count_);
+                gl_->glEnable(GL_DEPTH_TEST);
+            }
             camera_vao_.release();
         }
         program_->release();
@@ -373,8 +410,16 @@ void main() {
             } else emit owner_->maCloudsPresented(ma_clouds_);
         }
     }
-    void mousePressEvent(QMouseEvent *e) override { last_ = e->position(); }
+    void mousePressEvent(QMouseEvent *e) override {
+        last_=press_position_=e->position();
+        dragging_=false;
+        pressed_camera_id_=e->button()==Qt::LeftButton ? cameraAt(e->position()) : 0;
+    }
     void mouseMoveEvent(QMouseEvent *e) override {
+        if (!e->buttons()) { setHoveredCamera(cameraAt(e->position())); return; }
+        if (!dragging_ && (e->position()-press_position_).manhattanLength()<QApplication::startDragDistance()) return;
+        dragging_=true;
+        setHoveredCamera(0);
         auto d = e->position() - last_;
         last_ = e->position();
         if (e->buttons() & Qt::LeftButton) {
@@ -386,7 +431,20 @@ void main() {
                             -d.y() / std::max(1, height()) * 2);
         update();
     }
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        const auto id=cameraAt(e->position());
+        const bool click=e->button()==Qt::LeftButton && !dragging_ && pressed_camera_id_ &&
+            id==pressed_camera_id_ && (e->position()-press_position_).manhattanLength()<QApplication::startDragDistance();
+        pressed_camera_id_=0;
+        setHoveredCamera(id);
+        if (click) emit owner_->cameraClicked(id);
+    }
+    void leaveEvent(QEvent *e) override {
+        setHoveredCamera(0);
+        QOpenGLWidget::leaveEvent(e);
+    }
     void wheelEvent(QWheelEvent *e) override {
+        setHoveredCamera(0);
         zoom_ = std::clamp(zoom_ * std::pow(1.15f, e->angleDelta().y() / 120.f),
                            .2f, 8.f);
         update();
@@ -394,6 +452,52 @@ void main() {
     }
 
   private:
+    std::optional<QVector3D> projectCameraPoint(const QVector3D& point) const {
+        const auto clip=view_projection_*QVector4D(point,1);
+        if (!std::isfinite(clip.w()) || clip.w()<=0) return {};
+        const auto ndc=clip.toVector3DAffine();
+        if (!std::isfinite(ndc.x()) || !std::isfinite(ndc.y()) || !std::isfinite(ndc.z()) ||
+            ndc.z()<-1 || ndc.z()>1) return {};
+        return QVector3D((ndc.x()+1)*width()*.5,(1-ndc.y())*height()*.5,ndc.z());
+    }
+    quint64 cameraAt(QPointF position) const {
+        if (!camera_interaction_enabled_ || !ready_ || failed_ || !predicted_cameras_ || predicted_cameras_->size()<2) return 0;
+        // Labels are separated on screen, so even identical poses stay selectable.
+        for (const auto& label:label_targets_)
+            if (label.rect.contains(position)) return label.image_id;
+        quint64 closest_line=0, closest_plane=0;
+        qreal line_distance=36, plane_depth=std::numeric_limits<qreal>::max();
+        for (const auto& target:camera_targets_) {
+            for (size_t i=0;i+1<target.lines.size();i+=2) {
+                const auto a=projectCameraPoint(target.lines[i]), b=projectCameraPoint(target.lines[i+1]);
+                if (!a || !b) continue;
+                const QPointF start(a->x(),a->y()), delta(b->x()-a->x(),b->y()-a->y());
+                const auto length=QPointF::dotProduct(delta,delta);
+                const auto t=length>0 ? std::clamp(QPointF::dotProduct(position-start,delta)/length,qreal(0),qreal(1)) : 0;
+                const auto offset=position-start-t*delta;
+                const auto distance=QPointF::dotProduct(offset,offset);
+                if (distance<line_distance) { line_distance=distance; closest_line=target.image_id; }
+            }
+            QPolygonF quad;
+            qreal depth=0;
+            // Each frustum edge pair is origin->corner, corner->next corner.
+            for (size_t i : {1,5,9,13}) {
+                const auto corner=projectCameraPoint(target.lines[i]);
+                if (!corner) break;
+                quad<<QPointF(corner->x(),corner->y()); depth+=corner->z();
+            }
+            if (quad.size()==4 && quad.containsPoint(position,Qt::OddEvenFill) && depth<plane_depth) {
+                plane_depth=depth; closest_plane=target.image_id;
+            }
+        }
+        return closest_line ? closest_line : closest_plane;
+    }
+    void setHoveredCamera(quint64 id) {
+        if (hovered_camera_id_==id) return;
+        hovered_camera_id_=id;
+        setCursor(id ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        camera_dirty_=true; update();
+    }
     struct CloudResource {
         SharedGPUMesh frame;
         QOpenGLBuffer buffer{QOpenGLBuffer::VertexBuffer};
@@ -413,6 +517,10 @@ void main() {
     }
     bool isMACloud(const SharedGPUMesh& mesh) const {
         return ma_clouds_ && std::find(ma_clouds_->begin(),ma_clouds_->end(),mesh)!=ma_clouds_->end();
+    }
+    bool isHoveredFSCloud(const SharedGPUMesh& mesh) const {
+        return !show_ma_clouds_ && hovered_camera_id_ && mesh && mesh->point_cloud &&
+            mesh->image_id==hovered_camera_id_ && !isMACloud(mesh);
     }
     bool isCaptured(const SharedGPUMesh& mesh) const {
         return std::find(captured_clouds_.begin(),captured_clouds_.end(),mesh)!=captured_clouds_.end();
@@ -652,6 +760,7 @@ void main() {
     void uploadCamera() {
         // Camera frustums use a separate buffer from CUDA/OpenGL geometry.
         camera_labels_.clear();
+        camera_targets_.clear();
         const bool predicted=predicted_cameras_ && !predicted_cameras_->empty();
         const auto metadata = predicted ? std::nullopt : activeCamera();
         const cv::Vec3f center(center_.x(), center_.y(), center_.z());
@@ -664,6 +773,7 @@ void main() {
         camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
         const int base_highlight=active_camera_id_ && active_camera_id_==highlighted_camera_id_ ? camera_count_ : 0;
         highlight_first_=0; highlight_count_=0;
+        hover_first_=0; hover_count_=0;
         // Reuse the exact image-plane vertices supplied to OpenGL. Project only
         // these four corners on the CPU for the 2D capture transfer animation.
         camera_quad_valid_ = camera_image_count_ > 0;
@@ -688,9 +798,18 @@ void main() {
                 auto& texture=predicted_textures_[i];
                 int count=0; float radius=0;
                 const auto predicted=cameraData(frame.camera,center,scale_,count,radius,
-                    frame.camera_to_world,cameraColor(frame.image_id),frame.image.isNull() ? 0 : 1,int(i)+1);
+                    frame.camera_to_world,cameraColor(frame.image_id),frame.image.isNull() ? 0 : 1,int(i)+1,frame.image_id);
+                if (count>=16) {
+                    CameraTarget target{frame.image_id,{}};
+                    for (int j=0;j<count;++j)
+                        target.lines.emplace_back(predicted[j*6],predicted[j*6+1],predicted[j*6+2]);
+                    camera_targets_.push_back(std::move(target));
+                }
                 if (frame.image_id && frame.image_id==highlighted_camera_id_) {
                     highlight_first_=int(lines.size()/6); highlight_count_=count;
+                }
+                if (frame.image_id && frame.image_id==hovered_camera_id_) {
+                    hover_first_=int(lines.size()/6); hover_count_=count;
                 }
                 lines.insert(lines.end(),predicted.begin(),predicted.begin()+count*6);
                 texture.first_vertex=-1;
@@ -729,9 +848,11 @@ void main() {
         camera_dirty_ = false;
     }
     cv::Vec3f cameraColor(quint64 id) const {
+        if (id && id==hovered_camera_id_) return cv::Vec3f(.65f,.3f,1.f);
         return id && id==highlighted_camera_id_ ? cv::Vec3f(.1f,1.f,.25f) : cv::Vec3f(.1f,.45f,1.f);
     }
     void drawCameraLabels() {
+        label_targets_.clear();
         if (camera_labels_.empty()) return;
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
@@ -752,6 +873,7 @@ void main() {
             while (std::any_of(occupied.begin(),occupied.end(),[&](const auto& other) { return rect.intersects(other); }))
                 rect.translate(0,-rect.height()-2);
             occupied.push_back(rect);
+            if (label.image_id) label_targets_.push_back({label.image_id,rect});
             QPainterPath text;
             text.addText(QPointF(rect.left()+3,rect.top()+3+metrics.ascent()),label_font,label.text);
             painter.strokePath(text,QPen(QColor(17,28,43),3,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
@@ -768,7 +890,8 @@ void main() {
     std::vector<float> cameraData(const std::optional<fs::MeshCamera>& metadata, cv::Vec3f center, float scale,
                                   int& line_count, float& radius,
                                   const cv::Matx44d& pose = cv::Matx44d::eye(),
-                                  const cv::Vec3f& color = cv::Vec3f(.1f,.45f,1.f), int image_count = 1, int view_number = 1) {
+                                  const cv::Vec3f& color = cv::Vec3f(.1f,.45f,1.f), int image_count = 1, int view_number = 1,
+                                  quint64 image_id = 0) {
         std::vector<float> data;
         line_count = 0;
         radius = .87f; // Radius of the mesh's normalized bounding box.
@@ -830,7 +953,7 @@ void main() {
                 const auto anchor=(to_world(up)-center)/scale;
                 radius=std::max(radius,float(cv::norm(anchor)));
                 camera_labels_.push_back({QVector3D(anchor[0],-anchor[1],-anchor[2]),
-                    QString("view %1").arg(view_number),QColor::fromRgbF(color[0],color[1],color[2])});
+                    QString("view %1").arg(view_number),QColor::fromRgbF(color[0],color[1],color[2]),image_id});
                 line_count = int(data.size() / 6);
                 if (!image_count) return data;
                 // QImage row zero is the image top. Upload unchanged and give
@@ -855,8 +978,15 @@ void main() {
     quint64 active_camera_id_{0}, highlighted_camera_id_{0}, hidden_image_id_{0};
     bool show_ma_clouds_{false};
     SharedPredictedCameras predicted_cameras_;
-    struct CameraLabel { QVector3D anchor; QString text; QColor color; };
+    struct CameraLabel { QVector3D anchor; QString text; QColor color; quint64 image_id; };
     std::vector<CameraLabel> camera_labels_;
+    struct CameraTarget { quint64 image_id; std::vector<QVector3D> lines; };
+    struct LabelTarget { quint64 image_id; QRectF rect; };
+    std::vector<CameraTarget> camera_targets_;
+    std::vector<LabelTarget> label_targets_;
+    bool camera_interaction_enabled_{false}, dragging_{false};
+    quint64 hovered_camera_id_{0}, pressed_camera_id_{0};
+    QPointF press_position_;
     std::vector<CameraTexture> predicted_textures_;
     SharedGPUMesh hidden_capture_;
     std::vector<std::unique_ptr<CloudResource>> cloud_resources_;
@@ -889,6 +1019,7 @@ void main() {
     bool dirty_{true}, right_camera_visible_{false};
     int mode_{1}, count_{}, camera_count_{}, camera_image_count_{};
     int highlight_first_{0}, highlight_count_{0};
+    int hover_first_{0}, hover_count_{0};
     float camera_radius_{};
     // Behind the camera, above and to its right, looking into the scene.
     static constexpr float kCaptureYaw = -33.6f, kCapturePitch = 40.f;
@@ -926,6 +1057,9 @@ void MeshView::setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMes
 }
 void MeshView::setPredictedCameras(SharedPredictedCameras cameras) {
     if (canvas_) canvas_->setPredictedCameras(std::move(cameras));
+}
+void MeshView::setCameraInteractionEnabled(bool enabled) {
+    if (canvas_) canvas_->setCameraInteractionEnabled(enabled);
 }
 void MeshView::setMAClouds(SharedGPUClouds clouds) {
     if (canvas_) canvas_->setMAClouds(std::move(clouds));
