@@ -317,10 +317,12 @@ int checkLiveScan(QApplication& app) {
                                         "Captured toolbar does not expose Restart / Retake / Capture more");
                                 const auto retake_position=retake->mapTo(window,QPoint());
                                 const auto capture_position=capture->mapTo(window,QPoint());
-                                require(restart->mapTo(window,QPoint()).x()<capture_position.x() &&
-                                        retake_position.x()==capture_position.x() &&
-                                        retake_position.y()+retake->height()<=capture_position.y(),
-                                        "Retake must be above Capture more, with Restart to the left");
+                                const auto restart_position=restart->mapTo(window,QPoint());
+                                require(restart_position.x()+restart->width()<=retake_position.x() &&
+                                        capture_position.x()-retake_position.x()-retake->width()>=48 &&
+                                        retake_position.y()+retake->height()/2==capture_position.y()+capture->height()/2 &&
+                                        restart_position.y()+restart->height()/2==capture_position.y()+capture->height()/2,
+                                        "Restart and Retake must share the capture row, with a wide gap before Capture more");
                                 auto* tabs=window->findChild<QTabWidget*>("workspaceTabs");
                                 if (presented==1) {
                                     require(!window->findChild<CaptureTransition*>()->isRunning(), "Image transfer did not finish");

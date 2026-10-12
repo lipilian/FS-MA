@@ -68,6 +68,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         QPushButton:checked { background: #dbeafe; color: #1d4ed8; border-color: #2464d9; }
         QPushButton:hover { background: #eaf1fc; border-color: #6c97cf; }
         QPushButton:disabled { color: #9aa8b9; background: #edf1f6; border-color: #dfe5ed; }
+        QPushButton#restartCaptures { background: #dc2626; color: white; border-color: #dc2626; }
+        QPushButton#restartCaptures:hover:enabled { background: #b91c1c; border-color: #b91c1c; }
+        QPushButton#restartCaptures:pressed:enabled { background: #991b1b; border-color: #991b1b; }
+        QPushButton#restartCaptures:disabled { background: #fee2e2; color: #b97979; border-color: #fecaca; }
         QDoubleSpinBox, QSpinBox, QComboBox { min-height: 28px; border: 1px solid #ced8e5; border-radius: 4px; background: white; color: #20314a; padding: 2px 5px; }
         QWidget#inputCard { background: white; border: 1px solid #dce3ed; border-radius: 8px; }
         QToolButton#inputDetailsToggle { border: 0; background: transparent; text-align: left; padding: 10px 8px; font-weight: 600; }
@@ -117,11 +121,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         connect(manual_reconstruct_,&QPushButton::clicked,this,&ReconstructionWindow::reconstructCurrent);
     }
     toolbar->addStretch(); toolbar->addWidget(finish_draw_);
-    toolbar->addWidget(restart_,0,Qt::AlignBottom);
-    auto* capture_actions = new QVBoxLayout;
-    capture_actions->setSpacing(4);
-    capture_actions->addWidget(retake_); capture_actions->addWidget(capture_);
-    toolbar->addLayout(capture_actions);
+    toolbar->addWidget(restart_);
+    toolbar->addWidget(retake_);
+    toolbar->addSpacing(48);
+    toolbar->addWidget(capture_);
     outer->addLayout(toolbar);
     auto* split = new QSplitter;
     auto* settings = new QWidget; auto* settings_layout = new QVBoxLayout(settings); settings_layout->setContentsMargins(0,0,8,0);
