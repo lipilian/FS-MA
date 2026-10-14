@@ -74,12 +74,6 @@ target_link_libraries(fs_core
         ${TENSORRT_NVINFER_LIBRARY}
 )
 
-option(FS_ENABLE_NVBLOX "Link the local nvblox core library" ON)
-if(FS_ENABLE_NVBLOX)
-    include(cmake/Nvblox.cmake)
-    target_link_libraries(fs_core PUBLIC nvblox::nvblox_lib)
-endif()
-
 target_compile_options(fs_core PRIVATE
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
@@ -154,11 +148,6 @@ endif()
 option(FS_BUILD_TESTS "Build GPU geometry and engine regression tests (requires a CUDA device)" OFF)
 if(FS_BUILD_TESTS)
     enable_testing()
-    if(FS_ENABLE_NVBLOX)
-        add_executable(fs_nvblox_test tests/NvbloxTest.cpp)
-        target_link_libraries(fs_nvblox_test PRIVATE nvblox::nvblox_lib)
-        add_test(NAME nvblox_depth_render COMMAND fs_nvblox_test)
-    endif()
     add_executable(fs_gpu_point_cloud_test tests/GPUPointCloudTest.cpp)
     target_link_libraries(fs_gpu_point_cloud_test PRIVATE fs_core)
     add_test(NAME gpu_point_cloud COMMAND fs_gpu_point_cloud_test)
