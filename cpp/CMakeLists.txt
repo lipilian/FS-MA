@@ -74,7 +74,7 @@ target_link_libraries(fs_core
         ${TENSORRT_NVINFER_LIBRARY}
 )
 
-option(FS_ENABLE_NVBLOX "Link the local nvblox core library" OFF)
+option(FS_ENABLE_NVBLOX "Link the local nvblox core library" ON)
 if(FS_ENABLE_NVBLOX)
     include(cmake/Nvblox.cmake)
     target_link_libraries(fs_core PUBLIC nvblox::nvblox_lib)

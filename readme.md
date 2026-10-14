@@ -4,40 +4,7 @@ Please see the [development progress](https://effective-robot-77r192w.pages.gith
 
 ## RealSense scanning
 
-With the desktop dependencies and `librealsense2-dev` installed, build and run:
-
 ```sh
-cmake -S cpp -B cpp/build -DFS_BUILD_DESKTOP=ON
-cmake --build cpp/build --target scan_gui -j6
-./cpp/build/scan_gui
-```
-
-`scan_gui` skips the calibration screen, loads the existing FoundationStereo,
-SAM 2.1 and MapAnything TensorRT engines from `onnx/`, then automatically connects
-an Intel RealSense D435. The camera's factory-calibrated left/right IR images are
-center-cropped to 960 × 800; FoundationStereo computes depth. Use **Capture pair**
-to reconstruct, then **Capture more** for up to five views. If the camera is not
-connected at startup, attach it and click **Connect cameras**. A model load failure
-keeps the loading window open so engine paths can be corrected and retried.
-
-The first capture displays an FS triangle mesh. From the second capture onward,
-MapAnything predicts camera poses and displays each view as a point cloud; MA
-triangle meshes are not computed. MA results export as a world-space point-cloud
-PLY without faces. FS point clouds remain available through the source selector.
-
-The scan workspace uses fixed depth and geometry defaults and a full-width view.
-Captures, imported pairs and confirmed or cleared regions reconstruct automatically.
-Use **Save results…** in the bottom-right corner to export; region drawing tools are inside
-the **Region measurement** tab.
-
-The existing `fs_gui` entry still starts with calibration. Imported captures in
-`scan_gui` must include `left.png`, `right.png` and their own `calibration.json`
-(or `sentech_stereo_calibration.json`).
-
-With `FS_BUILD_TESTS=ON`, `ctest --test-dir cpp/build --output-on-failure` includes
-the calibration-free startup regression. An optional hardware smoke test loads
-the models, connects/reconnects a D435, captures a pair and checks OpenGL display:
-
-```sh
-./cpp/build/fs_scan_startup_test --live
+cmake -S cpp -B cpp/build
+cmake --build cpp/build -j4
 ```
