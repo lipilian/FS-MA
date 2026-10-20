@@ -49,7 +49,17 @@ class MeshCanvas : public QOpenGLWidget {
     }
     void setMode(int mode) {
         mode_ = show_ma_clouds_ ? 0 : mode;
-        dirty_=true;
+        // Both FS representations are already cached. Switching their draw
+        // mode must not reupload vertices or change the fitted viewpoint.
+        update();
+    }
+    void setFSMasks(QHash<quint64,QImage> masks, bool enabled) {
+        bool same=enabled==fs_mask_display_ && masks.size()==fs_masks_.size();
+        for (auto it=masks.cbegin();same && it!=masks.cend();++it)
+            same=fs_masks_.contains(it.key()) && fs_masks_.value(it.key()).cacheKey()==it->cacheKey();
+        if (same) return;
+        fs_mask_display_=enabled;
+        fs_masks_=std::move(masks);
         update();
     }
     void setMAClouds(SharedGPUClouds clouds) {
@@ -182,14 +192,23 @@ uniform bool cameraSpace;
 uniform bool clipInvalid;
 uniform vec3 center;
 uniform float scale;
+uniform bool fsMaskEnabled;
+uniform bool fsPointCloud;
+uniform vec2 maskGrid;
 out vec3 tint;
 out vec3 point;
 out vec2 uv;
+flat out ivec2 fsPixel;
 void main() {
     point=position;
     gl_PointSize=1.0;
     tint=color;
     uv=color.xy;
+    fsPixel=ivec2(0);
+    if (fsMaskEnabled && fsPointCloud) {
+        int width=int(maskGrid.x);
+        fsPixel=ivec2(gl_VertexID%width,gl_VertexID/width);
+    }
     vec3 world=(cameraToWorld*vec4(position,1.0)).xyz;
     vec3 p=cameraSpace ? (world-center)/scale*vec3(1.0,-1.0,-1.0) : position;
     // Invalid slots have zero camera-space Z. Valid world-space Z may be negative.
@@ -200,17 +219,36 @@ void main() {
 in vec3 tint;
 in vec3 point;
 in vec2 uv;
+flat in ivec2 fsPixel;
 layout(location = 0) out vec4 fragmentColor;
 uniform bool shaded;
 uniform bool wireframe;
 uniform bool textured;
 uniform bool hoveredCloud;
 uniform sampler2D cameraImage;
+uniform sampler2D fsMask;
+uniform bool fsSelectionEnabled;
+uniform bool fsMaskEnabled;
+uniform bool fsPointCloud;
+uniform bool translucentPass;
+uniform vec2 maskGrid;
+uniform vec4 maskIntrinsics;
 void main() {
     if (textured) {
         fragmentColor=texture(cameraImage,uv);
         return;
     }
+    bool outside=fsSelectionEnabled;
+    if (fsMaskEnabled) {
+        // Point slots keep their FS pixel IDs, including invalid slots. Mesh
+        // fragments are projected in their original rectified camera frame.
+        vec2 pixel=fsPointCloud ? vec2(fsPixel) : maskIntrinsics.xy*point.xy/point.z+maskIntrinsics.zw;
+        ivec2 size=textureSize(fsMask,0);
+        ivec2 samplePixel=ivec2(floor(pixel/maskGrid*vec2(size)));
+        outside=any(lessThan(samplePixel,ivec2(0))) || any(greaterThanEqual(samplePixel,size));
+        if (!outside) outside=texelFetch(fsMask,samplePixel,0).r<0.5;
+    }
+    if (outside!=translucentPass) discard;
     float light=1.0;
     if (shaded) {
         vec3 n=cross(dFdx(point),dFdy(point));
@@ -218,7 +256,7 @@ void main() {
     }
     vec3 color=wireframe ? vec3(0.0) : tint*light;
     if (hoveredCloud) color=mix(color,vec3(0.82,0.68,1.0),0.85);
-    fragmentColor=vec4(color,1.0);
+    fragmentColor=vec4(color,outside ? 0.3 : 1.0);
 })";
         if (!program_->addShaderFromSourceCode(QOpenGLShader::Vertex, vertex) ||
             !program_->addShaderFromSourceCode(QOpenGLShader::Fragment,
@@ -260,11 +298,20 @@ void main() {
         gl_->glEnable(GL_DEPTH_TEST);
         gl_->glDepthFunc(GL_LESS);
         gl_->glDepthMask(GL_TRUE);
+        gl_->glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
         gl_->glDisable(GL_BLEND);
+        gl_->glDisable(GL_STENCIL_TEST);
+        gl_->glStencilMask(0xff);
+        gl_->glClearStencil(0);
         gl_->glDisable(GL_SCISSOR_TEST);
         gl_->glClearColor(.067f, .11f, .17f, 1);
-        gl_->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl_->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
         if (!ready_ || failed_) return;
+        for (auto it=mask_textures_.begin();it!=mask_textures_.end();) {
+            if (!fs_masks_.contains(it.key())) {
+                gl_->glDeleteTextures(1,&it->id); it=mask_textures_.erase(it);
+            } else ++it;
+        }
         if (dirty_) {
             try {
                 if (captures_dirty_) uploadCaptures();
@@ -307,53 +354,45 @@ void main() {
         program_->setUniformValue("scale",scale_);
         program_->setUniformValue("textured",false);
         program_->setUniformValue("hoveredCloud",false);
-        // Captures have independent VBOs, retained while new views are acquired.
-        program_->setUniformValue("cameraSpace",true);
-        program_->setUniformValue("clipInvalid",true);
-        program_->setUniformValue("shaded",false);
-        program_->setUniformValue("wireframe",false);
-        CloudResource* hovered_capture=nullptr;
+        // Keep opaque samples in the depth buffer. Translucent samples are
+        // blended afterwards without hiding opaque geometry behind them.
+        struct DrawItem { SharedGPUMesh frame; QOpenGLVertexArrayObject* vao; int count; };
+        std::vector<DrawItem> items;
+        const bool captured_points=useCapturedPoints();
         for (const auto& capture:cloud_resources_) {
-            const bool ma_cloud=isMACloud(capture->frame);
-            if (show_ma_clouds_ != ma_cloud) continue;
-            if (!show_ma_clouds_ && capture->frame==hidden_capture_) continue;
-            if (isHoveredFSCloud(capture->frame)) { hovered_capture=capture.get(); continue; }
-            const bool surface=!ma_cloud && !capture->frame->point_cloud && mode_!=0;
-            program_->setUniformValue("shaded",surface && mode_==1);
-            program_->setUniformValue("wireframe",surface && mode_==2);
-            program_->setUniformValue("cameraToWorld",cameraPose(capture->frame));
-            capture->vao.bind();
-            if (surface && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-            gl_->glDrawArrays(surface ? GL_TRIANGLES : GL_POINTS,0,capture->count);
-            if (surface && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
-            capture->vao.release();
+            if (show_ma_clouds_ != isMACloud(capture->frame)) continue;
+            if (!show_ma_clouds_ && capture->frame==hidden_capture_ && !captured_points) continue;
+            items.push_back({capture->frame,&capture->vao,capture->count});
         }
-        program_->setUniformValue("cameraToWorld",cameraPose(gpu_mesh_));
-        program_->setUniformValue("clipInvalid",true);
-        program_->setUniformValue("shaded",mode_==1);
-        program_->setUniformValue("wireframe",mode_==2);
-        vao_.bind();
-        if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-        const bool hovered_active=count_>0 && isHoveredFSCloud(gpu_mesh_);
-        if (!show_ma_clouds_ && !hovered_active)
-            gl_->glDrawArrays(mode_==0 ? GL_POINTS : GL_TRIANGLES,0,count_);
-        if (gpu_mesh_ && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
-        vao_.release();
-        if (hovered_capture || hovered_active) {
-            // Draw the matching FS view last, including exactly coincident
-            // points. Keep depth testing so nearer surfaces still occlude it.
-            program_->setUniformValue("shaded",false);
-            program_->setUniformValue("wireframe",false);
-            program_->setUniformValue("hoveredCloud",true);
-            program_->setUniformValue("cameraToWorld",cameraPose(hovered_capture ? hovered_capture->frame : gpu_mesh_));
-            auto& hovered_vao=hovered_capture ? hovered_capture->vao : vao_;
-            hovered_vao.bind();
-            gl_->glDepthFunc(GL_LEQUAL);
-            gl_->glDrawArrays(GL_POINTS,0,hovered_capture ? hovered_capture->count : count_);
+        if (!show_ma_clouds_ && !captured_points && gpu_mesh_ && count_>0) items.push_back({gpu_mesh_,&vao_,count_});
+        std::stable_partition(items.begin(),items.end(),[&](const auto& item) { return !isHoveredFSCloud(item.frame); });
+        const auto draw_geometry=[&](bool translucent, GLenum depth_function=GL_NONE) {
+            program_->setUniformValue("translucentPass",translucent);
+            program_->setUniformValue("cameraSpace",true);
+            program_->setUniformValue("clipInvalid",true);
+            for (const auto& item:items) {
+                const bool selection=bindFSMask(item.frame);
+                if (translucent && !selection) continue;
+                const bool surface=!item.frame->point_cloud && mode_!=0;
+                const bool hovered=isHoveredFSCloud(item.frame);
+                program_->setUniformValue("shaded",surface && mode_==1);
+                program_->setUniformValue("wireframe",surface && mode_==2);
+                program_->setUniformValue("hoveredCloud",hovered);
+                program_->setUniformValue("cameraToWorld",cameraPose(item.frame));
+                item.vao->bind();
+                // Coincident FS points still show the hovered camera's tint.
+                gl_->glDepthFunc(depth_function!=GL_NONE ? depth_function : hovered ? GL_LEQUAL : GL_LESS);
+                if (surface && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
+                gl_->glDrawArrays(surface ? GL_TRIANGLES : GL_POINTS,0,item.count);
+                if (surface && mode_==2) gl_->glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+                item.vao->release();
+            }
             gl_->glDepthFunc(GL_LESS);
-            hovered_vao.release();
             program_->setUniformValue("hoveredCloud",false);
-        }
+        };
+        draw_geometry(false);
+        program_->setUniformValue("fsMaskEnabled",false);
+        program_->setUniformValue("fsSelectionEnabled",false);
         if (camera_count_>0) {
             camera_vao_.bind();
             program_->setUniformValue("cameraSpace",false);
@@ -390,6 +429,30 @@ void main() {
                 gl_->glEnable(GL_DEPTH_TEST);
             }
             camera_vao_.release();
+        }
+        if (!show_ma_clouds_ && fs_mask_display_) {
+            // First find the nearest unselected sample at each screen pixel.
+            // Mark only pixels in front of the existing opaque geometry.
+            gl_->glEnable(GL_STENCIL_TEST);
+            gl_->glStencilFunc(GL_ALWAYS,1,0xff);
+            gl_->glStencilOp(GL_KEEP,GL_KEEP,GL_REPLACE);
+            gl_->glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);
+            draw_geometry(true,GL_LESS);
+            gl_->glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+            // Blend that visible sample exactly once. Dense points and shared
+            // mesh vertices must not accumulate alpha towards an opaque color.
+            // At equal depth, retain the hovered camera's established tint.
+            std::stable_partition(items.begin(),items.end(),[&](const auto& item) { return isHoveredFSCloud(item.frame); });
+            gl_->glStencilFunc(GL_EQUAL,1,0xff);
+            gl_->glStencilOp(GL_KEEP,GL_KEEP,GL_ZERO);
+            gl_->glEnable(GL_BLEND);
+            gl_->glBlendEquation(GL_FUNC_ADD);
+            gl_->glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+            gl_->glDepthMask(GL_FALSE);
+            draw_geometry(true,GL_EQUAL);
+            gl_->glDepthMask(GL_TRUE);
+            gl_->glDisable(GL_BLEND);
+            gl_->glDisable(GL_STENCIL_TEST);
         }
         program_->release();
         drawCameraLabels();
@@ -461,7 +524,7 @@ void main() {
         return QVector3D((ndc.x()+1)*width()*.5,(1-ndc.y())*height()*.5,ndc.z());
     }
     quint64 cameraAt(QPointF position) const {
-        if (!camera_interaction_enabled_ || !ready_ || failed_ || !predicted_cameras_ || predicted_cameras_->size()<2) return 0;
+        if (!camera_interaction_enabled_ || !ready_ || failed_) return 0;
         // Labels are separated on screen, so even identical poses stay selectable.
         for (const auto& label:label_targets_)
             if (label.rect.contains(position)) return label.image_id;
@@ -511,6 +574,35 @@ void main() {
         qint64 image_key{0};
         int first_vertex{-1};
     };
+    bool bindFSMask(const SharedGPUMesh& frame) {
+        const bool selection=fs_mask_display_ && !isMACloud(frame);
+        program_->setUniformValue("fsSelectionEnabled",selection);
+        const auto source=fs_masks_.constFind(frame->image_id);
+        const bool masked=selection && source!=fs_masks_.cend() && !source->isNull() && validCamera(frame->camera);
+        program_->setUniformValue("fsMaskEnabled",masked);
+        program_->setUniformValue("fsPointCloud",frame->point_cloud);
+        if (!masked) return selection;
+        auto& texture=mask_textures_[frame->image_id];
+        gl_->glActiveTexture(GL_TEXTURE1);
+        if (!texture.id) texture.id=createTexture();
+        gl_->glBindTexture(GL_TEXTURE_2D,texture.id);
+        if (texture.image_key!=source->cacheKey()) {
+            const auto image=source->convertToFormat(QImage::Format_Grayscale8);
+            gl_->glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+            gl_->glPixelStorei(GL_UNPACK_ROW_LENGTH,image.bytesPerLine());
+            if (texture.size!=image.size()) {
+                gl_->glTexImage2D(GL_TEXTURE_2D,0,GL_R8,image.width(),image.height(),0,GL_RED,GL_UNSIGNED_BYTE,image.constBits());
+                texture.size=image.size();
+            } else gl_->glTexSubImage2D(GL_TEXTURE_2D,0,0,0,image.width(),image.height(),GL_RED,GL_UNSIGNED_BYTE,image.constBits());
+            gl_->glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+            texture.image_key=source->cacheKey();
+        }
+        program_->setUniformValue("fsMask",1);
+        program_->setUniformValue("maskGrid",QVector2D(frame->camera.image_size.width,frame->camera.image_size.height));
+        const auto& k=frame->camera.intrinsics;
+        program_->setUniformValue("maskIntrinsics",QVector4D(k(0,0),k(1,1),k(0,2),k(1,2)));
+        return selection;
+    }
     bool hasMesh() const {
         return show_ma_clouds_ ? ma_clouds_ && !ma_clouds_->empty()
             : !captured_clouds_.empty() || gpu_mesh_;
@@ -524,6 +616,12 @@ void main() {
     }
     bool isCaptured(const SharedGPUMesh& mesh) const {
         return std::find(captured_clouds_.begin(),captured_clouds_.end(),mesh)!=captured_clouds_.end();
+    }
+    bool useCapturedPoints() const {
+        return !show_ma_clouds_ && mode_==0 && gpu_mesh_ && !gpu_mesh_->point_cloud && gpu_mesh_->image_id &&
+            std::any_of(captured_clouds_.begin(),captured_clouds_.end(),[&](const auto& frame) {
+                return frame && frame->point_cloud && frame->image_id==gpu_mesh_->image_id;
+            });
     }
     QMatrix4x4 cameraPose(const SharedGPUMesh& mesh) const {
         QMatrix4x4 pose;
@@ -572,7 +670,9 @@ void main() {
             if (gl_) {
                 gl_->glDeleteTextures(int(textures_.size()), textures_.data());
                 for (const auto& texture:predicted_textures_) gl_->glDeleteTextures(1,&texture.id);
+                for (const auto& texture:mask_textures_) gl_->glDeleteTextures(1,&texture.id);
             }
+            mask_textures_.clear();
             predicted_textures_.clear();
             textures_ = {}; texture_sizes_ = {};
             uploaded_image_keys_ = {};
@@ -618,8 +718,9 @@ void main() {
         if (show_ma_clouds_) {
             if (ma_clouds_) for (const auto& frame:*ma_clouds_) add_gpu(frame);
         } else {
-            for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_) add_gpu(cloud);
-            add_gpu(gpu_mesh_);
+            const bool captured_points=useCapturedPoints();
+            for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_ || captured_points) add_gpu(cloud);
+            if (!captured_points) add_gpu(gpu_mesh_);
         }
         if (!any) {
             center_={}; scale_=1;
@@ -769,9 +870,15 @@ void main() {
         const int active_view=active==captured_clouds_.end() ? std::max(1,int(captured_clouds_.size()))
             : int(active-captured_clouds_.begin())+1;
         auto data = cameraData(metadata, center, scale_,camera_count_,camera_radius_,
-                               cv::Matx44d::eye(),cameraColor(active_camera_id_),right_camera_visible_ ? 2 : 1,active_view);
+                               cv::Matx44d::eye(),cameraColor(active_camera_id_),right_camera_visible_ ? 2 : 1,active_view,active_camera_id_);
+        if (active_camera_id_ && camera_count_>=16) {
+            CameraTarget target{active_camera_id_,{}};
+            for (int j=0;j<camera_count_;++j) target.lines.emplace_back(data[j*6],data[j*6+1],data[j*6+2]);
+            camera_targets_.push_back(std::move(target));
+        }
         camera_image_count_ = (int(data.size()/6) - camera_count_) / 6;
         const int base_highlight=active_camera_id_ && active_camera_id_==highlighted_camera_id_ ? camera_count_ : 0;
+        const int base_hover=active_camera_id_ && active_camera_id_==hovered_camera_id_ ? camera_count_ : 0;
         highlight_first_=0; highlight_count_=0;
         hover_first_=0; hover_count_=0;
         // Reuse the exact image-plane vertices supplied to OpenGL. Project only
@@ -838,6 +945,7 @@ void main() {
         }
         data.insert(data.begin(),lines.begin(),lines.end());
         if (base_highlight) { highlight_first_=int(lines.size()/6); highlight_count_=base_highlight; }
+        if (base_hover) { hover_first_=int(lines.size()/6); hover_count_=base_hover; }
         camera_count_+=int(lines.size()/6);
         for (auto& texture:predicted_textures_)
             if (texture.first_vertex>=0) texture.first_vertex+=int(data.size()/6);
@@ -977,6 +1085,9 @@ void main() {
     bool announce_ma_{false};
     quint64 active_camera_id_{0}, highlighted_camera_id_{0}, hidden_image_id_{0};
     bool show_ma_clouds_{false};
+    bool fs_mask_display_{false};
+    QHash<quint64,QImage> fs_masks_;
+    QHash<quint64,CameraTexture> mask_textures_;
     SharedPredictedCameras predicted_cameras_;
     struct CameraLabel { QVector3D anchor; QString text; QColor color; quint64 image_id; };
     std::vector<CameraLabel> camera_labels_;
@@ -1033,6 +1144,7 @@ QSurfaceFormat MeshView::surfaceFormat() {
     format.setVersion(4, 6);
     format.setProfile(QSurfaceFormat::CoreProfile);
     format.setDepthBufferSize(24);
+    format.setStencilBufferSize(8);
     return format;
 }
 
@@ -1054,6 +1166,9 @@ void MeshView::setGPUMesh(SharedGPUMesh mesh) {
 }
 void MeshView::setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden) {
     if (canvas_) canvas_->setCapturedClouds(std::move(clouds),std::move(hidden));
+}
+void MeshView::setFSMasks(QHash<quint64,QImage> masks, bool enabled) {
+    if (canvas_) canvas_->setFSMasks(std::move(masks),enabled);
 }
 void MeshView::setPredictedCameras(SharedPredictedCameras cameras) {
     if (canvas_) canvas_->setPredictedCameras(std::move(cameras));

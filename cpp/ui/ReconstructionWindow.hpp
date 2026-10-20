@@ -1,5 +1,6 @@
 #pragma once
 #include "PipelineController.hpp"
+#include "widgets/MaskEditor.hpp"
 #include <QMainWindow>
 #include <QElapsedTimer>
 #include <QHash>
@@ -19,6 +20,8 @@ class CaptureTransition;
 class QComboBox;
 class QLineEdit;
 class QRadioButton;
+class QStackedWidget;
+class QHBoxLayout;
 
 class ReconstructionWindow : public QMainWindow {
     Q_OBJECT
@@ -42,6 +45,9 @@ private:
     void cancelCapturePresentation();
     void refreshWorkspace();
     void reconstructCurrent();
+    bool inlineMaskMode() const;
+    void finishInlineDraw();
+    QImage exportMask() const;
     PipelineController& controller_;
     PipelineState state_;
     const bool has_confirmed_calibration_;
@@ -57,15 +63,21 @@ private:
     SharedPredictedCameras displayed_cameras_;
     bool ma_cloud_valid_{false}, ma_upload_pending_{false};
     quint64 highlighted_camera_id_{0}, transition_camera_id_{0};
-    struct CapturePreview { QImage left, right, depth; QString depth_description; };
+    struct CapturePreview {
+        QImage left, right, depth;
+        QString depth_description;
+        MaskEditor::Snapshot drawing;
+        QImage mask;
+    };
     QHash<quint64,CapturePreview> capture_previews_;
     quint64 preview_camera_id_{0};
+    bool drawing_mask_{false}, mask_pending_{false};
     QString depth_description_;
     QString render_error_;
     bool busy_{false}, closing_{false}, allow_close_{false};
     QElapsedTimer elapsed_;
     QImage rectified_left_, rectified_right_, live_left_, live_right_, depth_image_;
-    QPushButton *import_, *camera_, *retake_, *restart_, *capture_, *finish_draw_, *clear_;
+    QPushButton *import_, *camera_, *retake_, *restart_, *capture_, *start_draw_, *finish_draw_, *clear_;
     QPushButton* manual_reconstruct_{nullptr}; // Only the calibrated fs_gui workspace uses this control.
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
@@ -76,6 +88,9 @@ private:
     std::array<QWidget*,PipelineState::kMaxCaptures> capture_segments_{};
     QPlainTextEdit* log_;
     QTabWidget* tabs_;
+    QWidget* region_;
+    QStackedWidget* preview_stack_;
+    QHBoxLayout *scene_controls_, *capture_toolbar_;
     QWidget *input_panel_, *depth_panel_, *geometry_panel_, *mask_panel_, *save_panel_;
     MaskEditor* mask_;
     QPushButton *save_selected_, *save_all_, *browse_save_;

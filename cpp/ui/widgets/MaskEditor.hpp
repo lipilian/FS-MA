@@ -20,6 +20,15 @@ public:
     bool hasPrompts() const { return !points_.empty() || box_.has_value(); }
     bool samSelection() const { return accepted_; }
     void setImage(QImage image);
+    struct Point { QPointF position; int label; };
+    struct Snapshot {
+        QImage base_mask, corrections;
+        std::vector<Point> points;
+        std::optional<QRectF> box;
+        bool accepted{false};
+    };
+    Snapshot snapshot() const;
+    void restore(QImage image, const Snapshot& snapshot);
     void clearMask();
     void setBrushSize(int diameter);
     int brushSize() const { return brush_size_; }
@@ -32,6 +41,7 @@ public slots:
     void setOverlayVisible(bool enabled);
 signals:
     void selectionChanged();
+    void selectionConfirmed();
     void promptsChanged();
     void brushSizeChanged(int diameter);
     void hint(QString message);
@@ -53,7 +63,6 @@ private:
     void composeMask();
     void promptsEdited();
     void removePromptAt(QPointF position);
-    struct Point { QPointF position; int label; };
     std::vector<Point> points_;
     std::optional<QRectF> box_, previous_box_;
     QPointF box_start_, point_before_drag_;

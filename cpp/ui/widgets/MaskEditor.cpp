@@ -13,6 +13,16 @@ MaskEditor::MaskEditor(QWidget* parent) : QWidget(parent) {
 void MaskEditor::setImage(QImage image) {
     image_ = std::move(image); zoom_=1.0; view_center_={0.5,0.5}; wheel_delta_=0; clearMask();
 }
+MaskEditor::Snapshot MaskEditor::snapshot() const {
+    return {base_mask_,corrections_,points_,box_,accepted_};
+}
+void MaskEditor::restore(QImage image, const Snapshot& snapshot) {
+    setImage(std::move(image));
+    base_mask_=snapshot.base_mask; corrections_=snapshot.corrections;
+    points_=snapshot.points; box_=snapshot.box;
+    composeMask(); accepted_=snapshot.accepted && hasPrediction();
+    update();
+}
 void MaskEditor::setEditingEnabled(bool enabled) {
     if (editing_ == enabled) return;
     if (brushing_) { brushing_=false; before_stroke_={}; }
@@ -28,13 +38,16 @@ void MaskEditor::clearMask() {
     update(); emit selectionChanged(); emit promptsChanged();
 }
 QRectF MaskEditor::imageViewport() const {
-    return {12,44,qreal(std::max(1,width()-24)),qreal(std::max(1,height()-56))};
+    return {8,44,qreal(std::max(1,width()-16)),qreal(std::max(1,height()-52))};
 }
 QRectF MaskEditor::imageRect() const {
     if (image_.isNull()) return {};
-    const QRectF viewport = imageViewport();
-    const QSizeF size = QSizeF(image_.size()).scaled(viewport.size(), Qt::KeepAspectRatio)*zoom_;
-    return {viewport.center()-QPointF(view_center_.x()*size.width(),view_center_.y()*size.height()),size};
+    // Match StereoImageView's integer fit exactly before applying user zoom.
+    const QRect viewport = imageViewport().toRect();
+    const QSize fitted = image_.size().scaled(viewport.size(), Qt::KeepAspectRatio);
+    const QRectF base(QRect(viewport.center()-QPoint(fitted.width()/2,fitted.height()/2),fitted));
+    const QSizeF size = base.size()*zoom_;
+    return {base.center()-QPointF(view_center_.x()*size.width(),view_center_.y()*size.height()),size};
 }
 QPointF MaskEditor::toImage(QPointF p) const {
     const auto viewport=imageViewport();
@@ -196,9 +209,10 @@ void MaskEditor::wheelEvent(QWheelEvent* event) {
     const QRectF before=imageRect();
     const QPointF anchor=event->position();
     const QSizeF size=before.size()*(next_zoom/zoom_);
+    const QPointF center=before.topLeft()+QPointF(view_center_.x()*before.width(),view_center_.y()*before.height());
     // Preserve the image point beneath the cursor while changing the scale.
-    view_center_={(anchor.x()-before.left())/before.width()+(imageViewport().center().x()-anchor.x())/size.width(),
-                  (anchor.y()-before.top())/before.height()+(imageViewport().center().y()-anchor.y())/size.height()};
+    view_center_={(anchor.x()-before.left())/before.width()+(center.x()-anchor.x())/size.width(),
+                  (anchor.y()-before.top())/before.height()+(center.y()-anchor.y())/size.height()};
     zoom_=next_zoom;
     if (zoom_==1.0) view_center_={0.5,0.5};
     cursor_=anchor; update();
@@ -227,6 +241,7 @@ void MaskEditor::paintStroke(QPointF from, QPointF to) {
 void MaskEditor::acceptPrediction() {
     if (!editing_ || sam_mask_.isNull() || boxing_ || point_drag_>=0 || brushing_) return;
     accepted_=true; update(); emit selectionChanged(); emit hint("Mask selected. Prompts and brush edits remain editable.");
+    emit selectionConfirmed();
 }
 void MaskEditor::undoPrompt() {
     if (!editing_ || boxing_ || point_drag_>=0 || brushing_) return;

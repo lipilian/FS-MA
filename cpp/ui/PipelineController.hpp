@@ -12,7 +12,7 @@ public:
     void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {},
                     const QString& ma_engine = {});
     const PipelineState& state() const { return state_; }
-    quint64 requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts);
+    quint64 requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts, QImage image = {});
     void cancel();
     void stop();
 signals:

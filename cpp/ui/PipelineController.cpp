@@ -39,12 +39,12 @@ void PipelineController::initialize(const QString& engine_path, const QString& s
     initializing_ = true;
     submit([engine_path,sam_encoder,sam_decoder,ma_engine](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder,ma_engine); });
 }
-quint64 PipelineController::requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts) {
+quint64 PipelineController::requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts, QImage image) {
     const quint64 revision = mask_request_->fetch_add(1)+1;
     if (stopping_ || prompts.empty()) return revision;
     auto* worker = worker_; auto current = mask_request_;
-    QMetaObject::invokeMethod(worker,[worker,current,image_id,revision,prompts=std::move(prompts)] {
-        worker->segment(image_id,revision,prompts,current);
+    QMetaObject::invokeMethod(worker,[worker,current,image_id,revision,prompts=std::move(prompts),image=std::move(image)] {
+        worker->segment(image_id,revision,prompts,current,image);
     },Qt::QueuedConnection);
     return revision;
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include <QSurfaceFormat>
 #include <QImage>
+#include <QHash>
 #include <QPolygonF>
 #include <QWidget>
 #include <memory>
@@ -19,6 +20,9 @@ class MeshView : public QWidget {
     // Completed captures remain in the scene while the active input changes.
     // A generated GPU mesh can temporarily replace its capture's points.
     void setCapturedClouds(std::vector<SharedGPUMesh> clouds, SharedGPUMesh hidden = {});
+    // Full-resolution rectified-left masks, keyed by capture. Display only:
+    // selected FS samples are opaque; unselected/unmasked views have alpha 0.3.
+    void setFSMasks(QHash<quint64,QImage> masks, bool enabled = true);
     void setMAClouds(SharedGPUClouds clouds);
     void setShowMAClouds(bool enabled);
     void setPredictedCameras(SharedPredictedCameras cameras);

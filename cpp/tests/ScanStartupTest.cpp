@@ -20,6 +20,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTabWidget>
 #include <QTimer>
@@ -391,13 +392,125 @@ void checkImportControls() {
     std::cout<<"PASS: default scan_data folder, no unit selector, chooser cancellation, deferred import and explicit source switch\n";
 }
 
+void checkInlineMaskDrawing() {
+    PipelineController controller({}, {}, {});
+    controller.submit([](auto& w) {
+        QTimer::singleShot(0,&w,[&w] {
+            PipelineState ready; ready.engine_ready=ready.sam_ready=ready.ma_ready=true;
+            w.stateChanged(ready);
+        });
+    });
+    QElapsedTimer timeout; timeout.start();
+    while (!controller.state().engine_ready && timeout.elapsed()<5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+    require(controller.state().engine_ready,"Cannot seed model-ready inline-mask UI");
+    ReconstructionWindow window(controller,{},{});
+    window.resize(1120,950); window.show();
+    auto* view=window.findChild<MeshView*>();
+    auto* editor=window.findChild<MaskEditor*>();
+    auto* stack=window.findChild<QStackedWidget*>("leftPreviewStack");
+    auto* tabs=window.findChild<QTabWidget*>("workspaceTabs");
+    auto* start=window.findChild<QPushButton*>("startDraw");
+    auto* finish=window.findChild<QPushButton*>("finishDraw");
+    auto* tools=window.findChild<QWidget*>("scanMaskTools");
+    auto* capture=window.findChild<QPushButton*>("capturePair");
+    auto* camera=window.findChild<QPushButton*>("connectCameras");
+    auto* image_mode=window.findChild<QComboBox*>("cameraImageMode");
+    int submitted=0;
+    QObject::connect(&controller,&PipelineController::busyChanged,[&](bool busy) { if (busy) ++submitted; });
+    PipelineState state;
+    state.engine_ready=state.sam_ready=state.ma_ready=state.has_rectified=state.depth_ready=state.gpu_ready=true;
+    state.import_directory="/inline-mask-test"; state.import_total=3; state.import_sequence_started=true;
+    const auto seed=[&](int id) {
+        state.image_id=id; state.capture_count=state.import_index=id;
+        controller.stateChanged(state);
+        QImage left(320,240,QImage::Format_RGB888); left.fill(QColor(id*40,90,150));
+        controller.images(left,left); controller.depthImage(left,0,1);
+        auto cloud=std::make_shared<GPUMeshFrame>(); cloud->image_id=id; cloud->point_cloud=true;
+        cloud->stats.point_count=100;
+        controller.gpuMeshReady(cloud);
+        QCoreApplication::processEvents(); // The offscreen renderer reports that GL is unavailable.
+        view->gpuMeshPresented(cloud); QCoreApplication::processEvents();
+    };
+    const auto paint=[&] {
+        window.findChild<QPushButton*>("maskBrush")->click();
+        const QPointF point=editor->rect().center(), global=editor->mapToGlobal(point.toPoint());
+        QMouseEvent press(QEvent::MouseButtonPress,point,global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease,point,global,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+        QApplication::sendEvent(editor,&press); QApplication::sendEvent(editor,&release);
+    };
+    seed(1);
+    require(!start->isEnabled() && !tabs->isTabVisible(1),"Import drawing must select a camera without a region tab");
+    const QSize preview_size=stack->size();
+    auto* preview=window.findChild<StereoImageView*>("capturePreview");
+    const QRect image_area(0,44,preview->width(),preview->height()-44);
+    const QImage preview_pixels=preview->grab().toImage().copy(image_area);
+    view->cameraClicked(1);
+    require(start->isEnabled() && stack->currentWidget()==editor,"Single imported camera did not select the inline editor");
+    start->click(); QCoreApplication::processEvents();
+    require(tools->isVisible() && !capture->isEnabled() && !camera->isEnabled() && finish->isEnabled() &&
+            tabs->currentIndex()==0 && editor->imageSize()==QSize(320,240),
+            "Inline drawing controls or original-resolution image are incorrect");
+    auto* reset=window.findChild<QPushButton*>("resetMeshView");
+    const QPoint reset_position=reset->mapTo(&window,QPoint());
+    int previous_right=reset_position.x()+reset->width();
+    for (QWidget* control : {static_cast<QWidget*>(start),static_cast<QWidget*>(finish),tools}) {
+        const auto position=control->mapTo(&window,QPoint());
+        require(position.x()>=previous_right &&
+                std::abs(position.y()+control->height()/2-reset_position.y()-reset->height()/2)<=1,
+                "Start draw, Finish draw and mask tools must follow Reset view on the same row");
+        previous_right=position.x()+control->width();
+    }
+    require(window.width()==1120 && stack->size()==preview_size && editor->size()==preview_size &&
+            editor->grab().toImage().copy(image_area)==preview_pixels,
+            "Showing drawing tools changed the left preview size or fitted image pixels");
+    paint();
+    const auto screenshot_directory=qEnvironmentVariable("FS_SCAN_TEST_SCREENSHOTS");
+    if (!screenshot_directory.isEmpty()) {
+        QDir().mkpath(screenshot_directory);
+        require(window.grab().save(screenshot_directory+"/inline-mask.png"),"Cannot save inline mask screenshot");
+    }
+    finish->click();
+    QCoreApplication::processEvents();
+    require(stack->size()==preview_size,"Finishing drawing resized the left preview");
+    const auto first=editor->mask();
+    require(!first.isNull() && !tools->isVisible() && start->isEnabled() && capture->isEnabled(),
+            "Finish draw did not retain the mask and return to idle");
+    seed(2);
+    view->cameraClicked(2); start->click(); finish->click();
+    require(editor->mask().isNull(),"A new camera inherited another view's mask");
+    view->cameraClicked(1);
+    require(editor->mask()==first,"Historical mask was lost after importing another pair");
+    start->click(); view->cameraClicked(2);
+    require(editor->mask()==first,"Camera selection changed in the middle of drawing");
+    window.findChild<QPushButton*>("clearMask")->click(); finish->click();
+    view->cameraClicked(2); start->click(); QCoreApplication::processEvents(); paint(); finish->click();
+    require(editor->hasSelection(),"Second camera mask was not retained");
+    view->cameraClicked(1);
+    require(editor->mask().isNull(),"Clearing the first camera did not persist independently");
+    image_mode->setCurrentIndex(1);
+    require(image_mode->currentIndex()==1 && stack->currentWidget()!=editor,
+            "Drawing invalidated depth or prevented switching back to the depth preview");
+    QCoreApplication::processEvents();
+    require(submitted==0,"Drawing or clearing a mask triggered FS/MA reconstruction");
+    state.image_id=3; state.capture_count=0; state.has_rectified=state.depth_ready=false;
+    controller.stateChanged(state); view->cameraClicked(1);
+    require(!start->isEnabled(),"Restart retained an old camera's editable mask");
+    state.import_directory.clear(); controller.stateChanged(state);
+    require(tabs->isTabVisible(1) && editor->parentWidget()!=stack,"Leaving import mode did not restore the existing camera workspace");
+    window.allowClose(); controller.stop();
+    std::cout<<"PASS: inline import masks, single/historical camera selection, per-view persistence, clear, idle controls and no FS/MA jobs\n";
+}
+
 // Explicit opt-in: exercises real FS/MA inference from files without cameras or OpenGL.
 int checkImportedScan(const QString& directory, const QString& engine) {
     PipelineWorker worker({}, {}, {}, std::make_shared<std::atomic_bool>(false));
     PipelineState state;
     SharedGPUMesh geometry;
+    QImage latest_left;
     QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState update) { state=std::move(update); });
     QObject::connect(&worker,&PipelineWorker::gpuMeshReady,[&](SharedGPUMesh update) { geometry=std::move(update); });
+    QObject::connect(&worker,&PipelineWorker::images,[&](QImage left,QImage) { latest_left=std::move(left); });
     const auto run=[&](const std::function<void(PipelineWorker&)>& action) {
         worker.execute(action);
         if (state.action_failed) throw std::runtime_error(state.status.toStdString());
@@ -406,10 +519,11 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     require(state.import_total>=2,"Import integration test requires at least two stereo pairs");
     std::vector<fs::MeshCamera> cameras;
     std::vector<quint64> ids;
+    std::vector<QImage> images;
     for (int i=0;i<2;++i) {
         run([](auto& w) { w.importNextPair(true); });
         require(state.image_camera.has_value(),"Imported pair has no rectified camera");
-        cameras.push_back(*state.image_camera); ids.push_back(state.image_id);
+        cameras.push_back(*state.image_camera); ids.push_back(state.image_id); images.push_back(latest_left);
         run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
         require(state.capture_count==i+1 && geometry && geometry->point_cloud && geometry->stats.point_count>0,
                 "Imported FS reconstruction did not retain a valid point cloud");
@@ -442,8 +556,35 @@ int checkImportedScan(const QString& directory, const QString& engine) {
                 cloud->camera.image_size==cv::Size(fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight),
                 "MA camera snapshot does not match its image grid");
     }
+    const auto geometry_before=geometry;
+    const auto poses_before=state.predicted_cameras;
+    const auto clouds_before=state.ma_clouds;
+    QImage result;
+    quint64 response_id=0, response_revision=0;
+    QObject::connect(&worker,&PipelineWorker::maskReady,[&](quint64 id,quint64 revision,QImage mask,QString) {
+        response_id=id; response_revision=revision; result=std::move(mask);
+    });
+    auto request=std::make_shared<std::atomic_uint64_t>(1);
+    QImage historical;
+    for (int index : {0,1,0}) {
+        const auto size=images[index].size();
+        const std::vector<fs::SamPrompt> prompts{
+            {{float(size.width()*.2),float(size.height()*.2)},2},
+            {{float(size.width()*.8),float(size.height()*.8)},3}};
+        response_id=0;
+        worker.segment(ids[index],request->load(),prompts,request,index==0 ? images[index] : QImage{});
+        require(response_id==ids[index] && response_revision==request->load() && result.size()==size,
+                "SAM did not segment the requested historical/current image at original resolution");
+        if (historical.isNull()) historical=result;
+        else if (index==0) require(result==historical,"Returning to the historical camera reused another image's SAM features");
+        ++*request;
+    }
+    require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_clouds==clouds_before &&
+            state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
+            "Historical SAM editing changed FS/MA output or the import cursor");
     worker.shutdown();
     std::cout<<"PASS: imported FS points/mesh, depth export, two-view MA and historical camera snapshots\n";
+    std::cout<<"PASS: historical/current SAM feature switching and independent geometry/import state\n";
     return 0;
 }
 
@@ -612,8 +753,8 @@ int checkLiveScan(QApplication& app) {
                                 auto* transfer=window->findChild<CaptureTransition*>();
                                 require(transfer->isRunning() && transfer->isVisible(), "Camera transfer did not run after GPU mesh presentation");
                                 require(!window->findChild<StereoImageView*>("capturePreview")->isProcessing(), "Transfer started before calculation finished");
-                                require(window->findChild<QComboBox*>("meshMode")->currentIndex()==1 && hasSceneContent(window->findChild<QOpenGLWidget*>()),
-                                        "GPU mesh is not rendered during the image transfer");
+                                require(window->findChild<QComboBox*>("meshMode")->currentIndex()==0 && hasSceneContent(window->findChild<QOpenGLWidget*>()),
+                                        "First capture did not default to FS points during the image transfer");
                                 require(!window->findChild<QPushButton*>("capturePair")->isEnabled(), "A new capture can interrupt the image transfer");
                                 screenshot("transfer");
                             } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
@@ -665,6 +806,7 @@ int checkLiveScan(QApplication& app) {
                                 } else {
                                     if (!mesh->point_cloud) {
                                         auto* mode=window->findChild<QComboBox*>("meshMode");
+                                        mode->setCurrentIndex(1);
                                         const auto surface=canvas->grabFramebuffer();
                                         mode->setCurrentIndex(2);
                                         const auto wireframe=canvas->grabFramebuffer();
@@ -826,7 +968,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: D435 first FS mesh, default FS points for 2–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
+    std::cout<<"PASS: D435 default FS points for 1–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
     std::cout<<"PASS: camera selection restores each original stereo pair and depth in FS/MA modes, replaces retaken images and clears on restart\n";
     return 0;
 }
@@ -848,6 +990,7 @@ int main(int argc, char** argv) {
         checkImportFolder();
         checkRectificationCache();
         checkImportControls();
+        checkInlineMaskDrawing();
         return 0;
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;

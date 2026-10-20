@@ -933,15 +933,26 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     emit log(state_.status);
 }
 void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
-                             const std::shared_ptr<std::atomic_uint64_t>& current_request) {
-    const auto current = [&] { return !cancel_->load() && current_request->load()==request_id && state_.image_id==image_id; };
+                             const std::shared_ptr<std::atomic_uint64_t>& current_request, const QImage& image) {
+    const auto current = [&] { return !cancel_->load() && current_request->load()==request_id &&
+        (state_.image_id==image_id || (!image.isNull() && std::any_of(captures_.begin(),captures_.end(),
+            [=](const auto& capture) { return capture.image_id==image_id; }))); };
     if (!current()) return;
     try {
         if (!sam_ || !state_.sam_ready || !frame_ || state_.live) throw std::runtime_error("Freeze or import an image before drawing SAM prompts.");
         if (prompts.empty()) return;
         QElapsedTimer elapsed; elapsed.start();
-        const bool encode = !sam_->hasImage();
-        if (encode) sam_->setImage(frame_->rectified_left());
+        const bool encode = !sam_->hasImage() || sam_image_id_!=image_id;
+        if (encode) {
+            if (image.isNull()) sam_->setImage(frame_->rectified_left());
+            else {
+                const auto rgb=image.convertToFormat(QImage::Format_RGB888);
+                const cv::Mat input(rgb.height(),rgb.width(),CV_8UC3,
+                    const_cast<uchar*>(rgb.constBits()),rgb.bytesPerLine());
+                sam_->setImage(input);
+            }
+            sam_image_id_=image_id;
+        }
         if (!current()) return;
         const cv::Mat mask = sam_->predict(prompts);
         if (!current()) return;

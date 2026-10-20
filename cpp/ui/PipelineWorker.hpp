@@ -66,7 +66,7 @@ public:
     void reconstruct(float minimum, float maximum, const QImage& selection_mask,
                      bool denoise = true, float max_neighbor_distance_m = 0.003F);
     void segment(quint64 image_id, quint64 request_id, const std::vector<fs::SamPrompt>& prompts,
-                 const std::shared_ptr<std::atomic_uint64_t>& current_request);
+                 const std::shared_ptr<std::atomic_uint64_t>& current_request, const QImage& image = {});
     // Triangle meshes are available only for single-view FS geometry.
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
@@ -125,6 +125,7 @@ private:
     int capture_slot_{0}; // Retake replaces this slot; Capture more selects the next slot.
     std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
+    quint64 sam_image_id_{0};
     std::shared_ptr<fs::MA_VGGT> ma_;
     // Filtered Z depth retained for TIFF export; geometry stays on the GPU.
     cv::Mat depth_;

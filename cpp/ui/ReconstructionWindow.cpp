@@ -30,6 +30,7 @@
 #include <QSpinBox>
 #include <QStandardItemModel>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -102,6 +103,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     step->setObjectName("step"); outer->addWidget(step);
     auto* title = label(calibration ? "Reconstruction workspace" : "RealSense scan workspace"); title->setObjectName("title"); outer->addWidget(title);
     auto* toolbar = new QHBoxLayout;
+    capture_toolbar_=toolbar;
     import_ = button("Import folder…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     camera_mode_ = new QComboBox; camera_mode_->setObjectName("cameraMode");
     if (calibration) camera_mode_->addItem("Sentech stereo", int(CameraMode::Sentech));
@@ -119,6 +121,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     restart_->setToolTip("Clear all captured views and reconstruction results, then return to live preview for the first capture.");
     retake_->setToolTip("Return to preview. A single view's reconstruction is cleared; with multiple views, completed captures are retained until the replacement succeeds.");
     capture_ = button("Capture pair", "capturePair");
+    start_draw_ = button("Start draw", "startDraw");
     finish_draw_ = button("Finish draw", "finishDraw");
     toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
     toolbar->addWidget(camera_);
@@ -129,7 +132,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         toolbar->addWidget(manual_reconstruct_);
         connect(manual_reconstruct_,&QPushButton::clicked,this,&ReconstructionWindow::reconstructCurrent);
     }
-    toolbar->addStretch(); toolbar->addWidget(finish_draw_);
+    toolbar->addStretch(); toolbar->addWidget(start_draw_); toolbar->addWidget(finish_draw_);
     toolbar->addWidget(restart_);
     toolbar->addWidget(retake_);
     toolbar->addSpacing(48);
@@ -186,7 +189,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     split->addWidget(settings_panel);
 
     tabs_ = new QTabWidget; tabs_->setObjectName("workspaceTabs");
-    auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); auto* scene_controls = new QHBoxLayout;
+    auto* scene = new QWidget; auto* scene_layout = new QVBoxLayout(scene); scene_controls_ = new QHBoxLayout;
+    scene_controls_->setSpacing(4);
     auto* cloud_controls=new QHBoxLayout;
     fs_cloud_=new QRadioButton("FS"); fs_cloud_->setObjectName("fsPointCloud");
     ma_cloud_=new QRadioButton("MA"); ma_cloud_->setObjectName("maPointCloud");
@@ -202,16 +206,18 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* reset=button("Reset view","resetMeshView");
     auto* show_right_camera=new QCheckBox("Show right camera"); show_right_camera->setObjectName("showRightCamera");
     show_right_camera->setToolTip("Show the right image below the left preview and beside the captured left camera in 3D.");
-    scene_controls->addWidget(camera_image_mode_); scene_controls->addWidget(show_right_camera);
-    scene_controls->addWidget(mesh_mode_); scene_controls->addWidget(reset); scene_controls->addStretch();
-    scene_layout->addLayout(scene_controls);
+    scene_controls_->addWidget(camera_image_mode_); scene_controls_->addWidget(show_right_camera);
+    scene_controls_->addWidget(mesh_mode_); scene_controls_->addWidget(reset); scene_controls_->addStretch();
+    scene_layout->addLayout(scene_controls_);
     auto* scene_split = new QSplitter(Qt::Horizontal); scene_split->setObjectName("previewSceneSplit");
     scene_split->setChildrenCollapsible(false);
     auto* previews = new QWidget; auto* preview_layout = new QVBoxLayout(previews);
     preview_layout->setContentsMargins(0,0,0,0);
+    preview_stack_=new QStackedWidget; preview_stack_->setObjectName("leftPreviewStack");
     preview_ = new StereoImageView("Left preview"); preview_->setObjectName("capturePreview");
     right_preview_ = new StereoImageView("Right preview"); right_preview_->setObjectName("rightCapturePreview");
-    preview_layout->addWidget(preview_,1); preview_layout->addWidget(right_preview_,1);
+    preview_stack_->addWidget(preview_);
+    preview_layout->addWidget(preview_stack_,1); preview_layout->addWidget(right_preview_,1);
     right_preview_->hide(); scene_split->addWidget(previews);
     mesh_view_=new MeshView; mesh_view_->setObjectName("meshView"); scene_split->addWidget(mesh_view_);
     scene_split->setStretchFactor(0,1); scene_split->setStretchFactor(1,2);
@@ -240,7 +246,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         ma_upload_pending_=checked && displayed_ma_clouds_ && !ma_cloud_valid_;
         refresh();
     });
-    auto* region = new QWidget; auto* region_layout = new QVBoxLayout(region);
+    auto* region = new QWidget; region_=region; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
     region_layout->addWidget(label("The mask limits neighbourhood filtering; XYZ outside it is preserved."));
@@ -297,16 +303,22 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         // Keep the hidden parameter widgets as the shared pipeline's settings.
         settings_panel->hide();
         auto* mask_tools = new QWidget; mask_tools->setObjectName("scanMaskTools");
-        auto* mask_rows = new QVBoxLayout(mask_tools);
-        auto* prompt_row = new QHBoxLayout;
-        for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_,sam_undo_}) prompt_row->addWidget(b);
-        prompt_row->addStretch(); mask_rows->addLayout(prompt_row);
-        auto* brush_row = new QHBoxLayout;
-        brush_row->addWidget(brush_); brush_row->addWidget(eraser_);
-        brush_row->addWidget(label("Brush size")); brush_row->addWidget(brush_size_);
-        brush_row->addWidget(clear_); brush_row->addStretch(); mask_rows->addLayout(brush_row);
+        auto* mask_row = new QHBoxLayout(mask_tools); mask_row->setContentsMargins(0,0,0,0); mask_row->setSpacing(2);
+        const auto add_tool=[&](QPushButton* button, const QString& text) {
+            button->setToolTip(button->text()); button->setAccessibleName(button->text()); button->setText(text);
+            button->setStyleSheet("QPushButton { padding: 5px 2px; }");
+            button->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed);
+            mask_row->addWidget(button);
+        };
+        add_tool(sam_box_,"Box"); add_tool(sam_foreground_,"FG +"); add_tool(sam_background_,"BG −");
+        add_tool(sam_remove_,"Del"); add_tool(sam_undo_,"Undo");
+        add_tool(brush_,"Brush"); add_tool(eraser_,"Erase"); add_tool(clear_,"Clear");
+        brush_size_->setSizePolicy(QSizePolicy::Maximum,QSizePolicy::Fixed); mask_row->addWidget(brush_size_);
+        overlay->setToolTip(overlay->text()); overlay->setAccessibleName(overlay->text()); overlay->setText("Overlay");
+        mask_row->addWidget(overlay); mask_row->addStretch();
         region_layout->insertWidget(0,mask_tools);
         mask_panel_ = mask_tools;
+        for (auto* b : {start_draw_,finish_draw_}) b->setStyleSheet("QPushButton { padding: 5px 4px; }");
 
         auto* save_dialog = new QDialog(this);
         save_dialog->setObjectName("saveResultsDialog"); save_dialog->setWindowTitle("Save results");
@@ -345,6 +357,14 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (state.live || state.image_id != state_.image_id) {
             reconstruction_valid_ = false;
             preview_camera_id_=0;
+            drawing_mask_=false; mask_pending_=false;
+            mask_request_id_=controller_.requestMask(state.image_id,{});
+        }
+        if (state.import_directory!=state_.import_directory) {
+            drawing_mask_=false; mask_pending_=false; preview_camera_id_=0;
+            mask_request_id_=controller_.requestMask(state.image_id,{});
+            const QSignalBlocker blocker(mask_);
+            mask_->setImage(rectified_left_);
         }
         if (state.capture_count==0) { captured_clouds_.clear(); capture_previews_.clear(); }
         state_ = std::move(state);
@@ -405,13 +425,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         showImages();
     });
     connect(&controller_,&PipelineController::maskReady,this,[this](quint64 image_id,quint64 request_id,QImage mask,QString message) {
-        if (closing_ || image_id!=state_.image_id || request_id!=mask_request_id_) return;
+        if (closing_ || image_id!=(inlineMaskMode() ? preview_camera_id_ : state_.image_id) ||
+            request_id!=mask_request_id_ || (inlineMaskMode() && !drawing_mask_)) return;
+        mask_pending_=false;
         mask_->setPrediction(std::move(mask)); status_->setText(message);
     });
     connect(&controller_,&PipelineController::gpuMeshReady,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_) return;
         if (mesh->point_cloud && mesh->image_id==state_.image_id)
-            capture_previews_.insert(mesh->image_id,{rectified_left_,rectified_right_,depth_image_,depth_description_});
+            capture_previews_.insert(mesh->image_id,{rectified_left_,rectified_right_,depth_image_,depth_description_,{},{}});
         if (capture_mesh_requested_) {
             if (mesh->point_cloud) pending_capture_cloud_=std::move(mesh);
             else pending_capture_mesh_=std::move(mesh);
@@ -420,15 +442,22 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         presentGeometry(std::move(mesh));
     });
     connect(mesh_view_,&MeshView::cameraClicked,this,[this](quint64 image_id) {
-        if (busy_ || closing_ || state_.live || capture_processing_ || capture_transition_pending_ ||
-            capture_transition_->isRunning() || !displayed_cameras_ || displayed_cameras_->size()<2 ||
+        if (busy_ || closing_ || drawing_mask_ || state_.live || capture_processing_ || capture_transition_pending_ ||
+            capture_transition_->isRunning() ||
             !capture_previews_.contains(image_id)) return;
-        if (std::none_of(displayed_cameras_->begin(),displayed_cameras_->end(),
-            [=](const auto& camera) { return camera.image_id==image_id; })) return;
+        if (std::none_of(captured_clouds_.begin(),captured_clouds_.end(),
+            [=](const auto& cloud) { return cloud && cloud->image_id==image_id; })) return;
         preview_camera_id_=image_id;
+        if (inlineMaskMode()) {
+            mask_request_id_=controller_.requestMask(image_id,{});
+            mask_pending_=false;
+            const auto& selected=capture_previews_[image_id];
+            const QSignalBlocker blocker(mask_);
+            mask_->restore(selected.left,selected.drawing);
+        }
         const QSignalBlocker blocker(camera_image_mode_);
         camera_image_mode_->setCurrentIndex(0);
-        showImages();
+        refresh();
     });
     connect(mesh_view_,&MeshView::gpuMeshPresented,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_ || mesh!=gpu_mesh_result_) return;
@@ -534,7 +563,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (overwrite && QMessageBox::question(this,"Replace existing files?",
             "These files already exist in the chosen folder:\n"+existing.join("\n")+"\n\nReplace them?",
             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
-        const QImage selection=mask_->mask();
+        const QImage selection=exportMask();
         const SharedGPUMesh gpu_mesh=mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
         const SharedGPUClouds ma_geometry=ma_cloud_->isChecked() && ma_cloud_valid_
             ? displayed_ma_clouds_ : SharedGPUClouds{};
@@ -544,7 +573,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         save_results({save_images_->isChecked(),save_calibration_->isChecked(),save_mask_->isChecked(),save_mesh_->isChecked(),save_depth_->isChecked()});
     });
     connect(save_all_,&QPushButton::clicked,this,[this,save_results] {
-        save_results({true,true,mask_->hasSelection(),true,true});
+        save_results({true,true,!exportMask().isNull(),true,true});
     });
     const auto mesh_settings_changed=[this] {
         // Triangle constraints do not change a point-only result.
@@ -564,29 +593,46 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(neighbor_distance_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(clear_,&QPushButton::clicked,this,[this] {
         mask_->clearMask();
-        if (!has_confirmed_calibration_) reconstructCurrent();
+        if (!has_confirmed_calibration_ && !inlineMaskMode()) reconstructCurrent();
     });
     connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
     connect(brush_size_,&QSpinBox::valueChanged,mask_,&MaskEditor::setBrushSize);
     connect(mask_,&MaskEditor::brushSizeChanged,brush_size_,&QSpinBox::setValue);
     const auto tool = [this,overlay,region](QPushButton* button, MaskEditor::Tool tool) {
         connect(button,&QPushButton::clicked,this,[this,overlay,region,tool] {
-            tabs_->setCurrentWidget(region); overlay->setChecked(true); mask_->setTool(tool);
+            if (!inlineMaskMode()) tabs_->setCurrentWidget(region);
+            overlay->setChecked(true); mask_->setTool(tool);
         });
     };
     tool(sam_box_,MaskEditor::Tool::Box); tool(sam_foreground_,MaskEditor::Tool::Foreground);
     tool(sam_background_,MaskEditor::Tool::Background); tool(sam_remove_,MaskEditor::Tool::Remove);
     tool(brush_,MaskEditor::Tool::Brush); tool(eraser_,MaskEditor::Tool::Eraser);
     connect(sam_undo_,&QPushButton::clicked,mask_,&MaskEditor::undoPrompt);
+    connect(start_draw_,&QPushButton::clicked,this,[this,overlay] {
+        if (!inlineMaskMode() || !capture_previews_.contains(preview_camera_id_)) return;
+        drawing_mask_=true;
+        camera_image_mode_->setCurrentIndex(0); overlay->setChecked(true);
+        refresh(); mask_->setFocus();
+        status_->setText("Draw a mask for the selected camera, then click Finish draw.");
+    });
     connect(finish_draw_,&QPushButton::clicked,this,[this] {
+        if (inlineMaskMode() && mask_pending_) return;
         mask_->acceptPrediction();
+        if (inlineMaskMode()) { finishInlineDraw(); return; }
         if (mask_->hasSelection()) tabs_->setCurrentIndex(SceneTab);
     });
+    connect(mask_,&MaskEditor::selectionConfirmed,this,&ReconstructionWindow::finishInlineDraw);
     connect(mask_,&MaskEditor::promptsChanged,this,[this] {
-        const auto prompts=mask_->prompts(); mask_request_id_=controller_.requestMask(state_.image_id,prompts);
+        if (inlineMaskMode() && !drawing_mask_) return;
+        const auto prompts=mask_->prompts();
+        mask_pending_=!prompts.empty();
+        mask_request_id_=controller_.requestMask(inlineMaskMode() ? preview_camera_id_ : state_.image_id,prompts,
+            inlineMaskMode() ? capture_previews_.value(preview_camera_id_).left : QImage{});
+        refresh();
         if (!prompts.empty()) status_->setText("Updating SAM mask…");
     });
     connect(mask_,&MaskEditor::selectionChanged,this,[this] {
+        if (inlineMaskMode()) { refresh(); return; }
         reconstruction_valid_=false; refresh();
         if (!has_confirmed_calibration_ && mask_->hasSelection()) {
             // Finish draw (or Enter) commits the selection. Wait for its UI
@@ -602,16 +648,33 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(tabs_,&QTabWidget::currentChanged,this,&ReconstructionWindow::refreshWorkspace);
     refresh();
 }
+bool ReconstructionWindow::inlineMaskMode() const {
+    return !has_confirmed_calibration_ && !state_.import_directory.isEmpty();
+}
+void ReconstructionWindow::finishInlineDraw() {
+    if (!inlineMaskMode() || !drawing_mask_ || mask_pending_) return;
+    auto selected=capture_previews_.find(preview_camera_id_);
+    if (selected==capture_previews_.end()) return;
+    selected->drawing=mask_->snapshot(); selected->mask=mask_->mask();
+    drawing_mask_=false;
+    mask_request_id_=controller_.requestMask(preview_camera_id_,{});
+    refresh();
+    status_->setText("Mask saved for this view in the current session.");
+}
+QImage ReconstructionWindow::exportMask() const {
+    // The existing export saves the latest pair, even while reviewing an older camera.
+    return inlineMaskMode() ? capture_previews_.value(state_.image_id).mask : mask_->mask();
+}
 void ReconstructionWindow::buildMeshGPU() {
     if (busy_ || closing_ || gpu_upload_pending_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !reconstruction_valid_ ||
         !state_.depth_ready || !state_.gpu_ready || !state_.engine_ready || state_.capture_count>=2) return;
     mesh_valid_=false; refresh();
-    const QImage selected=mask_->mask();
+    const QImage selected=inlineMaskMode() ? QImage{} : mask_->mask();
     const double edge=mesh_edge_->value();
     controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge); });
 }
 void ReconstructionWindow::reconstructCurrent() {
-    if (busy_ || closing_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !state_.has_rectified || !state_.engine_ready) return;
+    if (inlineMaskMode() || busy_ || closing_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !state_.has_rectified || !state_.engine_ready) return;
     reconstruction_valid_=false; refresh();
     const float low=minimum_->value(), high=maximum_->value(), distance=neighbor_distance_->value();
     const QImage selected=mask_->mask();
@@ -647,8 +710,14 @@ void ReconstructionWindow::refresh() {
     const bool replacement=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && !gpu_mesh_result_->point_cloud;
     mesh_view_->setCapturedClouds(captured_clouds_,replacement && !captured_clouds_.empty()
         ? captured_clouds_.back() : SharedGPUMesh{});
+    QHash<quint64,QImage> display_masks;
+    if (inlineMaskMode() && !closing_)
+        for (auto it=capture_previews_.cbegin();it!=capture_previews_.cend();++it)
+            if (!it->mask.isNull()) display_masks.insert(it.key(),it->mask);
+    mesh_view_->setFSMasks(std::move(display_masks),inlineMaskMode());
     const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
-    const bool idle = !busy_ && !closing_ && !gpu_upload_pending_ && !ma_upload_pending_ && !transferring, frozen = state_.has_rectified && !state_.live;
+    const bool ready = !busy_ && !closing_ && !gpu_upload_pending_ && !ma_upload_pending_ && !transferring;
+    const bool idle = ready && !drawing_mask_, frozen = state_.has_rectified && !state_.live;
     const bool importing=!state_.import_directory.isEmpty();
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle && has_confirmed_calibration_); camera_->setEnabled(idle);
     import_->setToolTip(importing ? QString("Import folder: %1\n%2 / %3 pairs imported. Choose another folder to start from its first pair.")
@@ -692,13 +761,16 @@ void ReconstructionWindow::refresh() {
             ? "Reconstruct depth and display valid points. Without a confirmed mask, process the full image."
             : "Minimum depth must be less than maximum.");
     }
-    mask_->setEditingEnabled(idle && frozen);
-    for (auto* b : {brush_,eraser_}) b->setEnabled(idle && frozen);
-    brush_size_->setEnabled(idle && frozen);
-    for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_}) b->setEnabled(idle && frozen && state_.sam_ready);
-    sam_undo_->setEnabled(idle && frozen && mask_->hasPrompts());
-    finish_draw_->setEnabled(idle && frozen && mask_->hasPrediction());
-    clear_->setEnabled(idle && (mask_->hasPrompts() || mask_->hasPrediction()));
+    const bool editing=ready && frozen && (!inlineMaskMode() || drawing_mask_);
+    mask_->setEditingEnabled(editing);
+    for (auto* b : {brush_,eraser_}) b->setEnabled(editing);
+    brush_size_->setEnabled(editing);
+    for (auto* b : {sam_box_,sam_foreground_,sam_background_,sam_remove_}) b->setEnabled(editing && state_.sam_ready);
+    sam_undo_->setEnabled(editing && mask_->hasPrompts());
+    start_draw_->setEnabled(inlineMaskMode() && idle && frozen && capture_previews_.contains(preview_camera_id_));
+    start_draw_->setToolTip("Click a captured camera or its view label, then start drawing on its rectified left image.");
+    finish_draw_->setEnabled(editing && (inlineMaskMode() ? !mask_pending_ : mask_->hasPrediction()));
+    clear_->setEnabled(editing && (mask_->hasPrompts() || mask_->hasPrediction()));
     input_->setText(importing ? QString("Import folder: %1\n%2 / %3 pairs imported\n%4")
         .arg(state_.import_directory).arg(state_.import_index).arg(state_.import_total).arg(state_.input) : state_.input);
     calibration_->setText(state_.calibration);
@@ -741,15 +813,18 @@ void ReconstructionWindow::refresh() {
     browse_save_->setEnabled(idle);
     if (open_save_) open_save_->setEnabled(idle && frozen);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
-    if (!mask_->hasSelection()) {
+    const bool has_export_mask=inlineMaskMode() ? !capture_previews_.value(state_.image_id).mask.isNull() : mask_->hasSelection();
+    if (!has_export_mask) {
         const QSignalBlocker blocker(save_mask_);
         save_mask_->setChecked(false);
     }
-    save_mask_->setEnabled(idle && mask_->hasSelection());
+    save_mask_->setEnabled(idle && has_export_mask);
+    save_mask_->setToolTip(inlineMaskMode() ? "Save the latest imported pair's confirmed mask, in rectified-left image coordinates."
+                                          : "Full-resolution confirmed mask in rectified-left image coordinates.");
     save_calibration_name_->setText(state_.calibration_filename);
     const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked() || save_depth_->isChecked();
     const bool geometry_valid=show_ma ? ma_cloud_valid_ : mesh_valid_ && bool(gpu_mesh_result_);
-    const bool can_save=any_save && frozen && (!save_mask_->isChecked() || mask_->hasSelection()) &&
+    const bool can_save=any_save && frozen && (!save_mask_->isChecked() || has_export_mask) &&
         (!save_depth_->isChecked() || result_current) &&
         (!save_mesh_->isChecked() || geometry_valid);
     save_selected_->setEnabled(idle && can_save && !save_directory_->text().isEmpty());
@@ -781,19 +856,35 @@ void ReconstructionWindow::refresh() {
     showImages();
 }
 void ReconstructionWindow::refreshWorkspace() {
+    const bool inline_mask=inlineMaskMode();
+    if (inline_mask && mask_->parentWidget()!=preview_stack_) {
+        preview_stack_->addWidget(mask_);
+        scene_controls_->insertWidget(4,start_draw_);
+        scene_controls_->insertWidget(5,finish_draw_);
+        scene_controls_->insertWidget(6,mask_panel_,1);
+    } else if (!inline_mask && mask_->parentWidget()==preview_stack_) {
+        preview_stack_->removeWidget(mask_);
+        static_cast<QVBoxLayout*>(region_->layout())->insertWidget(0,mask_,1);
+        static_cast<QVBoxLayout*>(region_->layout())->insertWidget(0,mask_panel_);
+        capture_toolbar_->insertWidget(capture_toolbar_->indexOf(restart_),start_draw_);
+        capture_toolbar_->insertWidget(capture_toolbar_->indexOf(restart_),finish_draw_);
+        preview_stack_->setCurrentWidget(preview_);
+    }
     const bool frozen=state_.has_rectified && !state_.live;
-    if (!frozen && tabs_->currentIndex()==RegionTab) tabs_->setCurrentIndex(SceneTab);
+    if ((!frozen || inline_mask) && tabs_->currentIndex()==RegionTab) tabs_->setCurrentIndex(SceneTab);
+    tabs_->setTabVisible(RegionTab,!inline_mask);
     tabs_->setTabEnabled(RegionTab,frozen && !busy_ && !capture_transition_pending_ && !capture_transition_->isRunning());
     tabs_->setTabToolTip(RegionTab,frozen ? "Optional: draw and confirm a mask for region measurement." : "Capture or import a stereo pair first.");
 
     const bool scene=tabs_->currentIndex()==SceneTab;
     input_panel_->setVisible(scene);
-    mask_panel_->setVisible(!scene);
+    mask_panel_->setVisible(inline_mask ? drawing_mask_ : !scene);
     depth_panel_->setVisible(scene); geometry_panel_->setVisible(scene); save_panel_->setVisible(scene && frozen);
     for (auto* b : {import_,camera_,capture_,restart_}) b->setVisible(scene);
     retake_->setVisible(scene && state_.has_rectified && state_.import_directory.isEmpty());
     camera_mode_->setVisible(scene);
-    finish_draw_->setVisible(!scene);
+    start_draw_->setVisible(inline_mask);
+    finish_draw_->setVisible(inline_mask || !scene);
     if (manual_reconstruct_) manual_reconstruct_->setVisible(scene && frozen);
     if (open_save_) open_save_->setVisible(scene && frozen);
 }
@@ -806,9 +897,9 @@ void ReconstructionWindow::showImages() {
     const auto& depth=reviewing ? selected->depth : depth_image_;
     mesh_view_->setCameraPresentation(reviewing ? preview_camera_id_ : state_.image_id,
         reviewing ? preview_camera_id_ : highlighted_camera_id_,transferring ? transition_camera_id_ : 0);
-    mesh_view_->setCameraInteractionEnabled(!busy_ && !closing_ && !state_.live && !capture_processing_ &&
-        !transferring && displayed_cameras_ && displayed_cameras_->size()>=2);
-    camera_image_mode_->setEnabled(!capture_processing_ && !transferring);
+    mesh_view_->setCameraInteractionEnabled(!busy_ && !closing_ && !drawing_mask_ && !state_.live && !capture_processing_ &&
+        !transferring && !captured_clouds_.empty());
+    camera_image_mode_->setEnabled(!drawing_mask_ && !capture_processing_ && !transferring);
     const bool depth_available = !state_.live && !capture_processing_ && !transferring &&
         (reviewing || (reconstruction_valid_ && state_.depth_ready)) && !depth.isNull();
     static_cast<QStandardItemModel*>(camera_image_mode_->model())->item(1)->setEnabled(depth_available);
@@ -817,6 +908,8 @@ void ReconstructionWindow::showImages() {
         camera_image_mode_->setCurrentIndex(0);
     }
     const bool show_depth = depth_available && camera_image_mode_->currentIndex()==1;
+    if (inlineMaskMode())
+        preview_stack_->setCurrentWidget(reviewing && !show_depth ? static_cast<QWidget*>(mask_) : preview_);
     if (!capture_processing_) {
         preview_->setImage(show_depth ? depth : state_.live ? live_left_ : left);
         right_preview_->setImage(state_.live ? live_right_ : right);
@@ -850,7 +943,7 @@ void ReconstructionWindow::presentGeometry(SharedGPUMesh mesh) {
             [&](const auto& cloud) { return cloud && cloud->image_id==it.key(); })) it=capture_previews_.erase(it);
         else ++it;
     }
-    mesh_mode_->setCurrentIndex(gpu_mesh_result_->point_cloud ? 0 : 1);
+    mesh_mode_->setCurrentIndex(0);
     tabs_->setCurrentIndex(SceneTab);
     mesh_view_->setGPUMesh(gpu_mesh_result_);
     if (capture_transition_pending_) mesh_view_->resetCaptureView();
