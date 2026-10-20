@@ -7,6 +7,8 @@
 #include <QSaveFile>
 #include <QDataStream>
 #include <QSet>
+#include <QMap>
+#include <QRegularExpression>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -18,6 +20,22 @@
 #include <stdexcept>
 
 namespace {
+QStringList calibrationNames(const QString& confirmed_path) {
+    QStringList names{"calibration.json", "stereo_calibration.json", "sentech_stereo_calibration.json"};
+    const auto confirmed_name=QFileInfo(confirmed_path).fileName();
+    if (!confirmed_name.isEmpty() && !names.contains(confirmed_name)) names << confirmed_name;
+    return names;
+}
+QString findCalibration(const QDir& dir, const QStringList& names) {
+    for (const auto& name:names)
+        if (QFileInfo(dir.filePath(name)).isFile()) return dir.filePath(name);
+    return {};
+}
+void requireReadable(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size()==0)
+        throw std::runtime_error(("Cannot load capture. File is unreadable or empty: "+QFileInfo(path).fileName()).toStdString());
+}
 QImage image(const cv::Mat& rgb) {
     return QImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888).copy();
 }
@@ -255,10 +273,10 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     }
 }
 void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
-                             QString calibration_filename, QByteArray calibration_json) {
+                             QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps) {
     QElapsedTimer elapsed; elapsed.start();
     const bool already_rectified = frame->input_is_rectified();
-    if (!already_rectified) frame->rectify();
+    if (!already_rectified) frame->rectify(maps);
     checkpoint();
     // Commit together only after validation and rectification succeed. Failed imports retain the previous input.
     frame_ = std::move(frame); state_.input = std::move(input); state_.calibration = std::move(calibration);
@@ -275,68 +293,166 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     emit log(state_.input + "\nCalibration: " + state_.calibration + "\n" + state_.status);
 }
 void PipelineWorker::importCapture(const QString& directory, bool use_capture_calibration) {
+    loadCapture(directory,"left.png","right.png",use_capture_calibration,false);
+}
+void PipelineWorker::setImportDirectory(const QString& directory) {
+    const QDir dir(directory);
+    if (directory.isEmpty() || !dir.exists()) throw std::runtime_error("Import folder does not exist.");
+    const QRegularExpression pattern("^(left|right)([0-9]*)\\.(png|jpe?g|tiff?)$",QRegularExpression::CaseInsensitiveOption);
+    QMap<qulonglong,std::array<QString,2>> pairs;
+    for (const auto& name:dir.entryList(QDir::Files)) {
+        const auto match=pattern.match(name);
+        if (!match.hasMatch()) continue;
+        bool ok=true;
+        const auto suffix=match.captured(2);
+        const qulonglong index=suffix.isEmpty() ? 0 : suffix.toULongLong(&ok);
+        if (!ok) throw std::runtime_error(("Invalid pair number: "+name).toStdString());
+        auto& side=pairs[index][match.captured(1).compare("left",Qt::CaseInsensitive)==0 ? 0 : 1];
+        if (!side.isEmpty()) throw std::runtime_error(("Ambiguous stereo pair: "+side+" and "+name).toStdString());
+        side=name;
+    }
+    if (pairs.isEmpty())
+        throw std::runtime_error("No stereo pairs found. Use left01.jpg / right01.jpg (numbered PNG, JPG or TIFF), or left.png / right.png.");
+    std::vector<std::pair<QString,QString>> ordered;
+    for (const auto& pair:pairs) {
+        if (pair[0].isEmpty() || pair[1].isEmpty())
+            throw std::runtime_error(("Missing matching "+QString(pair[0].isEmpty() ? "left" : "right")+" image for "+
+                (pair[0].isEmpty() ? pair[1] : pair[0])).toStdString());
+        requireReadable(dir.filePath(pair[0])); requireReadable(dir.filePath(pair[1]));
+        ordered.emplace_back(pair[0],pair[1]);
+    }
+    const auto calibration_path=findCalibration(dir,calibrationNames(confirmed_path_));
+    if (calibration_path.isEmpty()) throw std::runtime_error("Import folder is missing calibration JSON.");
+    requireReadable(calibration_path);
+    cv::FileStorage metadata(calibration_path.toStdString(),cv::FileStorage::READ);
+    const bool compact=metadata["left_camera_matrix"].empty() && !metadata["K1"].empty();
+    checkpoint();
+    // Choosing a folder changes the source only; no pair is loaded or reconstructed.
+    disconnectCameras();
+    import_pairs_=std::move(ordered);
+    import_calibration_.reset();
+    state_.import_directory=dir.absolutePath(); state_.import_index=0;
+    state_.import_total=int(import_pairs_.size()); state_.import_sequence_started=false;
+    state_.import_compact_calibration=compact;
+    state_.status=QString("Import folder selected · %1 pairs. Press Import pair to load the first pair.\n%2")
+        .arg(state_.import_total).arg(state_.import_directory);
+    emit log(state_.status);
+}
+void PipelineWorker::importNextPair(bool use_capture_calibration, double translation_scale) {
+    if (state_.import_directory.isEmpty()) throw std::runtime_error("Choose an import folder first.");
+    if (state_.import_index>=int(import_pairs_.size())) throw std::runtime_error("All pairs in this folder have been imported.");
+    if (state_.import_sequence_started && captures_.size()>=PipelineState::kMaxCaptures)
+        throw std::runtime_error("Five captures are complete. Restart before importing another sequence.");
+    const auto& pair=import_pairs_[state_.import_index];
+    loadCapture(state_.import_directory,pair.first,pair.second,use_capture_calibration,state_.import_sequence_started,translation_scale,true);
+    state_.import_sequence_started=true;
+    ++state_.import_index; // Validation/read failures leave the same pair available for retry.
+}
+void PipelineWorker::loadCapture(const QString& directory, const QString& left_name, const QString& right_name,
+                                bool use_capture_calibration, bool append, double translation_scale,
+                                bool cache_calibration) {
     if (!use_capture_calibration && !confirmed_)
         throw std::runtime_error("No confirmed calibration. Import this capture with its own calibration JSON.");
     const QDir dir(directory);
     if (!dir.exists()) throw std::runtime_error("Capture directory does not exist.");
-    QStringList calibration_names{"calibration.json", "sentech_stereo_calibration.json"};
-    const auto confirmed_name=QFileInfo(confirmed_path_).fileName();
-    if (!confirmed_name.isEmpty() && !calibration_names.contains(confirmed_name)) calibration_names << confirmed_name;
-    QString calibration_path;
-    for (const auto& name:calibration_names) {
-        if (QFileInfo(dir.filePath(name)).isFile()) { calibration_path=dir.filePath(name); break; }
-    }
+    const bool reuse=cache_calibration && import_calibration_ &&
+        import_calibration_->directory==dir.absolutePath() && import_calibration_->own==use_capture_calibration &&
+        (!import_calibration_->compact || import_calibration_->translation_scale==translation_scale);
+    const auto calibration_names=calibrationNames(confirmed_path_);
+    const auto calibration_path=reuse ? QString{} : findCalibration(dir,calibration_names);
     QStringList missing;
-    for (const auto& name:{"left.png", "right.png"})
+    for (const auto& name:{left_name, right_name})
         if (!QFileInfo(dir.filePath(name)).isFile()) missing << name;
-    if (calibration_path.isEmpty()) missing << "calibration JSON ("+calibration_names.join(" or ")+")";
+    if (!reuse && calibration_path.isEmpty()) missing << "calibration JSON ("+calibration_names.join(" or ")+")";
     if (!missing.isEmpty())
         throw std::runtime_error(("Cannot load capture. Missing required files:\n"+missing.join("\n")).toStdString());
-    for (const auto& path:QStringList{dir.filePath("left.png"),dir.filePath("right.png"),calibration_path}) {
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly) || file.size()==0)
-            throw std::runtime_error(("Cannot load capture. File is unreadable or empty: "+QFileInfo(path).fileName()).toStdString());
-    }
+    for (const auto& name:{left_name,right_name}) requireReadable(dir.filePath(name));
+    if (!reuse) requireReadable(calibration_path);
     state_.status = "Loading and rectifying capture…"; publish();
-    std::unique_ptr<StereoFrame> frame;
-    QString description, calibration_filename;
-    QByteArray calibration_json;
-    if (use_capture_calibration) {
-        frame = std::make_unique<StereoFrame>(dir.filePath("left.png").toStdString(), dir.filePath("right.png").toStdString(), calibration_path.toStdString());
-        // Legacy captures are supported like the CLI. Enforce grid metadata when it is present.
-        cv::FileStorage metadata(calibration_path.toStdString(), cv::FileStorage::READ);
-        const auto width = metadata["image_width"], height = metadata["image_height"];
-        if ((!width.empty() || !height.empty()) &&
-            (width.empty() || height.empty() || int(width) != frame->left().cols || int(height) != frame->left().rows))
-            throw std::runtime_error("Capture images do not match calibration image dimensions.");
-        QFile json_file(calibration_path);
-        if (!json_file.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read capture calibration JSON for the frozen result.");
-        calibration_json=json_file.readAll();
-        if (json_file.error()!=QFileDevice::NoError || calibration_json.isEmpty()) throw std::runtime_error("Cannot read capture calibration JSON.");
-        calibration_filename=QFileInfo(calibration_path).fileName();
-        description = calibration_path + (width.empty() ? "\nLegacy capture: image grid / camera identity not verified" : "\nCapture calibration (separate from live cameras)");
-    } else {
-        // Use the handed-off matrices even if the original JSON has since changed or disappeared.
-        cv::Mat left = cv::imread(dir.filePath("left.png").toStdString());
-        cv::Mat right = cv::imread(dir.filePath("right.png").toStdString());
-        if (left.empty() || right.empty()) throw std::runtime_error("Capture must contain readable left.png and right.png.");
-        cv::cvtColor(left, left, cv::COLOR_BGR2RGB); cv::cvtColor(right, right, cv::COLOR_BGR2RGB);
-        if (left.size() != confirmed_->image_size || right.size() != confirmed_->image_size)
-            throw std::runtime_error("Capture size differs from the confirmed calibration. Supply this capture's calibration.json.");
-        frame = std::make_unique<StereoFrame>(left, right, confirmed_->calibration);
-        description = confirmed_path_ + "\nConfirmed calibration · matching image dimensions";
-        calibration_filename=QFileInfo(confirmed_path_).fileName();
-        calibration_json=QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
+    cv::Mat left=cv::imread(dir.filePath(left_name).toStdString());
+    cv::Mat right=cv::imread(dir.filePath(right_name).toStdString());
+    if (left.empty() || right.empty()) throw std::runtime_error("Capture must contain readable left and right images.");
+    cv::cvtColor(left,left,cv::COLOR_BGR2RGB); cv::cvtColor(right,right,cv::COLOR_BGR2RGB);
+
+    ImportCalibration loaded;
+    auto& snapshot=reuse ? *import_calibration_ : loaded;
+    if (!reuse) {
+        snapshot.directory=dir.absolutePath(); snapshot.own=use_capture_calibration;
+        snapshot.translation_scale=translation_scale;
+        if (use_capture_calibration) {
+            cv::FileStorage metadata(calibration_path.toStdString(),cv::FileStorage::READ);
+            snapshot.compact=metadata["left_camera_matrix"].empty() && !metadata["K1"].empty();
+            snapshot.calibration=StereoCalibration::from_file(calibration_path.toStdString());
+            if (snapshot.compact) {
+                if (translation_scale!=1.0 && translation_scale!=0.001)
+                    throw std::runtime_error("Choose the T unit (millimetres or metres) before importing compact calibration.");
+                snapshot.calibration.right_to_left_translation*=translation_scale;
+            }
+            const auto width=metadata["image_width"], height=metadata["image_height"];
+            if (!width.empty() || !height.empty()) {
+                if (width.empty() || height.empty() || int(width)<=0 || int(height)<=0)
+                    throw std::runtime_error("Capture calibration has invalid image dimensions.");
+                snapshot.image_size=cv::Size(int(width),int(height));
+            }
+            QFile json_file(calibration_path);
+            if (!json_file.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read capture calibration JSON for the frozen result.");
+            snapshot.json=json_file.readAll();
+            if (json_file.error()!=QFileDevice::NoError || snapshot.json.isEmpty()) throw std::runtime_error("Cannot read capture calibration JSON.");
+            snapshot.filename=QFileInfo(calibration_path).fileName();
+            snapshot.description=calibration_path+(width.empty() ? "\nLegacy capture: image grid / camera identity not verified"
+                                                               : "\nCapture calibration (separate from live cameras)");
+            if (snapshot.compact) {
+                snapshot.filename="calibration.json";
+                snapshot.description=calibration_path+QString("\nT supplied in %1 · image grid / camera identity not verified")
+                    .arg(translation_scale==0.001 ? "millimetres" : "metres");
+            }
+        } else {
+            snapshot.calibration=confirmed_->calibration;
+            snapshot.image_size=confirmed_->image_size;
+            snapshot.description=confirmed_path_+"\nConfirmed calibration · matching image dimensions";
+            snapshot.filename=QFileInfo(confirmed_path_).fileName();
+            snapshot.json=QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
+        }
+        if (snapshot.filename.isEmpty()) snapshot.filename="calibration.json";
     }
-    if (calibration_filename.isEmpty()) calibration_filename="calibration.json";
-    checkpoint(); prepare(std::move(frame), dir.absolutePath(), description, calibration_filename, calibration_json);
+    // Check every pair against the retained metadata, without reopening the JSON.
+    if (snapshot.image_size && (left.size()!=*snapshot.image_size || right.size()!=*snapshot.image_size))
+        throw std::runtime_error("Capture images do not match calibration image dimensions.");
+    auto frame=std::make_unique<StereoFrame>(left,right,snapshot.calibration);
+    QByteArray calibration_json=snapshot.json;
+    if (snapshot.compact) {
+        // Build export metadata from the cached metre-based values and this pair's grid.
+        const auto& calibration=snapshot.calibration;
+        cv::FileStorage normalized(".json",cv::FileStorage::WRITE|cv::FileStorage::MEMORY|cv::FileStorage::FORMAT_JSON);
+        normalized << "image_width" << left.cols << "image_height" << left.rows
+            << "left_camera_matrix" << calibration.left_camera_matrix << "right_camera_matrix" << calibration.right_camera_matrix
+            << "left_distortion" << calibration.left_distortion << "right_distortion" << calibration.right_distortion
+            << "right_to_left_rotation" << calibration.right_to_left_rotation
+            << "right_to_left_translation" << calibration.right_to_left_translation;
+        calibration_json=QByteArray::fromStdString(normalized.releaseAndGetString());
+    }
+    checkpoint(); prepare(std::move(frame),dir.absolutePath()+"\n"+left_name+" / "+right_name,
+                          snapshot.description,snapshot.filename,calibration_json,cache_calibration ? &snapshot.maps : nullptr);
+    // Failed reads or rectification must not replace a working calibration snapshot.
+    if (cache_calibration && !reuse) {
+        import_calibration_=std::move(loaded);
+        emit log("Import calibration loaded and cached for this folder.");
+    }
     // A successfully imported input starts a new capture sequence. Failed imports
     // leave the existing sequence intact.
-    captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-    if (ma_) ma_->resetInputs();
+    if (append) capture_slot_=int(captures_.size());
+    else {
+        captures_.clear(); capture_slot_=0; state_.capture_count=0;
+        state_.predicted_cameras.reset(); state_.ma_clouds.reset();
+        if (ma_) ma_->resetInputs();
+    }
 }
 void PipelineWorker::connectCameras(CameraMode mode) {
+    const bool from_import=!state_.import_directory.isEmpty();
+    // A user-requested connection exits import mode even if no camera is available.
+    state_.import_directory.clear(); state_.import_index=0; state_.import_total=0;
+    state_.import_sequence_started=false; state_.import_compact_calibration=false; import_pairs_.clear();
+    import_calibration_.reset();
     if (mode == CameraMode::Sentech && !confirmed_)
         throw std::runtime_error("Sentech cameras require confirmed calibration. Use fs_gui to calibrate them, or connect an Intel RealSense D435.");
     if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
@@ -382,6 +498,7 @@ void PipelineWorker::connectCameras(CameraMode mode) {
     }
     emit log(camera_calibration_description_);
     setLive(true); timer_->start();
+    if (from_import) cleanCaptures();
 }
 void PipelineWorker::disconnectCameras() {
     timer_->stop();
@@ -419,7 +536,11 @@ void PipelineWorker::startCapturePreview(bool append) {
                          : "Reframe the current view, then capture a replacement pair.";
 }
 void PipelineWorker::cleanCaptures() {
-    setLive(true); // Check the live source before discarding the current sequence.
+    const bool importing=!state_.import_directory.isEmpty();
+    if (!importing) setLive(true); // Check the live source before discarding the current sequence.
+    else {
+        state_.live=false; state_.import_index=0; state_.import_sequence_started=false;
+    }
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     frame_.reset(); state_.image_camera.reset();
@@ -432,9 +553,10 @@ void PipelineWorker::cleanCaptures() {
     state_.input="No stereo pair captured";
     state_.calibration=camera_calibration_description_;
     state_.calibration_filename=camera_calibration_filename_;
-    state_.progress=0; state_.progress_stage="Ready to capture view 1";
-    state_.status="Captures cleared. Live preview · ready to capture view 1.";
-    timer_->start();
+    state_.progress=0; state_.progress_stage=importing ? "Ready to import pair 1" : "Ready to capture view 1";
+    state_.status=importing ? "Captures cleared. Import folder retained · ready to import pair 1."
+                            : "Captures cleared. Live preview · ready to capture view 1.";
+    if (!importing) timer_->start();
     emit log(state_.status);
 }
 QString PipelineWorker::liveStatus() const {

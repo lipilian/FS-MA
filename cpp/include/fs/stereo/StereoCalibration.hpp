@@ -18,6 +18,8 @@ struct StereoCalibration {
     cv::Mat right_to_left_rotation;   // 3 x 3 proper rotation matrix.
     cv::Mat right_to_left_translation; // Row/column vector: 3 values, nonzero baseline.
 
-    /** Read the six required JSON matrices; StereoFrame validates their values. */
+    /** Read OpenCV matrices or K1/D1/K2/D2/R/T arrays without unit conversion.
+     * StereoFrame validates values; callers must supply translation in metres.
+     */
     static StereoCalibration from_file(const std::filesystem::path& path);
 };

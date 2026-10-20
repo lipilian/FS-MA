@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <optional>
+#include <array>
 
 #include <opencv2/core.hpp>
 
@@ -13,6 +14,15 @@ struct StereoCameraParameters {
     double cx{0.0};
     double cy{0.0};
     float baseline_meters{0.0F};
+};
+
+/** Reusable CPU rectification maps. StereoFrame rebuilds them if the grid or calibration changes. */
+class StereoRectificationCache {
+    friend class StereoFrame;
+    cv::Size image_size_;
+    std::array<cv::Mat,6> calibration_;
+    cv::Mat r1_, r2_, p1_, p2_, q_;
+    cv::Mat left_map_x_, left_map_y_, right_map_x_, right_map_y_;
 };
 
 class StereoFrame {
@@ -41,7 +51,7 @@ public:
                 const StereoCameraParameters& rectified_camera);
 
     /** Undistort and rectify raw inputs; already rectified inputs are unchanged. */
-    void rectify();
+    void rectify(StereoRectificationCache* cache = nullptr);
     bool input_is_rectified() const { return rectified_input_camera_.has_value(); }
 
     const cv::Mat& left() const { return left_; }

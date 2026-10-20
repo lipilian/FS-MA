@@ -131,24 +131,35 @@ StereoFrame::StereoFrame(const cv::Mat& left_rgb, const cv::Mat& right_rgb,
     rectified_right_ = right_;
 }
 
-void StereoFrame::rectify() {
+void StereoFrame::rectify(StereoRectificationCache* cache) {
     if (input_is_rectified()) return;
     const cv::Size image_size = left_.size();
-    cv::stereoRectify(k1_, d1_, k2_, d2_, image_size,
-                      right_to_left_rotation_, right_to_left_translation_,
-                      r1_, r2_, p1_, p2_, q_, cv::CALIB_ZERO_DISPARITY);
-
-    cv::Mat left_map_x, left_map_y, right_map_x, right_map_y;
-    cv::initUndistortRectifyMap(k1_, d1_, r1_, p1_, image_size, kMapType, left_map_x, left_map_y);
-    cv::initUndistortRectifyMap(k2_, d2_, r2_, p2_, image_size, kMapType, right_map_x, right_map_y);
-    cv::remap(left_, rectified_left_, left_map_x, left_map_y, cv::INTER_LINEAR);
-    cv::remap(right_, rectified_right_, right_map_x, right_map_y, cv::INTER_LINEAR);
+    StereoRectificationCache local;
+    auto& maps=cache ? *cache : local;
+    const std::array<cv::Mat,6> calibration{k1_,d1_,k2_,d2_,right_to_left_rotation_,right_to_left_translation_};
+    bool reuse=maps.image_size_==image_size && !maps.left_map_x_.empty();
+    for (std::size_t i=0; reuse && i<calibration.size(); ++i)
+        reuse=maps.calibration_[i].size()==calibration[i].size() &&
+            cv::norm(maps.calibration_[i],calibration[i],cv::NORM_INF)==0;
+    if (!reuse) {
+        StereoRectificationCache next;
+        next.image_size_=image_size; next.calibration_=calibration;
+        cv::stereoRectify(k1_,d1_,k2_,d2_,image_size,right_to_left_rotation_,right_to_left_translation_,
+                         next.r1_,next.r2_,next.p1_,next.p2_,next.q_,cv::CALIB_ZERO_DISPARITY);
+        cv::initUndistortRectifyMap(k1_,d1_,next.r1_,next.p1_,image_size,kMapType,next.left_map_x_,next.left_map_y_);
+        cv::initUndistortRectifyMap(k2_,d2_,next.r2_,next.p2_,image_size,kMapType,next.right_map_x_,next.right_map_y_);
+        maps=std::move(next);
+    }
+    r1_=maps.r1_; r2_=maps.r2_; p1_=maps.p1_; p2_=maps.p2_; q_=maps.q_;
+    cv::remap(left_,rectified_left_,maps.left_map_x_,maps.left_map_y_,cv::INTER_LINEAR);
+    cv::remap(right_,rectified_right_,maps.right_map_x_,maps.right_map_y_,cv::INTER_LINEAR);
 
     std::ostringstream summary;
     summary << "Rectification completed in memory.\n"
             << "  left:  " << rectified_left_.cols << "x" << rectified_left_.rows << '\n'
             << "  right: " << rectified_right_.cols << "x" << rectified_right_.rows << '\n'
-            << "Baseline: " << rectified_camera_parameters().baseline_meters << " m";
+            << "Baseline: " << rectified_camera_parameters().baseline_meters << " m\n"
+            << "Rectification maps: " << (reuse ? "reused" : "generated");
     Logger::log(summary.str());
 }
 

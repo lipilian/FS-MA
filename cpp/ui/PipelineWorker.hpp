@@ -27,6 +27,10 @@ struct CapturedStereoPair {
 struct PipelineState {
     static constexpr int kMaxCaptures = 5;
     int capture_count{0};
+    QString import_directory;
+    int import_index{0}, import_total{0}; // Number of pairs imported successfully, and pairs in the folder.
+    bool import_sequence_started{false};
+    bool import_compact_calibration{false};
     CameraMode camera_mode{CameraMode::Sentech};
     bool connected{false}, live{false}, has_rectified{false}, gpu_ready{false}, depth_ready{false}, engine_ready{false};
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
@@ -54,6 +58,8 @@ public:
     void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {},
                     const QString& ma_engine = {});
     void importCapture(const QString& directory, bool use_capture_calibration);
+    void setImportDirectory(const QString& directory);
+    void importNextPair(bool use_capture_calibration, double translation_scale = 0.0);
     void connectCameras(CameraMode mode = CameraMode::Sentech);
     void disconnectCameras();
     void setLive(bool enabled);
@@ -93,8 +99,11 @@ private:
     void reportProgress(int percent, const QString& stage);
     void buildPointCloud(const cv::Mat& selection);
     void retainCapture(SharedGPUMesh point_cloud);
+    void loadCapture(const QString& directory, const QString& left_name, const QString& right_name,
+                     bool use_capture_calibration, bool append, double translation_scale = 0.0,
+                     bool cache_calibration = false);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
-                 QString calibration_filename, QByteArray calibration_json);
+                 QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps = nullptr);
     ConfirmedCalibration confirmed_;
     QString confirmed_path_;
     SharedStereoSource source_;
@@ -111,6 +120,17 @@ private:
     cv::Mat preview_left_, preview_right_;
     std::shared_ptr<StereoFrame> frame_;
     std::vector<CapturedStereoPair> captures_;
+    std::vector<std::pair<QString,QString>> import_pairs_;
+    struct ImportCalibration {
+        QString directory, description, filename;
+        bool own{true}, compact{false};
+        double translation_scale{0.0};
+        StereoCalibration calibration;
+        std::optional<cv::Size> image_size;
+        QByteArray json;
+        StereoRectificationCache maps;
+    };
+    std::optional<ImportCalibration> import_calibration_;
     int capture_slot_{0}; // Retake replaces this slot; Capture more selects the next slot.
     std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
