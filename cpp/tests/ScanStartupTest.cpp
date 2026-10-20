@@ -1,4 +1,5 @@
 #include "DesktopController.hpp"
+#include "ScanExport.hpp"
 #include "widgets/MeshView.hpp"
 #include "widgets/MaskEditor.hpp"
 #include "widgets/StereoImageView.hpp"
@@ -7,7 +8,6 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLabel>
-#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QDataStream>
 #include <QFile>
@@ -15,6 +15,9 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QLineEdit>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMouseEvent>
 #include <QOpenGLWidget>
 #include <QPointer>
@@ -25,12 +28,49 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 
 namespace {
 void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+
+void selectSaveFolder(QPushButton* save,const QString& directory,bool accept=true) {
+    bool handled=false;
+    QTimer::singleShot(0,[&] {
+        if (auto* dialog=qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+            handled=dialog->fileMode()==QFileDialog::Directory;
+            if (accept) {
+                dialog->setDirectory(directory); dialog->selectFile(directory);
+                QMetaObject::invokeMethod(dialog,"accept",Qt::DirectConnection);
+            } else dialog->reject();
+        }
+    });
+    save->click();
+    require(handled,"Save results did not open the destination folder chooser directly");
+}
+
+QJsonObject checkScanFiles(const QString& directory,int count) {
+    QFile file(directory+"/cameras.json"); require(file.open(QIODevice::ReadOnly),"Missing cameras.json");
+    const auto json=QJsonDocument::fromJson(file.readAll()).object();
+    require(json.value("views").toArray().size()==count && json.value("intrinsic").toArray().size()==3 &&
+            json.value("extrinsic_convention")=="camera_to_world", "Invalid scan camera JSON");
+    auto expected=scanResultFileNames(count); expected.sort();
+    require(QDir(directory).entryList(QDir::Files,QDir::Name)==expected,"Unexpected scan export files");
+    for (int i=1;i<=count;++i) {
+        const auto number=QString::number(i).rightJustified(2,'0');
+        const auto rgb=cv::imread((directory+"/rgb"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
+        const auto mask=cv::imread((directory+"/mask"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
+        const auto depth=cv::imread((directory+"/depth"+number+".tiff").toStdString(),cv::IMREAD_UNCHANGED);
+        require(rgb.type()==CV_8UC3 && rgb.size()==cv::Size(960,800),"Invalid scan RGB PNG");
+        require(mask.type()==CV_8UC1 && mask.size()==cv::Size(2448,2048) &&
+                cv::countNonZero((mask!=0)&(mask!=255))==0,"Invalid scan mask PNG");
+        require(depth.type()==CV_32FC1 && depth.size()==cv::Size(960,800) && cv::checkRange(depth),
+                "Invalid scan float32 depth TIFF");
+    }
+    return json;
+}
 
 void checkCapturePresentation() {
     StereoImageView preview("Preview");
@@ -440,6 +480,10 @@ void checkInlineMaskDrawing() {
         QApplication::sendEvent(editor,&press); QApplication::sendEvent(editor,&release);
     };
     seed(1);
+    auto* save=window.findChild<QPushButton*>("openSaveResults");
+    require(save && save->isEnabled(),"Completed view cannot be saved");
+    selectSaveFolder(save,{},false);
+    require(submitted==0,"Cancelling Save results submitted a worker action");
     require(!start->isEnabled() && !tabs->isTabVisible(1),"Import drawing must select a camera without a region tab");
     const QSize preview_size=stack->size();
     auto* preview=window.findChild<StereoImageView*>("capturePreview");
@@ -448,7 +492,7 @@ void checkInlineMaskDrawing() {
     view->cameraClicked(1);
     require(start->isEnabled() && stack->currentWidget()==editor,"Single imported camera did not select the inline editor");
     start->click(); QCoreApplication::processEvents();
-    require(tools->isVisible() && !capture->isEnabled() && !camera->isEnabled() && finish->isEnabled() &&
+    require(tools->isVisible() && !capture->isEnabled() && !camera->isEnabled() && !save->isEnabled() && finish->isEnabled() &&
             tabs->currentIndex()==0 && editor->imageSize()==QSize(320,240),
             "Inline drawing controls or original-resolution image are incorrect");
     auto* reset=window.findChild<QPushButton*>("resetMeshView");
@@ -520,6 +564,8 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     std::vector<fs::MeshCamera> cameras;
     std::vector<quint64> ids;
     std::vector<QImage> images;
+    std::vector<cv::Mat> depths;
+    cv::Matx33d fs_intrinsic;
     for (int i=0;i<2;++i) {
         run([](auto& w) { w.importNextPair(true); });
         require(state.image_camera.has_value(),"Imported pair has no rectified camera");
@@ -527,7 +573,17 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
         require(state.capture_count==i+1 && geometry && geometry->point_cloud && geometry->stats.point_count>0,
                 "Imported FS reconstruction did not retain a valid point cloud");
+        QTemporaryDir depth_output;
+        run([&](auto& w) { w.saveResults(depth_output.path(),{false,false,false,false,true},{}); });
+        depths.push_back(cv::imread(depth_output.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED));
         if (i==0) {
+            fs_intrinsic=geometry->camera.intrinsics;
+            QTemporaryDir scan_output;
+            run([&](auto& w) { w.saveScanResults(scan_output.path(),{}); });
+            const auto json=checkScanFiles(scan_output.path(),1);
+            const auto pose=json.value("views").toArray()[0].toObject().value("extrinsic").toArray();
+            for (int r=0;r<4;++r) for (int c=0;c<4;++c)
+                require(pose[r].toArray()[c].toDouble()==(r==c ? 1 : 0),"Single-view export must use identity before MA runs");
             QTemporaryDir output;
             require(output.isValid(),"Cannot create GPU import export fixture");
             run([&](auto& w) { w.saveResults(output.path(),{false,false,false,true,true},{},geometry); });
@@ -582,9 +638,41 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_clouds==clouds_before &&
             state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
             "Historical SAM editing changed FS/MA output or the import cursor");
+    QTemporaryDir scan_output;
+    run([&](auto& w) { w.saveScanResults(scan_output.path(),{{ids.front(),historical}}); });
+    const auto json=checkScanFiles(scan_output.path(),2);
+    const auto k=json.value("intrinsic").toArray();
+    for (int r=0;r<3;++r) for (int c=0;c<3;++c)
+        require(k[r].toArray()[c].toDouble()==fs_intrinsic(r,c),"Export used original/MA intrinsics instead of FS projection intrinsics");
+    for (int i=0;i<2;++i) {
+        const auto number=QString::number(i+1).rightJustified(2,'0');
+        const auto source=images[i].convertToFormat(QImage::Format_RGB888);
+        const cv::Mat original(source.height(),source.width(),CV_8UC3,const_cast<uchar*>(source.constBits()),source.bytesPerLine());
+        cv::Mat expected_rgb; cv::resize(original,expected_rgb,{960,800},0,0,cv::INTER_LINEAR);
+        auto rgb=cv::imread(scan_output.filePath("rgb"+number+".png").toStdString());
+        cv::cvtColor(rgb,rgb,cv::COLOR_BGR2RGB);
+        require(cv::norm(rgb,expected_rgb,cv::NORM_INF)==0,"Historical FS RGB was overwritten or did not match inference input");
+        const auto depth=cv::imread(scan_output.filePath("depth"+number+".tiff").toStdString(),cv::IMREAD_UNCHANGED);
+        require(cv::norm(depth,depths[i],cv::NORM_INF)==0,"Historical FS Z depth was overwritten by a later view");
+        const auto pose=json.value("views").toArray()[i].toObject().value("extrinsic").toArray();
+        for (int r=0;r<4;++r) for (int c=0;c<4;++c)
+            require(pose[r].toArray()[c].toDouble()==(*poses_before)[i].camera_to_world(r,c),"Export changed MA camera-to-world poses");
+    }
+    const auto saved_mask=cv::imread(scan_output.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED);
+    const auto gray=historical.convertToFormat(QImage::Format_Grayscale8);
+    cv::Mat expected_mask;
+    cv::resize(cv::Mat(gray.height(),gray.width(),CV_8UC1,const_cast<uchar*>(gray.constBits()),gray.bytesPerLine()),
+               expected_mask,{2448,2048},0,0,cv::INTER_NEAREST);
+    require(cv::norm(saved_mask,expected_mask,cv::NORM_INF)==0 &&
+            cv::countNonZero(cv::imread(scan_output.filePath("mask02.png").toStdString(),cv::IMREAD_UNCHANGED))==0,
+            "Export assigned a historical mask to the wrong view or invented an undrawn mask");
+    require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_clouds==clouds_before &&
+            state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
+            "Saving recomputed geometry/poses or changed the import cursor");
     worker.shutdown();
     std::cout<<"PASS: imported FS points/mesh, depth export, two-view MA and historical camera snapshots\n";
     std::cout<<"PASS: historical/current SAM feature switching and independent geometry/import state\n";
+    std::cout<<"PASS: cached per-view FS RGB/Z export, shared exact FS K, matching MA poses/masks and no recomputation on save\n";
     return 0;
 }
 
@@ -597,7 +685,6 @@ int checkLiveScan(QApplication& app) {
     int phase=0, ready_ticks=0, presented=0, fs_captures=0, ma_presented=0, landed=0, expected_views=0;
     QTemporaryDir point_export, mesh_export, ma_export;
     require(point_export.isValid() && mesh_export.isValid() && ma_export.isValid(), "Cannot create export test directories");
-    SharedGPUMesh exported_geometry;
     SharedGPUClouds latest_ma_clouds;
     QHash<quint64,QImage> captured_left, captured_right;
     std::vector<quint64> preview_ids;
@@ -815,17 +902,8 @@ int checkLiveScan(QApplication& app) {
                                     }
                                     auto* save=window->findChild<QPushButton*>("openSaveResults");
                                     require(save && save->isVisible() && save->isEnabled(), "Saving is inaccessible without the sidebar");
-                                    save->click();
-                                    auto* dialog=window->findChild<QDialog*>("saveResultsDialog");
-                                    require(dialog && dialog->isVisible() && dialog->findChild<QPushButton*>("browseSaveDirectory")->isVisible(),
-                                            "Save dialog did not expose the existing export controls");
-                                    exported_geometry=mesh;
+                                    selectSaveFolder(save,mesh->point_cloud ? point_export.path() : mesh_export.path());
                                     phase=mesh->point_cloud ? 4 : 6;
-                                    dialog->findChild<QLineEdit*>("saveDirectory")->setText(mesh->point_cloud ? point_export.path() : mesh_export.path());
-                                    auto* save_selected=dialog->findChild<QPushButton*>("saveSelected");
-                                    require(save_selected->isEnabled(), "Cannot save displayed GPU geometry");
-                                    save_selected->click();
-                                    dialog->close();
                                 }
                             } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
                         });
@@ -833,15 +911,15 @@ int checkLiveScan(QApplication& app) {
                 }
             }
             if (!window) return;
-            if ((phase==4 || phase==6) && window->findChild<QPushButton*>("saveSelected")->isEnabled()) {
+            if ((phase==4 || phase==6) && window->findChild<QPushButton*>("openSaveResults")->isEnabled()) {
                 const auto status=window->findChild<QLabel*>("status")->text();
                 if (!status.startsWith("Saved ")) throw std::runtime_error(status.toStdString());
-                checkGeometryExport(phase==4 ? point_export.path() : mesh_export.path(),*exported_geometry);
+                checkScanFiles(phase==4 ? point_export.path() : mesh_export.path(),1);
                 if (phase==4) {
                     phase=5; window->buildMeshGPU(); // Function remains available without a button.
                 } else {
-                    const auto points_depth=cv::imread(point_export.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED);
-                    const auto mesh_depth=cv::imread(mesh_export.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED);
+                    const auto points_depth=cv::imread(point_export.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
+                    const auto mesh_depth=cv::imread(mesh_export.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     require(cv::norm(points_depth,mesh_depth,cv::NORM_INF)==0, "GPU mesh build changed the saved depth");
                     require(captured_views()==1, "Mesh export changed the captured view count");
                     auto* capture=window->findChild<QPushButton*>("capturePair");
@@ -915,21 +993,14 @@ int checkLiveScan(QApplication& app) {
                 else {
                     require(!capture->isEnabled(), "Five-view capture limit was lost");
                     screenshot("ma-five-landed");
-                    window->findChild<QPushButton*>("openSaveResults")->click();
-                    auto* dialog=window->findChild<QDialog*>("saveResultsDialog");
-                    dialog->findChild<QLineEdit*>("saveDirectory")->setText(ma_export.path());
-                    require(dialog->findChild<QPushButton*>("saveSelected")->isEnabled(), "Cannot export the displayed MA point clouds");
-                    phase=14; dialog->findChild<QPushButton*>("saveSelected")->click(); dialog->close();
+                    selectSaveFolder(window->findChild<QPushButton*>("openSaveResults"),ma_export.path());
+                    phase=14;
                 }
                 return;
             }
             if (phase==14 && retake->isEnabled()) {
-                require(window->findChild<QLabel*>("status")->text().startsWith("Saved "), "MA point cloud export failed");
-                GPUMeshFrame total; total.point_cloud=true;
-                for (const auto& cloud:*latest_ma_clouds) total.stats.point_count+=cloud->stats.point_count;
-                checkGeometryExport(ma_export.path(),total,true);
-                QFile ply(ma_export.filePath("mesh.ply")); require(ply.open(QIODevice::ReadOnly),"Cannot read MA PLY");
-                require(ply.read(256).contains("MA world frame"),"MA export did not use world coordinates");
+                require(window->findChild<QLabel*>("status")->text().startsWith("Saved "), "Multi-view scan export failed");
+                checkScanFiles(ma_export.path(),5);
                 phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); return;
             }
             if (phase==11 && capture->isEnabled()) {
@@ -968,7 +1039,7 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: D435 default FS points for 1–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, FS/MA PLY export and clean shutdown\n";
+    std::cout<<"PASS: D435 default FS points for 1–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, scan dataset export and clean shutdown\n";
     std::cout<<"PASS: camera selection restores each original stereo pair and depth in FS/MA modes, replaces retaken images and clears on restart\n";
     return 0;
 }
@@ -978,7 +1049,7 @@ int main(int argc, char** argv) {
     const bool live=argc==2 && std::string(argv[1])=="--live";
     const bool imported=argc==4 && std::string(argv[1])=="--import";
     if (!live) qputenv("QT_QPA_PLATFORM","offscreen");
-    if (!live) QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QSurfaceFormat::setDefaultFormat(MeshView::surfaceFormat());
     QApplication app(argc,argv);
     cv::setNumThreads(4);

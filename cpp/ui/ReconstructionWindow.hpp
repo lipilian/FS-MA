@@ -47,6 +47,7 @@ private:
     void reconstructCurrent();
     bool inlineMaskMode() const;
     void finishInlineDraw();
+    void saveScanResults();
     QImage exportMask() const;
     PipelineController& controller_;
     PipelineState state_;

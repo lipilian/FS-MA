@@ -29,6 +29,7 @@ add_library(fs_calibration_ui STATIC
     ui/ReconstructionWindow.cpp ui/ReconstructionWindow.hpp
     ui/PipelineController.cpp ui/PipelineController.hpp
     ui/PipelineWorker.cpp ui/PipelineWorker.hpp
+    ui/ScanExport.cpp ui/ScanExport.hpp
     ui/widgets/MeshView.cpp ui/widgets/MeshView.hpp
     ui/widgets/CaptureTransition.cpp ui/widgets/CaptureTransition.hpp
     ui/widgets/MaskEditor.cpp ui/widgets/MaskEditor.hpp

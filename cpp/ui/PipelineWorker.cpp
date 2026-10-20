@@ -1,4 +1,5 @@
 #include "PipelineWorker.hpp"
+#include "ScanExport.hpp"
 #include "fs/capture/RealSenseStereoSource.hpp"
 #include <QDir>
 #include <QCoreApplication>
@@ -746,7 +747,8 @@ void PipelineWorker::buildPointCloud() {
     cloud->image_id=state_.image_id;
     const auto error=cudaGetDevice(&cloud->device);
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
-    cloud->camera=meshCamera(*frame_,{inputs.width,inputs.height});
+    const auto& camera=fs_->model_camera_parameters();
+    cloud->camera={cv::Matx33d(camera.fx,0,camera.cx,0,camera.fy,camera.cy,0,0,1),{inputs.width,inputs.height}};
     retainCapture(cloud);
     latest_gpu_mesh_=cloud;
     emit log(QString("GPU point cloud: %1 ms · %2 valid points · XYZ/RGB remain on GPU")
@@ -761,7 +763,7 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     CapturedStereoPair capture{state_.image_id,
         meshCamera(*frame_,frame_->rectified_left().size()),
         meshCamera(*frame_,{fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight}),
-        std::move(point_cloud),image(ma_->resizedColor())};
+        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
@@ -801,11 +803,43 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
     mesh->image_id=state_.image_id;
     const auto error=cudaGetDevice(&mesh->device);
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
-    mesh->camera=meshCamera(*frame_,{inputs.width,inputs.height});
+    const auto& camera=fs_->model_camera_parameters();
+    mesh->camera={cv::Matx33d(camera.fx,0,camera.cx,0,camera.fy,camera.cy,0,0,1),{inputs.width,inputs.height}};
     state_.status = QString("GPU mesh ready · %1 triangles · %2 cm²")
         .arg(stats.triangle_count).arg(stats.area_m2*1e4,0,'f',2);
     latest_gpu_mesh_=mesh;
     publish(); emit log(state_.status); emit gpuMeshReady(std::move(mesh));
+}
+void PipelineWorker::saveScanResults(const QString& directory, const QHash<quint64,QImage>& masks, bool overwrite) {
+    if (state_.live || !state_.depth_ready || captures_.empty())
+        throw std::runtime_error("Complete a capture before saving scan results.");
+    if (captures_.size()>1 && (!state_.predicted_cameras || state_.predicted_cameras->size()!=captures_.size()))
+        throw std::runtime_error("Complete MA camera poses for every view before saving.");
+    std::vector<ScanExportView> views;
+    views.reserve(captures_.size());
+    for (const auto& capture:captures_) {
+        checkpoint();
+        auto pose=cv::Matx44d::eye();
+        if (captures_.size()>1) {
+            const auto found=std::find_if(state_.predicted_cameras->begin(),state_.predicted_cameras->end(),
+                [&](const auto& camera) { return camera.image_id==capture.image_id; });
+            if (found==state_.predicted_cameras->end())
+                throw std::runtime_error("MA camera poses do not match the completed views.");
+            pose=found->camera_to_world;
+        }
+        if (!capture.point_cloud) throw std::runtime_error("A completed view has no FS projection parameters.");
+        const auto mask=masks.value(capture.image_id);
+        if (!mask.isNull() && mask.size()!=QSize(capture.image_camera.image_size.width,capture.image_camera.image_size.height))
+            throw std::runtime_error("A mask does not match its view's rectified left image.");
+        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_rgb,mask,capture.fs_depth});
+    }
+    state_.status="Saving all scan views…"; publish();
+    QElapsedTimer elapsed; elapsed.start();
+    const auto names=writeScanResults(directory,views,overwrite,[this] { checkpoint(); });
+    for (const auto& name:names) emit log("Saved "+QDir(directory).absoluteFilePath(name));
+    state_.status=QString("Saved %1 files for %2 views to %3 · %4 ms")
+        .arg(names.size()).arg(views.size()).arg(QDir(directory).absolutePath()).arg(elapsed.elapsed());
+    emit log(state_.status);
 }
 void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOptions options,
                                  const QImage& selection, SharedGPUMesh gpu_mesh, bool overwrite, SharedGPUClouds ma_geometry) {

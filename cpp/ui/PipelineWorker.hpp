@@ -7,6 +7,7 @@
 #include <functional>
 #include <optional>
 #include "GPUMeshFrame.hpp"
+#include <QHash>
 
 struct ReconstructionSaveOptions {
     bool images{true}, calibration{true}, mask{true}, mesh{true}, depth{true};
@@ -21,6 +22,8 @@ struct CapturedStereoPair {
     fs::MeshCamera image_camera, ma_camera;
     SharedGPUMesh point_cloud;
     QImage ma_image;
+    QImage fs_rgb; // Exact resized FS input, owned independently of its reusable buffers.
+    cv::Mat fs_depth; // Final float32 Z; shares the immutable CPU result allocation.
 };
 
 struct PipelineState {
@@ -72,6 +75,7 @@ public:
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,
                      SharedGPUClouds ma_geometry = {});
+    void saveScanResults(const QString& directory, const QHash<quint64,QImage>& masks, bool overwrite = false);
     void shutdown();
 signals:
     void stateChanged(PipelineState state);

@@ -53,6 +53,10 @@ public:
      */
     void prepare_stereo_images(const cv::Mat& left, const cv::Mat& right);
 
+    /** Borrow the exact RGB input and projection parameters; copy RGB before the next preparation. */
+    const cv::Mat& model_left() const noexcept { return model_left_; }
+    const StereoCameraParameters& model_camera_parameters() const noexcept { return model_camera_parameters_; }
+
     /**
      * Queue TensorRT inference on FS's CUDA stream. The disparity result stays
      * in FS's preallocated device buffer for subsequent CUDA processing.

@@ -1,4 +1,5 @@
 #include "ReconstructionWindow.hpp"
+#include "ScanExport.hpp"
 #include "fs/capture/RealSenseStereoSource.hpp"
 #include "widgets/MaskEditor.hpp"
 #include "widgets/MeshView.hpp"
@@ -10,7 +11,6 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -320,12 +320,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         mask_panel_ = mask_tools;
         for (auto* b : {start_draw_,finish_draw_}) b->setStyleSheet("QPushButton { padding: 5px 4px; }");
 
-        auto* save_dialog = new QDialog(this);
-        save_dialog->setObjectName("saveResultsDialog"); save_dialog->setWindowTitle("Save results");
-        save_dialog->setWindowModality(Qt::WindowModal);
-        auto* save_layout = new QVBoxLayout(save_dialog); save_layout->addWidget(save_panel);
         open_save_ = button("Save results…","openSaveResults");
-        connect(open_save_,&QPushButton::clicked,this,[save_dialog] { save_dialog->open(); });
+        connect(open_save_,&QPushButton::clicked,this,&ReconstructionWindow::saveScanResults);
     }
     split->setSizes({290,1170}); split->setStretchFactor(1,1); outer->addWidget(split,1);
     steps_ = label(""); outer->addWidget(steps_);
@@ -665,6 +661,25 @@ QImage ReconstructionWindow::exportMask() const {
     // The existing export saves the latest pair, even while reviewing an older camera.
     return inlineMaskMode() ? capture_previews_.value(state_.image_id).mask : mask_->mask();
 }
+void ReconstructionWindow::saveScanResults() {
+    const auto directory=QFileDialog::getExistingDirectory(this,"Save scan results",save_directory_->text());
+    if (directory.isEmpty()) return;
+    save_directory_->setText(directory);
+    QStringList existing;
+    for (const auto& name:scanResultFileNames(state_.capture_count)) {
+        const QFileInfo file(QDir(directory).filePath(name));
+        if (file.exists() || file.isSymLink()) existing << name;
+    }
+    const bool overwrite=!existing.isEmpty();
+    if (overwrite && QMessageBox::question(this,"Replace existing files?",
+        "These files already exist in the chosen folder:\n"+existing.join("\n")+"\n\nReplace them?",
+        QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
+    QHash<quint64,QImage> masks;
+    for (auto it=capture_previews_.cbegin();it!=capture_previews_.cend();++it)
+        if (!it->mask.isNull()) masks.insert(it.key(),it->mask);
+    if (!inlineMaskMode() && mask_->hasSelection()) masks.insert(state_.image_id,mask_->mask());
+    controller_.submit([=](auto& worker) { worker.saveScanResults(directory,masks,overwrite); });
+}
 void ReconstructionWindow::buildMeshGPU() {
     if (busy_ || closing_ || gpu_upload_pending_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !reconstruction_valid_ ||
         !state_.depth_ready || !state_.gpu_ready || !state_.engine_ready || state_.capture_count>=2) return;
@@ -811,7 +826,7 @@ void ReconstructionWindow::refresh() {
     for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(!show_ma && !point_cloud);
     if ((show_ma || point_cloud) && mesh_mode_->currentIndex()!=0) mesh_mode_->setCurrentIndex(0);
     browse_save_->setEnabled(idle);
-    if (open_save_) open_save_->setEnabled(idle && frozen);
+    if (open_save_) open_save_->setEnabled(idle && frozen && result_current && state_.capture_count>0);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
     const bool has_export_mask=inlineMaskMode() ? !capture_previews_.value(state_.image_id).mask.isNull() : mask_->hasSelection();
     if (!has_export_mask) {
