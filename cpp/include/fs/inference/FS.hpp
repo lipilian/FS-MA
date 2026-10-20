@@ -94,13 +94,13 @@ public:
      */
     cv::Mat download_xyz_map();
 
-    /** Upload the current nonempty rectified-left mask on the FS stream and
-     * borrow GPU RGB and the latest XYZ (including the denoising buffer swap). Requires
+    /** Upload a supplied rectified-left mask, or reuse the already uploaded mask
+     * when omitted. Borrow GPU RGB and the latest XYZ (including the denoising buffer swap). Requires
      * completed XYZ for the current inputs. No inference or XYZ transfer occurs.
      * The mask upload completes before return; consume this view immediately in
      * the same serialized action, before any further FS mutation or destruction.
      */
-    fs::MeshGPUInputs prepare_gpu_mesh_inputs(const cv::Mat& rectified_mask);
+    fs::MeshGPUInputs prepare_gpu_mesh_inputs(const cv::Mat& rectified_mask = {});
 
     /** Wait for queued GPU work and report asynchronous execution errors. */
     void synchronize();

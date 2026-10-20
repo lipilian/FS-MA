@@ -90,5 +90,4 @@ private:
     QComboBox* mesh_mode_;
     QComboBox* camera_image_mode_;
     QComboBox* camera_mode_;
-    QComboBox* import_units_;
 };

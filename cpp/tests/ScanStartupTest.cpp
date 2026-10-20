@@ -138,14 +138,11 @@ void checkUncalibratedPipeline() {
     PipelineState state;
     QObject::connect(&worker, &PipelineWorker::stateChanged, [&](PipelineState update) { state=std::move(update); });
     worker.execute([](auto&) {});
-    require(state.camera_mode==CameraMode::RealSenseD435 && !state.live_camera,
+    require(state.camera_mode==CameraMode::RealSenseD435 && !state.image_camera && !state.has_rectified,
             "Calibration-free startup must select RealSense without invented intrinsics");
     worker.execute([](auto& w) { w.connectCameras(CameraMode::Sentech); });
     require(state.action_failed && state.status.contains("require confirmed calibration"),
             "Sentech must reject missing calibration without dereferencing it");
-    worker.execute([](auto& w) { w.importCapture("", false); });
-    require(state.action_failed && state.status.contains("No confirmed calibration"),
-            "Import must not fall back to absent calibration");
     worker.execute([](auto& w) { w.initialize(""); });
     require(state.action_failed && !state.engine_ready && !state.connected,
             "Missing model must fail before connecting cameras");
@@ -166,7 +163,10 @@ void checkUncalibratedPipeline() {
             <<"left_distortion"<<distortion<<"right_distortion"<<distortion
             <<"right_to_left_rotation"<<rotation<<"right_to_left_translation"<<translation;
     }
-    worker.execute([&](auto& w) { w.importCapture(dir.path(),true); });
+    worker.execute([&](auto& w) { w.setImportDirectory(dir.path()); w.importNextPair(false); });
+    require(state.action_failed && state.status.contains("No confirmed calibration") && state.import_index==0,
+            "Import must not fall back to absent calibration or skip the pair");
+    worker.execute([](auto& w) { w.importNextPair(true); });
     require(!state.action_failed && state.has_rectified && state.image_camera.has_value(),
             "Capture import with its own calibration failed without a calibration session");
     worker.shutdown();
@@ -198,9 +198,6 @@ void checkImportFolder() {
             state.import_index==0 && !state.has_rectified && !state.connected && !state.live && images==0,
             "Selecting a folder must select the source without importing a pair");
     worker.execute([](auto& w) { w.importNextPair(true); });
-    require(state.action_failed && state.status.contains("T unit") && state.import_index==0 && images==0,
-            "Compact calibration silently guessed the translation unit");
-    worker.execute([](auto& w) { w.importNextPair(true,.001); });
     require(!state.action_failed && state.import_index==1 && state.has_rectified && images==1 &&
             state.input.contains("left2.jpg / right2.png"),"Pairs were not imported in numeric order");
     const auto first_image_id=state.image_id;
@@ -216,7 +213,7 @@ void checkImportFolder() {
 
     // A file can disappear after selecting a directory. A failed import must not skip it.
     require(QFile::remove(dir.filePath("right10.jpg")),"Cannot remove import fixture");
-    worker.execute([](auto& w) { w.importNextPair(true,.001); });
+    worker.execute([](auto& w) { w.importNextPair(true); });
     require(state.action_failed && state.import_index==1 && state.image_id==first_image_id && images==1 &&
             state.import_directory==dir.path(),"Failed import lost the current pair or advanced the folder cursor");
     worker.execute([&](auto& w) { w.setImportDirectory(invalid.path()); });
@@ -224,16 +221,16 @@ void checkImportFolder() {
             "An invalid replacement folder discarded the current source");
     require(cv::imwrite(dir.filePath("right10.jpg").toStdString(),cv::Mat(24,32,CV_8UC3,cv::Scalar(80,120,160))),
             "Cannot restore import fixture");
-    worker.execute([](auto& w) { w.importNextPair(true,.001); });
+    worker.execute([](auto& w) { w.importNextPair(true); });
     require(!state.action_failed && state.import_index==2 && images==2 && state.input.contains("left10.jpg"),
             "Import did not retry the same numbered pair");
-    worker.execute([](auto& w) { w.importNextPair(true,.001); });
+    worker.execute([](auto& w) { w.importNextPair(true); });
     require(state.action_failed && state.import_index==2 && images==2 && state.import_directory==dir.path(),
             "End of folder should retain import mode and stop without repeating a pair");
     worker.execute([](auto& w) { w.cleanCaptures(); });
     require(!state.action_failed && state.import_directory==dir.path() && state.import_index==0 &&
             !state.has_rectified && !state.live,"Restart did not retain the import source and reset its sequence");
-    worker.execute([](auto& w) { w.importNextPair(true,.001); });
+    worker.execute([](auto& w) { w.importNextPair(true); });
     require(!state.action_failed && state.import_index==1 && images==3,"Cannot import after restart");
     worker.execute([&](auto& w) { w.saveResults(output.path(),options,{}, {},true); });
     require(!state.action_failed && std::abs(cv::norm(StereoCalibration::from_file(
@@ -247,7 +244,7 @@ void checkImportFolder() {
         const auto changed=calibration.readAll().replace("[-50,0,0]","[-60,0,0]");
         calibration.resize(0); calibration.seek(0); calibration.write(changed);
     }
-    worker.execute([&](auto& w) { w.setImportDirectory(dir.path()); w.importNextPair(true,.001); });
+    worker.execute([&](auto& w) { w.setImportDirectory(dir.path()); w.importNextPair(true); });
     require(!state.action_failed,"Cannot reselect import folder");
     worker.execute([&](auto& w) { w.saveResults(output.path(),options,{}, {},true); });
     require(!state.action_failed && std::abs(cv::norm(StereoCalibration::from_file(
@@ -258,7 +255,7 @@ void checkImportFolder() {
     worker.execute([](auto& w) { w.connectCameras(CameraMode::Sentech); });
     require(state.action_failed && state.import_directory.isEmpty() && state.import_total==0 && state.has_rectified,
             "Connect cameras must exit import mode even when the connection fails, retaining the frozen pair");
-    worker.execute([&](auto& w) { w.importCapture(output.path(),true); });
+    worker.execute([&](auto& w) { w.setImportDirectory(output.path()); w.importNextPair(true); });
     require(!state.action_failed && state.has_rectified,"Normalized exported calibration did not round-trip");
     // Cached image-size metadata must still reject a mismatched subsequent pair.
     for (const auto* name:{"left01.png","right01.png"})
@@ -272,7 +269,7 @@ void checkImportFolder() {
     require(state.action_failed && state.status.contains("image dimensions") && state.image_id==before_mismatch && state.import_index==1,
             "Cached calibration failed to validate the next pair's image grid");
     worker.shutdown();
-    std::cout<<"PASS: deferred folder import, numeric pairing, explicit units, retry, exhaustion, restart, camera mode and export round-trip\n";
+    std::cout<<"PASS: deferred folder import, numeric pairing, fixed millimetres, retry, exhaustion, restart, camera mode and export round-trip\n";
     std::cout<<"PASS: calibration reused without source JSON, stable units, folder reselection reload and cached grid validation\n";
 }
 
@@ -313,8 +310,13 @@ void checkRectificationCache() {
 }
 
 void checkImportControls() {
-    QTemporaryDir dir;
+    QTemporaryDir dir, workspace;
     makeImportFixture(dir);
+    require(workspace.isValid() && QDir(workspace.path()).mkpath("data/scan_data"),
+            "Cannot create default import directory fixture");
+    const QString original_directory=QDir::currentPath();
+    require(QDir::setCurrent(workspace.path()),"Cannot change to import workspace fixture");
+    const QString default_directory=QDir(workspace.filePath("data/scan_data")).canonicalPath();
     PipelineController controller({}, {}, {});
     bool busy=false;
     QObject::connect(&controller,&PipelineController::busyChanged,[&](bool value) { busy=value; });
@@ -340,14 +342,19 @@ void checkImportControls() {
     auto* choose=window.findChild<QPushButton*>("importCapture");
     auto* capture=window.findChild<QPushButton*>("capturePair");
     auto* camera=window.findChild<QPushButton*>("connectCameras");
-    auto* units=window.findChild<QComboBox*>("importTranslationUnit");
+    require(!window.findChild<QComboBox*>("importTranslationUnit"),
+            "Import must not show a translation unit selector");
     require(choose && choose->text()=="Import folder…" && capture && capture->text()=="Capture pair",
             "Initial source controls have incorrect labels");
     const auto select_folder=[&](bool accept) {
         bool handled=false;
+        QString opened_directory;
+        const QString expected_directory=controller.state().import_directory.isEmpty()
+            ? default_directory : controller.state().import_directory;
         QTimer::singleShot(0,[&] {
             if (auto* dialog=qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
                 handled=true;
+                opened_directory=dialog->directory().canonicalPath();
                 if (accept) {
                     dialog->setDirectory(dir.path()); dialog->selectFile(dir.path());
                     QMetaObject::invokeMethod(dialog,"accept",Qt::DirectConnection);
@@ -356,6 +363,8 @@ void checkImportControls() {
         });
         choose->click();
         require(handled,"Folder chooser was not shown");
+        require(opened_directory==expected_directory,
+                "Folder chooser must start in data/scan_data or the selected import folder");
         drain();
     };
     select_folder(false);
@@ -366,12 +375,7 @@ void checkImportControls() {
             "Selecting a folder imported immediately or failed to switch the primary action");
     auto ready=controller.state(); ready.engine_ready=ready.sam_ready=ready.ma_ready=true;
     controller.stateChanged(ready);
-    require(capture->isEnabled() && units->currentData().toDouble()==.001,
-            "Compact import must default to millimetres without requiring an extra selection");
-    units->setCurrentIndex(1);
-    require(capture->isEnabled() && units->currentData().toDouble()==1.0,
-            "Cannot override the compact translation unit to metres");
-    units->setCurrentIndex(0);
+    require(capture->isEnabled(),"Compact import must be ready without a unit selection");
     select_folder(false);
     require(capture->text()=="Import pair" && capture->isEnabled(),"Cancelling replacement selection lost the import source");
     capture->click(); drain();
@@ -383,7 +387,64 @@ void checkImportControls() {
     require(controller.state().import_directory.isEmpty() && capture->text()=="Capture pair",
             "Connect cameras did not restore the capture action");
     window.allowClose(); controller.stop();
-    std::cout<<"PASS: folder chooser cancellation, deferred import button, camera-independent enablement and explicit source switch\n";
+    require(QDir::setCurrent(original_directory),"Cannot restore working directory");
+    std::cout<<"PASS: default scan_data folder, no unit selector, chooser cancellation, deferred import and explicit source switch\n";
+}
+
+// Explicit opt-in: exercises real FS/MA inference from files without cameras or OpenGL.
+int checkImportedScan(const QString& directory, const QString& engine) {
+    PipelineWorker worker({}, {}, {}, std::make_shared<std::atomic_bool>(false));
+    PipelineState state;
+    SharedGPUMesh geometry;
+    QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState update) { state=std::move(update); });
+    QObject::connect(&worker,&PipelineWorker::gpuMeshReady,[&](SharedGPUMesh update) { geometry=std::move(update); });
+    const auto run=[&](const std::function<void(PipelineWorker&)>& action) {
+        worker.execute(action);
+        if (state.action_failed) throw std::runtime_error(state.status.toStdString());
+    };
+    run([&](auto& w) { w.initialize(engine); w.setImportDirectory(directory); });
+    require(state.import_total>=2,"Import integration test requires at least two stereo pairs");
+    std::vector<fs::MeshCamera> cameras;
+    std::vector<quint64> ids;
+    for (int i=0;i<2;++i) {
+        run([](auto& w) { w.importNextPair(true); });
+        require(state.image_camera.has_value(),"Imported pair has no rectified camera");
+        cameras.push_back(*state.image_camera); ids.push_back(state.image_id);
+        run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
+        require(state.capture_count==i+1 && geometry && geometry->point_cloud && geometry->stats.point_count>0,
+                "Imported FS reconstruction did not retain a valid point cloud");
+        if (i==0) {
+            QTemporaryDir output;
+            require(output.isValid(),"Cannot create GPU import export fixture");
+            run([&](auto& w) { w.saveResults(output.path(),{false,false,false,true,true},{},geometry); });
+            checkGeometryExport(output.path(),*geometry);
+            run([](auto& w) { w.buildMeshGPU({}); });
+            require(geometry && !geometry->point_cloud && geometry->stats.triangle_count>0,
+                    "Imported first view did not produce a triangle mesh");
+        }
+    }
+    require(state.predicted_cameras && state.predicted_cameras->size()==2 &&
+            state.ma_clouds && state.ma_clouds->size()==2,"Two imported views did not produce MA output");
+    for (int i=0;i<2;++i) {
+        const auto& predicted=(*state.predicted_cameras)[i];
+        const auto& cloud=(*state.ma_clouds)[i];
+        require(predicted.image_id==ids[i] && predicted.camera.image_size==cameras[i].image_size &&
+                predicted.camera.intrinsics==cameras[i].intrinsics,
+                "Historical camera changed after releasing its stereo images");
+        require(cloud && cloud->stats.point_count>0 && cloud->image_id==ids[i],
+                "MA output lost a retained view");
+        auto scaled=cameras[i].intrinsics;
+        for (int j=0;j<3;++j) {
+            scaled(0,j)*=double(fs::MA_VGGT::kInputWidth)/cameras[i].image_size.width;
+            scaled(1,j)*=double(fs::MA_VGGT::kInputHeight)/cameras[i].image_size.height;
+        }
+        require(cloud->camera.intrinsics==scaled &&
+                cloud->camera.image_size==cv::Size(fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight),
+                "MA camera snapshot does not match its image grid");
+    }
+    worker.shutdown();
+    std::cout<<"PASS: imported FS points/mesh, depth export, two-view MA and historical camera snapshots\n";
+    return 0;
 }
 
 // Explicit opt-in: needs the actual engines, D435 and an NVIDIA OpenGL display.
@@ -773,6 +834,7 @@ int checkLiveScan(QApplication& app) {
 
 int main(int argc, char** argv) {
     const bool live=argc==2 && std::string(argv[1])=="--live";
+    const bool imported=argc==4 && std::string(argv[1])=="--import";
     if (!live) qputenv("QT_QPA_PLATFORM","offscreen");
     if (!live) QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QSurfaceFormat::setDefaultFormat(MeshView::surfaceFormat());
@@ -780,6 +842,7 @@ int main(int argc, char** argv) {
     cv::setNumThreads(4);
     try {
         if (live) return checkLiveScan(app);
+        if (imported) return checkImportedScan(QString::fromLocal8Bit(argv[2]),QString::fromLocal8Bit(argv[3]));
         checkCapturePresentation();
         checkUncalibratedPipeline();
         checkImportFolder();

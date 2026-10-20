@@ -8,6 +8,7 @@
 #include <QButtonGroup>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDialog>
 #include <QDoubleSpinBox>
@@ -36,6 +37,14 @@
 #include <stdexcept>
 
 namespace {
+QString defaultImportDirectory() {
+    const QString relative = "data/scan_data";
+    for (const auto& base : {QDir::currentPath(), QCoreApplication::applicationDirPath() + "/../.."}) {
+        const QFileInfo candidate(QDir(base).filePath(relative));
+        if (candidate.isDir()) return candidate.canonicalFilePath();
+    }
+    return QDir::current().absoluteFilePath(relative);
+}
 QLabel* label(const QString& text) {
     auto* l = new QLabel(text); l->setWordWrap(true); l->setTextFormat(Qt::PlainText); return l;
 }
@@ -94,11 +103,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* title = label(calibration ? "Reconstruction workspace" : "RealSense scan workspace"); title->setObjectName("title"); outer->addWidget(title);
     auto* toolbar = new QHBoxLayout;
     import_ = button("Import folder…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
-    import_units_=new QComboBox; import_units_->setObjectName("importTranslationUnit");
-    import_units_->addItem("T: millimetres",0.001);
-    import_units_->addItem("T: metres",1.0);
-    import_units_->setToolTip("T in compact calibration defaults to millimetres and is divided by 1000 for reconstruction. Select metres if T is already in metres.");
-    connect(import_units_,&QComboBox::currentIndexChanged,this,[this] { refresh(); });
     camera_mode_ = new QComboBox; camera_mode_->setObjectName("cameraMode");
     if (calibration) camera_mode_->addItem("Sentech stereo", int(CameraMode::Sentech));
     camera_mode_->addItem("Intel RealSense D435", int(CameraMode::RealSenseD435));
@@ -116,7 +120,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     retake_->setToolTip("Return to preview. A single view's reconstruction is cleared; with multiple views, completed captures are retained until the replacement succeeds.");
     capture_ = button("Capture pair", "capturePair");
     finish_draw_ = button("Finish draw", "finishDraw");
-    toolbar->addWidget(import_); toolbar->addWidget(import_units_); toolbar->addWidget(camera_mode_);
+    toolbar->addWidget(import_); toolbar->addWidget(camera_mode_);
     toolbar->addWidget(camera_);
     if (has_confirmed_calibration_) {
         manual_reconstruct_ = button("Reconstruct", "run");
@@ -338,10 +342,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::stateChanged,this,[this](PipelineState state) {
         const bool just_connected = state.connected && !state_.connected;
         const bool clean_preview = !state.has_rectified && state.image_id!=state_.image_id;
-        if (state.import_directory!=state_.import_directory) {
-            const QSignalBlocker blocker(import_units_);
-            import_units_->setCurrentIndex(0);
-        }
         if (state.live || state.image_id != state_.image_id) {
             reconstruction_valid_ = false;
             preview_camera_id_=0;
@@ -468,7 +468,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         showImages();
     });
     connect(import_,&QPushButton::clicked,this,[this] {
-        const QString path = QFileDialog::getExistingDirectory(this,"Choose import folder (left/right images and calibration JSON)",state_.import_directory);
+        const QString initial_directory=state_.import_directory.isEmpty() ? defaultImportDirectory() : state_.import_directory;
+        const QString path = QFileDialog::getExistingDirectory(this,"Choose import folder (left/right images and calibration JSON)",initial_directory);
         if (path.isEmpty()) return;
         controller_.submit([=](auto& w) { w.setImportDirectory(path); });
     });
@@ -496,7 +497,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         if (!captured_clouds_.empty()) mesh_view_->preserveView();
         const bool single_capture=state_.capture_count==0 || (importing && !state_.import_sequence_started);
         const bool own_calibration=capture_calibration_->isChecked();
-        const double translation_scale=import_units_->currentData().toDouble();
         capture_mesh_requested_=true;
         pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
         setCaptureProcessing(true);
@@ -506,7 +506,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         const double edge=mesh_edge_->value();
         controller_.submit([=](auto& w) {
             if (importing) {
-                w.importNextPair(own_calibration,translation_scale);
+                w.importNextPair(own_calibration);
                 w.reconstruct(low,high,{},denoise,distance);
             } else w.captureAndReconstruct(low,high,denoise,distance);
             if (single_capture) w.buildMeshGPU({},edge);
@@ -650,8 +650,6 @@ void ReconstructionWindow::refresh() {
     const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
     const bool idle = !busy_ && !closing_ && !gpu_upload_pending_ && !ma_upload_pending_ && !transferring, frozen = state_.has_rectified && !state_.live;
     const bool importing=!state_.import_directory.isEmpty();
-    const bool needs_units=importing && state_.import_compact_calibration && capture_calibration_->isChecked();
-    import_units_->setEnabled(idle && !state_.import_sequence_started);
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle && has_confirmed_calibration_); camera_->setEnabled(idle);
     import_->setToolTip(importing ? QString("Import folder: %1\n%2 / %3 pairs imported. Choose another folder to start from its first pair.")
         .arg(state_.import_directory).arg(state_.import_index).arg(state_.import_total)
@@ -669,8 +667,7 @@ void ReconstructionWindow::refresh() {
                                   : "Clear all captured views and reconstruction results, then return to live preview for the first capture.");
     const bool can_append=frozen && reconstruction_valid_ && (mesh_valid_ || ma_cloud_valid_) &&
                           state_.capture_count>0 && state_.capture_count<PipelineState::kMaxCaptures;
-    const bool units_ready=!needs_units || import_units_->currentData().toDouble()>0;
-    const bool can_import=units_ready && state_.import_index<state_.import_total &&
+    const bool can_import=state_.import_index<state_.import_total &&
         (!state_.import_sequence_started || state_.capture_count<PipelineState::kMaxCaptures);
     capture_->setEnabled(idle && state_.engine_ready && depth_valid &&
         (importing ? can_import : state_.connected && (state_.live || can_append)));
@@ -678,7 +675,6 @@ void ReconstructionWindow::refresh() {
     capture_->setToolTip(importing
         ? (can_import ? QString("Import pair %1 of %2 and reconstruct it.\n%3")
                 .arg(state_.import_index+1).arg(state_.import_total).arg(state_.import_directory)
-            : !units_ready ? "Choose the T unit for this folder's calibration before importing."
             : state_.import_index>=state_.import_total ? "All pairs have been imported. Restart or choose another folder."
                                                        : "Five views are complete. Restart or choose another folder.")
         : state_.live
@@ -797,7 +793,6 @@ void ReconstructionWindow::refreshWorkspace() {
     for (auto* b : {import_,camera_,capture_,restart_}) b->setVisible(scene);
     retake_->setVisible(scene && state_.has_rectified && state_.import_directory.isEmpty());
     camera_mode_->setVisible(scene);
-    import_units_->setVisible(scene && !state_.import_directory.isEmpty() && state_.import_compact_calibration && capture_calibration_->isChecked());
     finish_draw_->setVisible(!scene);
     if (manual_reconstruct_) manual_reconstruct_->setVisible(scene && frozen);
     if (open_save_) open_save_->setVisible(scene && frozen);

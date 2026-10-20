@@ -45,19 +45,6 @@ fs::MeshCamera meshCamera(const StereoFrame& frame, cv::Size mesh_size) {
     const double sy=double(mesh_size.height)/frame.rectified_left().rows;
     return {cv::Matx33d(camera.fx*sx,0,camera.cx*sx,0,camera.fy*sy,camera.cy*sy,0,0,1),mesh_size};
 }
-fs::MeshCamera previewCamera(const StereoCalibration& calibration, cv::Size size, bool already_rectified = false) {
-    cv::Mat intrinsics;
-    if (already_rectified) calibration.left_camera_matrix.convertTo(intrinsics, CV_64F);
-    else {
-        cv::Mat r1, r2, p1, p2, q;
-        cv::stereoRectify(calibration.left_camera_matrix, calibration.left_distortion,
-                          calibration.right_camera_matrix, calibration.right_distortion, size,
-                          calibration.right_to_left_rotation, calibration.right_to_left_translation,
-                          r1, r2, p1, p2, q, cv::CALIB_ZERO_DISPARITY);
-        intrinsics = p1(cv::Rect(0, 0, 3, 3));
-    }
-    return {cv::Matx33d(intrinsics), size};
-}
 // Match the values actually written to PLY. Exact XYZ equality preserves nearby
 // distinct samples; including RGB preserves color differences at the same XYZ.
 struct PLYVertexKey {
@@ -168,7 +155,6 @@ PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, S
     if (confirmed_) {
         camera_calibration_ = confirmed_->calibration;
         camera_size_ = confirmed_->image_size;
-        state_.live_camera = previewCamera(camera_calibration_, camera_size_);
         camera_calibration_json_ = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
     } else {
         state_.camera_mode = CameraMode::RealSenseD435;
@@ -213,64 +199,57 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release();
-    state_.engine_path = QFileInfo(engine_path).absoluteFilePath();
+    const auto engine_file = QFileInfo(engine_path).absoluteFilePath();
     ma_.reset(); fs_.reset(); sam_.reset(); gpu_mesh_.reset();
-    state_.sam_ready = false; state_.ma_ready = false; state_.ma_engine_path.clear();
+    state_.sam_ready = false; state_.ma_ready = false;
     QElapsedTimer elapsed; elapsed.start();
-    try {
-        state_.engine = "Initializing…";
-        state_.status = "Creating FS and the CUDA stream…"; publish(); checkpoint();
-        if (engine_path.trimmed().isEmpty() || !QFileInfo(state_.engine_path).isFile())
-            throw std::runtime_error("Select an existing TensorRT engine file.");
-        auto next = std::make_shared<FS>();
-        checkpoint();
-        state_.status = "Loading FoundationStereo, creating the TensorRT context and allocating inference buffers…"; publish();
-        next->loadEngine(state_.engine_path.toStdString());
-        checkpoint();
-        state_.status = "Checking that GPU initialization has completed…"; publish();
-        next->synchronize(); checkpoint();
-        const auto modelPath = [&](const QString& specified, const QStringList& names, const QString& model) {
-            if (!specified.isEmpty()) return QFileInfo(specified).absoluteFilePath();
-            for (const auto& base : {QFileInfo(state_.engine_path).absolutePath(), QDir::currentPath()+"/onnx",
-                                    QCoreApplication::applicationDirPath()+"/../../onnx"}) {
-                for (const auto& name:names) {
-                    const QFileInfo candidate(QDir(base).filePath(name));
-                    if (candidate.isFile()) return candidate.absoluteFilePath();
-                }
+    state_.status = "Creating FS and the CUDA stream…"; publish(); checkpoint();
+    if (engine_path.trimmed().isEmpty() || !QFileInfo(engine_file).isFile())
+        throw std::runtime_error("Select an existing TensorRT engine file.");
+    auto next = std::make_shared<FS>();
+    checkpoint();
+    state_.status = "Loading FoundationStereo, creating the TensorRT context and allocating inference buffers…"; publish();
+    next->loadEngine(engine_file.toStdString());
+    checkpoint();
+    state_.status = "Checking that GPU initialization has completed…"; publish();
+    next->synchronize(); checkpoint();
+    const auto modelPath = [&](const QString& specified, const QStringList& names, const QString& model) {
+        if (!specified.isEmpty()) return QFileInfo(specified).absoluteFilePath();
+        for (const auto& base : {QFileInfo(engine_file).absolutePath(), QDir::currentPath()+"/onnx",
+                                QCoreApplication::applicationDirPath()+"/../../onnx"}) {
+            for (const auto& name:names) {
+                const QFileInfo candidate(QDir(base).filePath(name));
+                if (candidate.isFile()) return candidate.absoluteFilePath();
             }
-            throw std::runtime_error((model+" engine not found: "+names.back()+". Choose its engine in the loading window.").toStdString());
-        };
-        const auto encoder = modelPath(sam_encoder,{"sam2.1_hiera_large.encoder.engine"},"SAM encoder");
-        const auto decoder = modelPath(sam_decoder,{"sam2.1_hiera_large.decoder.engine"},"SAM decoder");
-        state_.ma_engine_path = modelPath(ma_engine,{"MapAnything/onnx/mapanything_dynamic_raw_bf16.engine",
-                                                     "mapanything_dynamic_raw_bf16.engine"},"MapAnything");
-        state_.status = "Loading SAM 2.1 Hiera Large encoder / decoder and allocating contexts, GPU features and prompt buffers…";
-        publish(); checkpoint();
-        auto sam = std::make_unique<fs::SamSegmenter>(); sam->loadEngines(encoder.toStdString(),decoder.toStdString());
-        checkpoint();
-        emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
-        state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
-        auto ma = std::make_shared<fs::MA_VGGT>();
-        ma->loadEngine(state_.ma_engine_path.toStdString());
-        checkpoint();
-        emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
-                 "Owns an independent non-blocking CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace allocated on first inference.\n"+state_.ma_engine_path);
-        sam_ = std::move(sam); ma_ = std::move(ma);
-        state_.sam_ready = true; state_.ma_ready = true;
-        fs_ = std::move(next);
-        state_.engine_ready = true;
-        state_.engine = "Ready · 960 × 800 · " + QFileInfo(state_.engine_path).fileName();
-        state_.status = "FoundationStereo, SAM 2.1 and MapAnything are loaded. Import a capture directory or preview the cameras.";
-        if (source_ && source_->running()) {
-            state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
-            state_.status = liveStatus();
         }
-        emit log(QString("FS + SAM 2.1 + MapAnything initialization completed in %1 ms.").arg(elapsed.elapsed()));
-        if (confirmed_) emit log("Confirmed calibration: " + confirmed_path_);
-    } catch (...) {
-        state_.engine = "Initialization failed · check the engine, GPU and TensorRT compatibility";
-        throw;
+        throw std::runtime_error((model+" engine not found: "+names.back()+". Choose its engine in the loading window.").toStdString());
+    };
+    const auto encoder = modelPath(sam_encoder,{"sam2.1_hiera_large.encoder.engine"},"SAM encoder");
+    const auto decoder = modelPath(sam_decoder,{"sam2.1_hiera_large.decoder.engine"},"SAM decoder");
+    const auto ma_engine_file = modelPath(ma_engine,{"MapAnything/onnx/mapanything_dynamic_raw_bf16.engine",
+                                                    "mapanything_dynamic_raw_bf16.engine"},"MapAnything");
+    state_.status = "Loading SAM 2.1 Hiera Large encoder / decoder and allocating contexts, GPU features and prompt buffers…";
+    publish(); checkpoint();
+    auto sam = std::make_unique<fs::SamSegmenter>(); sam->loadEngines(encoder.toStdString(),decoder.toStdString());
+    checkpoint();
+    emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
+    state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
+    auto ma = std::make_shared<fs::MA_VGGT>();
+    ma->loadEngine(ma_engine_file.toStdString());
+    checkpoint();
+    emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
+             "Owns an independent non-blocking CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace allocated on first inference.\n"+ma_engine_file);
+    sam_ = std::move(sam); ma_ = std::move(ma);
+    state_.sam_ready = true; state_.ma_ready = true;
+    fs_ = std::move(next);
+    state_.engine_ready = true;
+    state_.status = "FoundationStereo, SAM 2.1 and MapAnything are loaded. Import a capture directory or preview the cameras.";
+    if (source_ && source_->running()) {
+        state_.connected = true; state_.live = true; last_pair_.start(); timer_->start();
+        state_.status = liveStatus();
     }
+    emit log(QString("FS + SAM 2.1 + MapAnything initialization completed in %1 ms.").arg(elapsed.elapsed()));
+    if (confirmed_) emit log("Confirmed calibration: " + confirmed_path_);
 }
 void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
                              QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps) {
@@ -291,9 +270,6 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     state_.status = QString("Pair ready · %1 × %2 · %3. Reconstruct the full image or optionally select a region.")
         .arg(frame_->left().cols).arg(frame_->left().rows).arg(preparation);
     emit log(state_.input + "\nCalibration: " + state_.calibration + "\n" + state_.status);
-}
-void PipelineWorker::importCapture(const QString& directory, bool use_capture_calibration) {
-    loadCapture(directory,"left.png","right.png",use_capture_calibration,false);
 }
 void PipelineWorker::setImportDirectory(const QString& directory) {
     const QDir dir(directory);
@@ -324,8 +300,6 @@ void PipelineWorker::setImportDirectory(const QString& directory) {
     const auto calibration_path=findCalibration(dir,calibrationNames(confirmed_path_));
     if (calibration_path.isEmpty()) throw std::runtime_error("Import folder is missing calibration JSON.");
     requireReadable(calibration_path);
-    cv::FileStorage metadata(calibration_path.toStdString(),cv::FileStorage::READ);
-    const bool compact=metadata["left_camera_matrix"].empty() && !metadata["K1"].empty();
     checkpoint();
     // Choosing a folder changes the source only; no pair is loaded or reconstructed.
     disconnectCameras();
@@ -333,31 +307,28 @@ void PipelineWorker::setImportDirectory(const QString& directory) {
     import_calibration_.reset();
     state_.import_directory=dir.absolutePath(); state_.import_index=0;
     state_.import_total=int(import_pairs_.size()); state_.import_sequence_started=false;
-    state_.import_compact_calibration=compact;
     state_.status=QString("Import folder selected · %1 pairs. Press Import pair to load the first pair.\n%2")
         .arg(state_.import_total).arg(state_.import_directory);
     emit log(state_.status);
 }
-void PipelineWorker::importNextPair(bool use_capture_calibration, double translation_scale) {
+void PipelineWorker::importNextPair(bool use_capture_calibration) {
     if (state_.import_directory.isEmpty()) throw std::runtime_error("Choose an import folder first.");
     if (state_.import_index>=int(import_pairs_.size())) throw std::runtime_error("All pairs in this folder have been imported.");
     if (state_.import_sequence_started && captures_.size()>=PipelineState::kMaxCaptures)
         throw std::runtime_error("Five captures are complete. Restart before importing another sequence.");
     const auto& pair=import_pairs_[state_.import_index];
-    loadCapture(state_.import_directory,pair.first,pair.second,use_capture_calibration,state_.import_sequence_started,translation_scale,true);
+    loadCapture(state_.import_directory,pair.first,pair.second,use_capture_calibration,state_.import_sequence_started);
     state_.import_sequence_started=true;
     ++state_.import_index; // Validation/read failures leave the same pair available for retry.
 }
 void PipelineWorker::loadCapture(const QString& directory, const QString& left_name, const QString& right_name,
-                                bool use_capture_calibration, bool append, double translation_scale,
-                                bool cache_calibration) {
+                                bool use_capture_calibration, bool append) {
     if (!use_capture_calibration && !confirmed_)
         throw std::runtime_error("No confirmed calibration. Import this capture with its own calibration JSON.");
     const QDir dir(directory);
     if (!dir.exists()) throw std::runtime_error("Capture directory does not exist.");
-    const bool reuse=cache_calibration && import_calibration_ &&
-        import_calibration_->directory==dir.absolutePath() && import_calibration_->own==use_capture_calibration &&
-        (!import_calibration_->compact || import_calibration_->translation_scale==translation_scale);
+    const bool reuse=import_calibration_ &&
+        import_calibration_->directory==dir.absolutePath() && import_calibration_->own==use_capture_calibration;
     const auto calibration_names=calibrationNames(confirmed_path_);
     const auto calibration_path=reuse ? QString{} : findCalibration(dir,calibration_names);
     QStringList missing;
@@ -378,15 +349,13 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
     auto& snapshot=reuse ? *import_calibration_ : loaded;
     if (!reuse) {
         snapshot.directory=dir.absolutePath(); snapshot.own=use_capture_calibration;
-        snapshot.translation_scale=translation_scale;
         if (use_capture_calibration) {
             cv::FileStorage metadata(calibration_path.toStdString(),cv::FileStorage::READ);
             snapshot.compact=metadata["left_camera_matrix"].empty() && !metadata["K1"].empty();
             snapshot.calibration=StereoCalibration::from_file(calibration_path.toStdString());
             if (snapshot.compact) {
-                if (translation_scale!=1.0 && translation_scale!=0.001)
-                    throw std::runtime_error("Choose the T unit (millimetres or metres) before importing compact calibration.");
-                snapshot.calibration.right_to_left_translation*=translation_scale;
+                // Compact K1/D1/K2/D2/R/T files use millimetres; reconstruction uses metres.
+                snapshot.calibration.right_to_left_translation*=0.001;
             }
             const auto width=metadata["image_width"], height=metadata["image_height"];
             if (!width.empty() || !height.empty()) {
@@ -403,8 +372,7 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
                                                                : "\nCapture calibration (separate from live cameras)");
             if (snapshot.compact) {
                 snapshot.filename="calibration.json";
-                snapshot.description=calibration_path+QString("\nT supplied in %1 · image grid / camera identity not verified")
-                    .arg(translation_scale==0.001 ? "millimetres" : "metres");
+                snapshot.description=calibration_path+"\nT supplied in millimetres · image grid / camera identity not verified";
             }
         } else {
             snapshot.calibration=confirmed_->calibration;
@@ -432,9 +400,9 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
         calibration_json=QByteArray::fromStdString(normalized.releaseAndGetString());
     }
     checkpoint(); prepare(std::move(frame),dir.absolutePath()+"\n"+left_name+" / "+right_name,
-                          snapshot.description,snapshot.filename,calibration_json,cache_calibration ? &snapshot.maps : nullptr);
+                          snapshot.description,snapshot.filename,calibration_json,&snapshot.maps);
     // Failed reads or rectification must not replace a working calibration snapshot.
-    if (cache_calibration && !reuse) {
+    if (!reuse) {
         import_calibration_=std::move(loaded);
         emit log("Import calibration loaded and cached for this folder.");
     }
@@ -451,7 +419,7 @@ void PipelineWorker::connectCameras(CameraMode mode) {
     const bool from_import=!state_.import_directory.isEmpty();
     // A user-requested connection exits import mode even if no camera is available.
     state_.import_directory.clear(); state_.import_index=0; state_.import_total=0;
-    state_.import_sequence_started=false; state_.import_compact_calibration=false; import_pairs_.clear();
+    state_.import_sequence_started=false; import_pairs_.clear();
     import_calibration_.reset();
     if (mode == CameraMode::Sentech && !confirmed_)
         throw std::runtime_error("Sentech cameras require confirmed calibration. Use fs_gui to calibrate them, or connect an Intel RealSense D435.");
@@ -483,9 +451,7 @@ void PipelineWorker::connectCameras(CameraMode mode) {
         if (filename.isEmpty()) filename = "calibration.json";
         json = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
     }
-    const auto live_camera = previewCamera(calibration, size, mode == CameraMode::RealSenseD435);
     camera_calibration_ = std::move(calibration); camera_size_ = size;
-    state_.live_camera = live_camera;
     camera_calibration_description_ = std::move(description); camera_calibration_filename_ = std::move(filename);
     camera_calibration_json_ = std::move(json);
     // Switching devices or reconnecting can change both the image grid and intrinsics.
@@ -710,7 +676,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     publish(); // Publish readiness before delivering the depth texture.
     emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
-    buildPointCloud(mask);
+    buildPointCloud();
     // A successful cloud build retains this capture (or replaces its retake
     // slot), so use the committed view count rather than capture_slot_ + 1.
     const int views = int(captures_.size());
@@ -732,16 +698,15 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         constexpr std::size_t plane=std::size_t(width)*height;
         unsigned long long point_count=0;
         for (int i = 0; i < views; ++i) {
-            const auto& frame = *captures_[i].frame;
-            cameras->push_back({meshCamera(frame, frame.rectified_left().size()), poses[i],
-                                captures_[i].image_id, captures_[i].ma_image});
+            const auto& capture = captures_[i];
+            cameras->push_back({capture.image_camera, poses[i], capture.image_id, capture.ma_image});
             auto buffer=std::make_shared<fs::MeshGPUBuffer>();
             auto cloud=std::make_shared<GPUMeshFrame>();
             cloud->stats=fs::build_ma_point_cloud_gpu({ma_->depthsDevice()+i*6*plane,
                 ma_->inputDevice()+i*7*plane,ma_->scaleDevice(),width,height,ma_->stream()},*buffer);
             cloud->buffer=std::move(buffer); cloud->point_cloud=true;
-            cloud->camera=meshCamera(frame,{width,height});
-            cloud->image_id=captures_[i].image_id;
+            cloud->camera=capture.ma_camera;
+            cloud->image_id=capture.image_id;
             cloud->stream=ma_->stream(); cloud->stream_owner=ma_;
             const auto error=cudaGetDevice(&cloud->device);
             if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
@@ -764,10 +729,11 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         emit log("MA input ready for view 1 · inference starts at 2 views.");
     }
 }
-void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
+void PipelineWorker::buildPointCloud() {
     reportProgress(92, "Building valid point cloud on GPU…");
     QElapsedTimer elapsed; elapsed.start();
-    const auto inputs=fs_->prepare_gpu_mesh_inputs(selection);
+    // The denoising mask is already uploaded for these inputs.
+    const auto inputs=fs_->prepare_gpu_mesh_inputs();
     // Use FS's filtered device XYZ/RGB directly. The CPU depth snapshot is not
     // involved in point-cloud construction or the CUDA/OpenGL VBO handoff.
     if (!gpu_mesh_ || !gpu_mesh_.unique()) gpu_mesh_=std::make_shared<fs::MeshGPUBuffer>();
@@ -792,8 +758,10 @@ void PipelineWorker::buildPointCloud(const cv::Mat& selection) {
 }
 void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     checkpoint();
-    CapturedStereoPair capture{state_.image_id,frame_,state_.input,state_.calibration_filename,
-                               calibration_json_,std::move(point_cloud),image(ma_->resizedColor())};
+    CapturedStereoPair capture{state_.image_id,
+        meshCamera(*frame_,frame_->rectified_left().size()),
+        meshCamera(*frame_,{fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight}),
+        std::move(point_cloud),image(ma_->resizedColor())};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
