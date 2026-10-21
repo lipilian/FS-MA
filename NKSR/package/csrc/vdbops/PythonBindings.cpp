@@ -1,4 +1,7 @@
 #include <torch/extension.h>
+#include <torch/csrc/autograd/python_variable.h>
+#include <pybind11/stl.h>
+#include <array>
 
 #include "SparseFeatureIndexGrid.h"
 
@@ -8,16 +11,48 @@ using IndexGridDevice = SparseFeatureIndexGrid<fvdb::PytorchDeviceBuffer>;
 
 
 namespace pybind11 {namespace detail {
+// Convert through std::array: newer pybind11 array_caster constructs its
+// target with nested braces, which NanoVDB's vector types do not support.
+template <typename VectorT, typename ScalarT>
+struct nanovdb_vec3_caster {
+    using ArrayT = std::array<ScalarT, 3>;
+    using ArrayCaster = make_caster<ArrayT>;
+
+    PYBIND11_TYPE_CASTER(VectorT, ArrayCaster::name);
+
+    bool load(handle src, bool convert) {
+        // Tensor implements iteration but is not a Python sequence, so the
+        // std::array caster needs an explicit conversion for tensor inputs.
+        object tensor_values;
+        if (THPVariable_Check(src.ptr())) {
+            const auto& tensor = THPVariable_Unpack(src.ptr());
+            if (!convert || tensor.dim() != 1 || tensor.numel() != 3) {
+                return false;
+            }
+            tensor_values = src.attr("tolist")();
+            src = tensor_values;
+        }
+        ArrayCaster caster;
+        if (!caster.load(src, convert)) {
+            return false;
+        }
+        auto values = cast_op<ArrayT>(caster);
+        value = VectorT(values[0], values[1], values[2]);
+        return true;
+    }
+
+    static handle cast(const VectorT& src, return_value_policy policy, handle parent) {
+        return ArrayCaster::cast(ArrayT{src[0], src[1], src[2]}, policy, parent);
+    }
+};
+
 template <>
 struct type_caster<nanovdb::Coord>
- : array_caster<nanovdb::Coord, int32_t, false, 3> { };
-}}
+ : nanovdb_vec3_caster<nanovdb::Coord, int32_t> { };
 
-
-namespace pybind11 {namespace detail {
 template <typename ScalarT>
 struct type_caster<nanovdb::Vec3<ScalarT>>
- : array_caster<nanovdb::Vec3<ScalarT>, ScalarT, false, 3> { };
+ : nanovdb_vec3_caster<nanovdb::Vec3<ScalarT>, ScalarT> { };
 }}
 
 

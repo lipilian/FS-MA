@@ -37,6 +37,24 @@ void requireReadable(const QString& path) {
     if (!file.open(QIODevice::ReadOnly) || file.size()==0)
         throw std::runtime_error(("Cannot load capture. File is unreadable or empty: "+QFileInfo(path).fileName()).toStdString());
 }
+QString findImportMask(const QDir& directory,const QString& left_name) {
+    const auto number=QFileInfo(left_name).completeBaseName().mid(4);
+    const auto index=number.isEmpty() ? 0 : number.toULongLong();
+    const QRegularExpression pattern("^mask([0-9]*)\\.png$",QRegularExpression::CaseInsensitiveOption);
+    QString path;
+    for (const auto& name:directory.entryList(QDir::Files)) {
+        const auto match=pattern.match(name);
+        if (!match.hasMatch()) continue;
+        bool ok=true;
+        const auto suffix=match.captured(1);
+        const auto mask_index=suffix.isEmpty() ? 0 : suffix.toULongLong(&ok);
+        if (!ok || mask_index!=index) continue;
+        if (!path.isEmpty())
+            throw std::runtime_error(("Ambiguous masks for "+left_name+": "+QFileInfo(path).fileName()+" and "+name).toStdString());
+        path=directory.filePath(name);
+    }
+    return path;
+}
 QImage image(const cv::Mat& rgb) {
     return QImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888).copy();
 }
@@ -253,7 +271,8 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     if (confirmed_) emit log("Confirmed calibration: " + confirmed_path_);
 }
 void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
-                             QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps) {
+                             QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps,
+                             QImage rectified_mask) {
     QElapsedTimer elapsed; elapsed.start();
     const bool already_rectified = frame->input_is_rectified();
     if (!already_rectified) frame->rectify(maps);
@@ -265,7 +284,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     state_.live = false; latest_.reset();
     state_.image_camera = meshCamera(*frame_, frame_->rectified_left().size());
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
-    emit images(image(frame_->rectified_left()), image(frame_->rectified_right()));
+    emit images(image(frame_->rectified_left()), image(frame_->rectified_right()),std::move(rectified_mask));
     const QString preparation = already_rectified ? "rectified by camera"
         : QString("rectified in %1 ms").arg(elapsed.elapsed());
     state_.status = QString("Pair ready · %1 × %2 · %3. Reconstruct the full image or optionally select a region.")
@@ -346,6 +365,19 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
     if (left.empty() || right.empty()) throw std::runtime_error("Capture must contain readable left and right images.");
     cv::cvtColor(left,left,cv::COLOR_BGR2RGB); cv::cvtColor(right,right,cv::COLOR_BGR2RGB);
 
+    // Imported masks already use rectified-left coordinates. Read and validate
+    // before committing the pair, and pass their pixels through without remap.
+    const auto mask_path=findImportMask(dir,left_name);
+    QImage imported_mask;
+    if (!mask_path.isEmpty()) {
+        const auto mask=cv::imread(mask_path.toStdString(),cv::IMREAD_UNCHANGED);
+        if (mask.empty() || mask.type()!=CV_8UC1 || mask.size()!=left.size())
+            throw std::runtime_error(("Mask must be a readable 8-bit single-channel PNG matching the rectified left image dimensions: "+mask_path).toStdString());
+        if (cv::countNonZero((mask!=0)&(mask!=255)))
+            throw std::runtime_error(("Mask must contain only 0 and 255: "+mask_path).toStdString());
+        imported_mask=QImage(mask.data,mask.cols,mask.rows,mask.step,QImage::Format_Grayscale8).copy();
+    }
+
     ImportCalibration loaded;
     auto& snapshot=reuse ? *import_calibration_ : loaded;
     if (!reuse) {
@@ -401,7 +433,8 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
         calibration_json=QByteArray::fromStdString(normalized.releaseAndGetString());
     }
     checkpoint(); prepare(std::move(frame),dir.absolutePath()+"\n"+left_name+" / "+right_name,
-                          snapshot.description,snapshot.filename,calibration_json,&snapshot.maps);
+                          snapshot.description,snapshot.filename,calibration_json,&snapshot.maps,std::move(imported_mask));
+    if (!mask_path.isEmpty()) emit log("Loaded rectified mask without remapping: "+mask_path);
     // Failed reads or rectification must not replace a working calibration snapshot.
     if (!reuse) {
         import_calibration_=std::move(loaded);

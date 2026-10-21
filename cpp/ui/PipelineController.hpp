@@ -17,7 +17,7 @@ public:
     void stop();
 signals:
     void stateChanged(PipelineState state);
-    void images(QImage rectified_left, QImage rectified_right);
+    void images(QImage rectified_left, QImage rectified_right, QImage rectified_mask = {});
     void preview(QImage rectified_left, QImage rectified_right);
     void depthImage(QImage depth_rgb, float minimum, float maximum);
     void gpuMeshReady(SharedGPUMesh mesh);

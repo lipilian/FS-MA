@@ -411,9 +411,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         }
         refresh();
     });
-    connect(&controller_,&PipelineController::images,this,[this](QImage rl,QImage rr) {
+    connect(&controller_,&PipelineController::images,this,[this](QImage rl,QImage rr,QImage rectified_mask) {
         rectified_left_ = std::move(rl); rectified_right_ = std::move(rr);
-        reconstruction_valid_=false; mask_->setImage(rectified_left_); save_mask_->setChecked(false); tabs_->setCurrentIndex(SceneTab);
+        reconstruction_valid_=false;
+        {
+            const QSignalBlocker blocker(mask_);
+            MaskEditor::Snapshot drawing;
+            drawing.base_mask=std::move(rectified_mask);
+            drawing.accepted=!drawing.base_mask.isNull();
+            mask_->restore(rectified_left_,drawing);
+        }
+        save_mask_->setChecked(mask_->hasSelection()); tabs_->setCurrentIndex(SceneTab);
         if (capture_processing_) {
             // Replace the last live frame with the exact pair used for inference.
             preview_->setImage(rectified_left_); right_preview_->setImage(rectified_right_);
@@ -429,7 +437,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(&controller_,&PipelineController::gpuMeshReady,this,[this](SharedGPUMesh mesh) {
         if (closing_ || !reconstruction_valid_) return;
         if (mesh->point_cloud && mesh->image_id==state_.image_id)
-            capture_previews_.insert(mesh->image_id,{rectified_left_,rectified_right_,depth_image_,depth_description_,{},{}});
+            capture_previews_.insert(mesh->image_id,{rectified_left_,rectified_right_,depth_image_,depth_description_,mask_->snapshot(),mask_->mask()});
         if (capture_mesh_requested_) {
             if (mesh->point_cloud) pending_capture_cloud_=std::move(mesh);
             else pending_capture_mesh_=std::move(mesh);

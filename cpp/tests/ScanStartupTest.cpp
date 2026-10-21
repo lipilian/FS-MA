@@ -432,6 +432,68 @@ void checkImportControls() {
     std::cout<<"PASS: default scan_data folder, no unit selector, chooser cancellation, deferred import and explicit source switch\n";
 }
 
+void checkImportMasks() {
+    QTemporaryDir directory;
+    makeImportFixture(directory);
+    // Nonzero distortion makes it observable if the already-rectified mask is
+    // accidentally sent through the stereo image remap a second time.
+    {
+        QFile calibration(directory.filePath("stereo_calibration.json"));
+        require(calibration.open(QIODevice::ReadWrite),"Cannot update mask import calibration");
+        const auto content=calibration.readAll().replace("[0,0,0,0,0]","[0.8,-0.1,0.03,-0.02,0]");
+        calibration.resize(0); calibration.seek(0); calibration.write(content);
+    }
+    QImage expected(32,24,QImage::Format_Grayscale8);
+    for (int y=0;y<expected.height();++y) for (int x=0;x<expected.width();++x)
+        expected.scanLine(y)[x]=((x/2+y/3)%2) ? 255 : 0;
+    require(expected.save(directory.filePath("mask02.png")),"Cannot write numbered mask fixture");
+    PipelineWorker worker({}, {}, {}, std::make_shared<std::atomic_bool>(false));
+    PipelineState state;
+    QImage loaded;
+    int delivered=0;
+    QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState update) { state=std::move(update); });
+    QObject::connect(&worker,&PipelineWorker::images,[&](QImage left,QImage,QImage mask) {
+        require(left.size()==QSize(32,24),"Unexpected image grid in mask fixture");
+        loaded=std::move(mask); ++delivered;
+    });
+    worker.execute([&](auto& w) { w.setImportDirectory(directory.path()); w.importNextPair(true); });
+    require(!state.action_failed && state.import_index==1 && delivered==1 && loaded==expected,
+            "mask02 must match left2 numerically and retain exact rectified pixels");
+    const auto previous_id=state.image_id;
+    const auto reject_next=[&](const char* message) {
+        worker.execute([](auto& w) { w.importNextPair(true); });
+        require(state.action_failed && state.image_id==previous_id && state.import_index==1 &&
+                delivered==1 && loaded==expected,message);
+    };
+    require(expected.save(directory.filePath("mask10.png")) && expected.save(directory.filePath("mask010.png")),
+            "Cannot write ambiguous mask fixture");
+    reject_next("Ambiguous masks must not advance or replace the imported pair");
+    require(QFile::remove(directory.filePath("mask010.png")),"Cannot remove duplicate mask fixture");
+    QImage wrong_size(31,24,QImage::Format_Grayscale8); wrong_size.fill(255);
+    require(wrong_size.save(directory.filePath("mask10.png")),"Cannot write mismatched mask fixture");
+    reject_next("Mismatched mask dimensions must fail without resizing or losing the prior pair");
+    QImage nonbinary(32,24,QImage::Format_Grayscale8); nonbinary.fill(128);
+    require(nonbinary.save(directory.filePath("mask10.png")),"Cannot write nonbinary mask fixture");
+    reject_next("Nonbinary masks must fail without committing a new pair");
+    {
+        QFile broken(directory.filePath("mask10.png"));
+        require(broken.open(QIODevice::WriteOnly|QIODevice::Truncate),"Cannot write unreadable mask fixture");
+        broken.write("not a PNG");
+    }
+    reject_next("Unreadable masks must fail without committing a new pair");
+    require(QFile::remove(directory.filePath("mask10.png")),"Cannot remove invalid mask fixture");
+    worker.execute([](auto& w) { w.importNextPair(true); });
+    require(!state.action_failed && state.import_index==2 && delivered==2 && loaded.isNull(),
+            "A pair without a mask inherited the previous view's mask");
+    expected.fill(0);
+    require(expected.save(directory.filePath("mask02.png")),"Cannot update mask fixture");
+    worker.execute([](auto& w) { w.cleanCaptures(); w.importNextPair(true); });
+    require(!state.action_failed && state.import_index==1 && delivered==3 && !loaded.isNull() && loaded==expected,
+            "Restart did not reload an updated, valid all-zero mask");
+    worker.shutdown();
+    std::cout<<"PASS: optional masks matched by number, exact rectified pixels, absent/zero masks, restart and invalid-mask retries\n";
+}
+
 void checkInlineMaskDrawing() {
     PipelineController controller({}, {}, {});
     controller.submit([](auto& w) {
@@ -461,11 +523,11 @@ void checkInlineMaskDrawing() {
     PipelineState state;
     state.engine_ready=state.sam_ready=state.ma_ready=state.has_rectified=state.depth_ready=state.gpu_ready=true;
     state.import_directory="/inline-mask-test"; state.import_total=3; state.import_sequence_started=true;
-    const auto seed=[&](int id) {
+    const auto seed=[&](int id,const QImage& imported_mask=QImage{}) {
         state.image_id=id; state.capture_count=state.import_index=id;
         controller.stateChanged(state);
         QImage left(320,240,QImage::Format_RGB888); left.fill(QColor(id*40,90,150));
-        controller.images(left,left); controller.depthImage(left,0,1);
+        controller.images(left,left,imported_mask); controller.depthImage(left,0,1);
         auto cloud=std::make_shared<GPUMeshFrame>(); cloud->image_id=id; cloud->point_cloud=true;
         cloud->stats.point_count=100;
         controller.gpuMeshReady(cloud);
@@ -535,9 +597,25 @@ void checkInlineMaskDrawing() {
     image_mode->setCurrentIndex(1);
     require(image_mode->currentIndex()==1 && stack->currentWidget()!=editor,
             "Drawing invalidated depth or prevented switching back to the depth preview");
+    QImage imported_mask(320,240,QImage::Format_Grayscale8); imported_mask.fill(0);
+    for (int y=0;y<40;++y) for (int x=0;x<40;++x) imported_mask.scanLine(y)[x]=255;
+    seed(3,imported_mask);
+    view->cameraClicked(3);
+    require(editor->mask()==imported_mask && editor->hasSelection() && !editor->hasPrompts(),
+            "Imported mask was not restored as a confirmed editable mask after FS completed");
+    view->cameraClicked(1);
+    require(editor->mask().isNull(),"Importing a mask replaced another camera's cleared mask");
+    view->cameraClicked(3);
+    require(editor->mask()==imported_mask,"Imported mask was lost when switching cameras");
+    start->click(); paint(); finish->click();
+    const auto edited=editor->mask();
+    require(!edited.isNull() && edited!=imported_mask && edited.constScanLine(2)[2]==255,
+            "Brush editing did not preserve the imported mask as its base");
+    view->cameraClicked(2); view->cameraClicked(3);
+    require(editor->mask()==edited,"Edited imported mask did not persist independently");
     QCoreApplication::processEvents();
     require(submitted==0,"Drawing or clearing a mask triggered FS/MA reconstruction");
-    state.image_id=3; state.capture_count=0; state.has_rectified=state.depth_ready=false;
+    state.image_id=4; state.capture_count=0; state.has_rectified=state.depth_ready=false;
     controller.stateChanged(state); view->cameraClicked(1);
     require(!start->isEnabled(),"Restart retained an old camera's editable mask");
     state.import_directory.clear(); controller.stateChanged(state);
@@ -551,10 +629,12 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     PipelineWorker worker({}, {}, {}, std::make_shared<std::atomic_bool>(false));
     PipelineState state;
     SharedGPUMesh geometry;
-    QImage latest_left;
+    QImage latest_left,latest_mask;
     QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState update) { state=std::move(update); });
     QObject::connect(&worker,&PipelineWorker::gpuMeshReady,[&](SharedGPUMesh update) { geometry=std::move(update); });
-    QObject::connect(&worker,&PipelineWorker::images,[&](QImage left,QImage) { latest_left=std::move(left); });
+    QObject::connect(&worker,&PipelineWorker::images,[&](QImage left,QImage,QImage mask) {
+        latest_left=std::move(left); latest_mask=std::move(mask);
+    });
     const auto run=[&](const std::function<void(PipelineWorker&)>& action) {
         worker.execute(action);
         if (state.action_failed) throw std::runtime_error(state.status.toStdString());
@@ -569,6 +649,11 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     for (int i=0;i<2;++i) {
         run([](auto& w) { w.importNextPair(true); });
         require(state.image_camera.has_value(),"Imported pair has no rectified camera");
+        // The real scan_data integration fixture uses consecutively numbered PNG masks.
+        const auto mask_path=QDir(directory).filePath(QString("mask%1.png").arg(i+1,2,10,QChar('0')));
+        if (QFileInfo::exists(mask_path))
+            require(latest_mask==QImage(mask_path).convertToFormat(QImage::Format_Grayscale8),
+                    "Real imported mask pixels changed during stereo rectification");
         cameras.push_back(*state.image_camera); ids.push_back(state.image_id); images.push_back(latest_left);
         run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
         require(state.capture_count==i+1 && geometry && geometry->point_cloud && geometry->stats.point_count>0,
@@ -579,8 +664,12 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         if (i==0) {
             fs_intrinsic=geometry->camera.intrinsics;
             QTemporaryDir scan_output;
-            run([&](auto& w) { w.saveScanResults(scan_output.path(),{}); });
+            run([&](auto& w) { w.saveScanResults(scan_output.path(),{{state.image_id,latest_mask}}); });
             const auto json=checkScanFiles(scan_output.path(),1);
+            if (!latest_mask.isNull()) {
+                const auto exported_mask=QImage(scan_output.filePath("mask01.png")).convertToFormat(QImage::Format_Grayscale8);
+                require(exported_mask==latest_mask,"Imported full-resolution mask failed to round-trip through scan export");
+            }
             const auto pose=json.value("views").toArray()[0].toObject().value("extrinsic").toArray();
             for (int r=0;r<4;++r) for (int c=0;c<4;++c)
                 require(pose[r].toArray()[c].toDouble()==(r==c ? 1 : 0),"Single-view export must use identity before MA runs");
@@ -1061,6 +1150,7 @@ int main(int argc, char** argv) {
         checkImportFolder();
         checkRectificationCache();
         checkImportControls();
+        checkImportMasks();
         checkInlineMaskDrawing();
         return 0;
     } catch (const std::exception& error) {

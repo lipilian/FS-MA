@@ -1056,10 +1056,7 @@ inline _CPU_AND_GPU_CODE_ uint4 max(uint4 a, uint4 b)
 // - linear interpolation between a and b, based on value t in [0, 1] range
 ////////////////////////////////////////////////////////////////////////////////
 
-inline _CPU_AND_GPU_CODE_ float lerp(float a, float b, float t)
-{
-    return a + t*(b-a);
-}
+// Keep vector overloads only; scalar lerp conflicts with C++20 <cmath>.
 inline _CPU_AND_GPU_CODE_ float2 lerp(float2 a, float2 b, float t)
 {
     return a + t*(b-a);

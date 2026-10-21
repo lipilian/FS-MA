@@ -79,7 +79,7 @@ public:
     void shutdown();
 signals:
     void stateChanged(PipelineState state);
-    void images(QImage rectified_left, QImage rectified_right);
+    void images(QImage rectified_left, QImage rectified_right, QImage rectified_mask = {});
     void preview(QImage rectified_left, QImage rectified_right);
     void depthImage(QImage depth_rgb, float minimum, float maximum);
     void gpuMeshReady(SharedGPUMesh mesh);
@@ -99,7 +99,8 @@ private:
     void loadCapture(const QString& directory, const QString& left_name, const QString& right_name,
                      bool use_capture_calibration, bool append);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
-                 QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps = nullptr);
+                 QString calibration_filename, QByteArray calibration_json, StereoRectificationCache* maps = nullptr,
+                 QImage rectified_mask = {});
     ConfirmedCalibration confirmed_;
     QString confirmed_path_;
     SharedStereoSource source_;
