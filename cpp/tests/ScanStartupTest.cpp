@@ -353,11 +353,11 @@ void checkRectificationCache() {
 void checkImportControls() {
     QTemporaryDir dir, workspace;
     makeImportFixture(dir);
-    require(workspace.isValid() && QDir(workspace.path()).mkpath("data/scan_data"),
+    require(workspace.isValid() && QDir(workspace.path()).mkpath("data/scan_data1"),
             "Cannot create default import directory fixture");
     const QString original_directory=QDir::currentPath();
     require(QDir::setCurrent(workspace.path()),"Cannot change to import workspace fixture");
-    const QString default_directory=QDir(workspace.filePath("data/scan_data")).canonicalPath();
+    const QString default_directory=QDir(workspace.filePath("data/scan_data1")).canonicalPath();
     PipelineController controller({}, {}, {});
     bool busy=false;
     QObject::connect(&controller,&PipelineController::busyChanged,[&](bool value) { busy=value; });
@@ -405,7 +405,7 @@ void checkImportControls() {
         choose->click();
         require(handled,"Folder chooser was not shown");
         require(opened_directory==expected_directory,
-                "Folder chooser must start in data/scan_data or the selected import folder");
+                "Folder chooser must start in data/scan_data1 or the selected import folder");
         drain();
     };
     select_folder(false);
@@ -429,7 +429,7 @@ void checkImportControls() {
             "Connect cameras did not restore the capture action");
     window.allowClose(); controller.stop();
     require(QDir::setCurrent(original_directory),"Cannot restore working directory");
-    std::cout<<"PASS: default scan_data folder, no unit selector, chooser cancellation, deferred import and explicit source switch\n";
+    std::cout<<"PASS: default scan_data1 folder, no unit selector, chooser cancellation, deferred import and explicit source switch\n";
 }
 
 void checkImportMasks() {
@@ -672,7 +672,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     for (int i=0;i<2;++i) {
         run([](auto& w) { w.importNextPair(true); });
         require(state.image_camera.has_value(),"Imported pair has no rectified camera");
-        // The real scan_data integration fixture uses consecutively numbered PNG masks.
+        // The real scan_data1 integration fixture uses consecutively numbered PNG masks.
         const auto mask_path=QDir(directory).filePath(QString("mask%1.png").arg(i+1,2,10,QChar('0')));
         if (QFileInfo::exists(mask_path))
             require(latest_mask==QImage(mask_path).convertToFormat(QImage::Format_Grayscale8),

@@ -39,7 +39,7 @@
 
 namespace {
 QString defaultImportDirectory() {
-    const QString relative = "data/scan_data";
+    const QString relative = "data/scan_data1";
     for (const auto& base : {QDir::currentPath(), QCoreApplication::applicationDirPath() + "/../.."}) {
         const QFileInfo candidate(QDir(base).filePath(relative));
         if (candidate.isDir()) return candidate.canonicalFilePath();
