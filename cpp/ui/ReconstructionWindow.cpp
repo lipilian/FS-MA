@@ -38,8 +38,7 @@
 #include <stdexcept>
 
 namespace {
-QString defaultImportDirectory() {
-    const QString relative = "data/scan_data1";
+QString defaultProjectDirectory(const QString& relative) {
     for (const auto& base : {QDir::currentPath(), QCoreApplication::applicationDirPath() + "/../.."}) {
         const QFileInfo candidate(QDir(base).filePath(relative));
         if (candidate.isDir()) return candidate.canonicalFilePath();
@@ -305,6 +304,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     layout->addWidget(save_calibration_); save_calibration_name_=label(state_.calibration_filename); layout->addWidget(save_calibration_name_);
     layout->addWidget(save_mask_); layout->addWidget(save_depth_); layout->addWidget(save_mesh_);
     save_directory_=new QLineEdit; save_directory_->setObjectName("saveDirectory"); save_directory_->setReadOnly(true); save_directory_->setPlaceholderText("Choose output folder");
+    save_directory_->setText(defaultProjectDirectory("result"));
     layout->addWidget(save_directory_); browse_save_=button("Browse…","browseSaveDirectory"); layout->addWidget(browse_save_);
     save_selected_=button("Save selected","saveSelected"); layout->addWidget(save_selected_);
     save_all_=button("Save all","saveAll"); layout->addWidget(save_all_);
@@ -519,7 +519,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         showImages();
     });
     connect(import_,&QPushButton::clicked,this,[this] {
-        const QString initial_directory=state_.import_directory.isEmpty() ? defaultImportDirectory() : state_.import_directory;
+        const QString initial_directory=state_.import_directory.isEmpty() ? defaultProjectDirectory("data/scan_data1") : state_.import_directory;
         const QString path = QFileDialog::getExistingDirectory(this,"Choose import folder (left/right images and calibration JSON)",initial_directory);
         if (path.isEmpty()) return;
         controller_.submit([=](auto& w) { w.setImportDirectory(path); });
