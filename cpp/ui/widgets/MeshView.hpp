@@ -26,6 +26,8 @@ class MeshView : public QWidget {
     void setMAClouds(SharedGPUClouds clouds);
     void setShowMAClouds(bool enabled);
     void setPredictedCameras(SharedPredictedCameras cameras);
+    // Original MA poses: yellow wireframes without labels, textures or picking.
+    void setOriginalCameras(SharedPredictedCameras cameras);
     void setMode(int mode);
     void resetView();
     void resetCaptureView();

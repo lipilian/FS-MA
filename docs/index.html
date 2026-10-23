@@ -2865,6 +2865,22 @@ cmake --build cpp/build --target fs_gui --parallel
 
     <section class="card" aria-labelledby="vit-fiew-views-photogrammetry-heading" style="border-left: 5px solid #eab308; background: linear-gradient(135deg, #ffffff, #fef9c3);">
       <h2 id="vit-fiew-views-photogrammetry-heading" style="color: #a16207; font-size: clamp(1.8rem, 3.5vw, 3rem);">Vit fiew views photogrammetry</h2>
+      <article class="engine-build-step" aria-labelledby="mapanything-engine-build-heading">
+        <h3 id="mapanything-engine-build-heading">MapAnything (MA) TensorRT Engine Build</h3>
+        <p>Build the dynamic-view engine from the existing BF16 ONNX export. Keep <code>mapanything_dynamic_raw_bf16.onnx.data</code> beside the ONNX file. The external input is FP32 <code>inputs: [V, 7, 434, 518]</code>, with 2–5 views and an optimization shape of 3 views.</p>
+        <p>Run from the project root on the GPU that will run inference. The command saves the engine at the path used by <code>scan_gui</code> and replaces an existing file with the same name.</p>
+        <pre><code>cd /home/liu4000/Desktop/research/FS_Engine
+
+/usr/bin/trtexec \
+  --onnx=onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.onnx \
+  --saveEngine=onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.engine \
+  --minShapes=inputs:2x7x434x518 \
+  --optShapes=inputs:3x7x434x518 \
+  --maxShapes=inputs:5x7x434x518 \
+  --noTF32 \
+  --skipInference</code></pre>
+        <p><code>--noTF32</code> disables TF32; BF16 operations are already encoded in the ONNX graph. <code>--skipInference</code> builds and saves the engine without running the inference benchmark.</p>
+      </article>
     </section>
 
   </main>

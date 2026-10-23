@@ -615,8 +615,31 @@ void checkInlineMaskDrawing() {
     require(editor->mask()==edited,"Edited imported mask did not persist independently");
     QCoreApplication::processEvents();
     require(submitted==0,"Drawing or clearing a mask triggered FS/MA reconstruction");
+    auto* icp=window.findChild<QPushButton*>("refineCameraPosesICP");
+    require(icp && !icp->isEnabled(),"ICP must be disabled before matching MA poses are ready");
+    auto cameras=std::make_shared<std::vector<PredictedCameraFrame>>(3);
+    for (int i=0;i<3;++i) { (*cameras)[i].image_id=i+1; (*cameras)[i].camera_to_world=cv::Matx44d::eye(); }
+    state.predicted_cameras=cameras; state.icp_ready=true;
+    controller.stateChanged(state);
+    require(icp->isEnabled() && submitted==0,"Completing MA must enable manual ICP without running it");
+    start->click();
+    require(!icp->isEnabled(),"ICP must not run while a region is being edited");
+    finish->click();
+    require(icp->isEnabled(),"Finishing a region did not restore manual ICP");
+    controller.busyChanged(true);
+    require(!icp->isEnabled(),"ICP must not run concurrently with another worker action");
+    controller.busyChanged(false);
+    const int before_icp=submitted;
+    icp->click();
+    timeout.restart();
+    while (!controller.state().action_failed && timeout.elapsed()<5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+    require(submitted==before_icp+1 && controller.state().action_failed &&
+            controller.state().status.contains("before running ICP"),
+            "Manual ICP click did not dispatch exactly one guarded worker action");
     state.image_id=4; state.capture_count=0; state.has_rectified=state.depth_ready=false;
     controller.stateChanged(state); view->cameraClicked(1);
+    require(!icp->isEnabled(),"Restart retained an enabled ICP action");
     require(!start->isEnabled(),"Restart retained an old camera's editable mask");
     state.import_directory.clear(); controller.stateChanged(state);
     require(tabs->isTabVisible(1) && editor->parentWidget()!=stack,"Leaving import mode did not restore the existing camera workspace");
@@ -758,6 +781,26 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_clouds==clouds_before &&
             state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
             "Saving recomputed geometry/poses or changed the import cursor");
+    require(state.icp_ready,"Completed MA did not enable manual ICP");
+    run([](auto& w) { w.refineCameraPosesICP(); });
+    const auto refined=state.predicted_cameras;
+    require(refined && refined!=poses_before && refined->front().camera_to_world==poses_before->front().camera_to_world &&
+            geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
+            "ICP moved the anchor, rebuilt geometry, or changed the import cursor");
+    QTemporaryDir refined_output;
+    run([&](auto& w) { w.saveScanResults(refined_output.path(),{}); });
+    const auto refined_json=checkScanFiles(refined_output.path(),2);
+    for (int i=0;i<2;++i) {
+        const auto exported=refined_json.value("views").toArray()[i].toObject().value("extrinsic").toArray();
+        for (int r=0;r<4;++r) for (int c=0;c<4;++c)
+            require(exported[r].toArray()[c].toDouble()==(*refined)[i].camera_to_world(r,c),
+                    "Scan export ignored the manually refined camera poses");
+    }
+    run([](auto& w) { w.refineCameraPosesICP(); });
+    for (int i=0;i<2;++i)
+        require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
+                "Repeated manual ICP compounded the camera correction");
+    std::cout<<"PASS: explicit real-scan ICP, immutable FS/MA points, anchored poses, repeatability and refined camera export\n";
     worker.shutdown();
     std::cout<<"PASS: imported FS points/mesh, depth export, two-view MA and historical camera snapshots\n";
     std::cout<<"PASS: historical/current SAM feature switching and independent geometry/import state\n";

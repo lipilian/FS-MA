@@ -37,12 +37,14 @@ struct PipelineState {
     QString input{"No stereo pair loaded"}, calibration, status{"Import a capture directory or preview the cameras."};
     QString calibration_filename{"calibration.json"};
     bool sam_ready{false}, ma_ready{false};
+    bool icp_ready{false}; // Matching completed FS captures and a fresh MA pose snapshot.
     int progress{0};
     QString progress_stage{"Ready to capture"};
     bool action_failed{false};
     quint64 image_id{0};
     std::optional<fs::MeshCamera> image_camera;
     SharedPredictedCameras predicted_cameras;
+    SharedPredictedCameras original_ma_cameras; // Comparison overlay after manual ICP completes.
     SharedGPUClouds ma_clouds;
 };
 Q_DECLARE_METATYPE(PipelineState)
@@ -72,6 +74,8 @@ public:
                  const std::shared_ptr<std::atomic_uint64_t>& current_request, const QImage& image = {});
     // Triangle meshes are available only for single-view FS geometry.
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
+    // Explicit user action only; never called from MA inference.
+    void refineCameraPosesICP(const QHash<quint64,QImage>& masks = {});
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,
                      SharedGPUClouds ma_geometry = {});
@@ -132,6 +136,7 @@ private:
     std::unique_ptr<fs::SamSegmenter> sam_;
     quint64 sam_image_id_{0};
     std::shared_ptr<fs::MA_VGGT> ma_;
+    SharedPredictedCameras ma_cameras_; // Original MA poses; repeated ICP never compounds corrections.
     // Filtered Z depth retained for TIFF export; geometry stays on the GPU.
     cv::Mat depth_;
     QByteArray calibration_json_;

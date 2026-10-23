@@ -97,6 +97,12 @@ class MeshCanvas : public QOpenGLWidget {
         camera_interaction_enabled_=enabled;
         if (!enabled) { setHoveredCamera(0); pressed_camera_id_=0; }
     }
+    void setOriginalCameras(SharedPredictedCameras cameras) {
+        if (original_cameras_ == cameras) return;
+        original_cameras_ = std::move(cameras);
+        camera_dirty_ = true;
+        update();
+    }
     void setCamera(const std::optional<fs::MeshCamera>& camera) {
         if (camera_.has_value() == camera.has_value() &&
             (!camera || (camera_->image_size == camera->image_size && camera_->intrinsics == camera->intrinsics))) return;
@@ -897,7 +903,7 @@ void main() {
             predicted_textures_.push_back(texture);
         }
         // Keep all lines before the active image planes, then append one image
-        // plane per MA camera. Both use the same original camera-to-world pose.
+        // plane per camera. Both use the current camera-to-world pose.
         std::vector<float> lines, images;
         if (predicted) {
             for (size_t i=0;i<predicted_cameras_->size();++i) {
@@ -940,6 +946,17 @@ void main() {
                     highlight_first_=int(lines.size()/6); highlight_count_=count;
                 }
                 lines.insert(lines.end(),captured.begin(),captured.begin()+count*6);
+                camera_radius_=std::max(camera_radius_,radius);
+            }
+        }
+        // Reference poses are display-only lines. Do not create labels, image
+        // planes or hit targets, and keep current camera highlight offsets intact.
+        if (predicted && original_cameras_) {
+            for (const auto& frame:*original_cameras_) {
+                int count=0; float radius=0;
+                const auto original=cameraData(frame.camera,center,scale_,count,radius,
+                    frame.camera_to_world,cv::Vec3f(1.f,1.f,0.f),0,0);
+                lines.insert(lines.end(),original.begin(),original.end());
                 camera_radius_=std::max(camera_radius_,radius);
             }
         }
@@ -1056,12 +1073,14 @@ void main() {
                 // Replace the triangular up marker with a screen-facing label
                 // anchored above the image plane. Use the capture slot, not ID,
                 // so retakes retain their view number.
-                const auto top = (corners[0] + corners[1]) * .5f;
-                const auto up = top + cv::Vec3f(0, -z * .2f, 0);
-                const auto anchor=(to_world(up)-center)/scale;
-                radius=std::max(radius,float(cv::norm(anchor)));
-                camera_labels_.push_back({QVector3D(anchor[0],-anchor[1],-anchor[2]),
-                    QString("view %1").arg(view_number),QColor::fromRgbF(color[0],color[1],color[2]),image_id});
+                if (view_number>0) {
+                    const auto top = (corners[0] + corners[1]) * .5f;
+                    const auto up = top + cv::Vec3f(0, -z * .2f, 0);
+                    const auto anchor=(to_world(up)-center)/scale;
+                    radius=std::max(radius,float(cv::norm(anchor)));
+                    camera_labels_.push_back({QVector3D(anchor[0],-anchor[1],-anchor[2]),
+                        QString("view %1").arg(view_number),QColor::fromRgbF(color[0],color[1],color[2]),image_id});
+                }
                 line_count = int(data.size() / 6);
                 if (!image_count) return data;
                 // QImage row zero is the image top. Upload unchanged and give
@@ -1089,6 +1108,7 @@ void main() {
     QHash<quint64,QImage> fs_masks_;
     QHash<quint64,CameraTexture> mask_textures_;
     SharedPredictedCameras predicted_cameras_;
+    SharedPredictedCameras original_cameras_;
     struct CameraLabel { QVector3D anchor; QString text; QColor color; quint64 image_id; };
     std::vector<CameraLabel> camera_labels_;
     struct CameraTarget { quint64 image_id; std::vector<QVector3D> lines; };
@@ -1172,6 +1192,9 @@ void MeshView::setFSMasks(QHash<quint64,QImage> masks, bool enabled) {
 }
 void MeshView::setPredictedCameras(SharedPredictedCameras cameras) {
     if (canvas_) canvas_->setPredictedCameras(std::move(cameras));
+}
+void MeshView::setOriginalCameras(SharedPredictedCameras cameras) {
+    if (canvas_) canvas_->setOriginalCameras(std::move(cameras));
 }
 void MeshView::setCameraInteractionEnabled(bool enabled) {
     if (canvas_) canvas_->setCameraInteractionEnabled(enabled);
