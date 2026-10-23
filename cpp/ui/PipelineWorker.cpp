@@ -218,7 +218,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-    ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
+    ma_cameras_.reset(); icp_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release();
     const auto engine_file = QFileInfo(engine_path).absoluteFilePath();
     ma_.reset(); fs_.reset(); sam_.reset(); gpu_mesh_.reset();
@@ -449,7 +449,7 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
     else {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
         state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-        ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
+        ma_cameras_.reset(); icp_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
         if (ma_) ma_->resetInputs();
     }
 }
@@ -529,7 +529,7 @@ void PipelineWorker::startCapturePreview(bool append) {
     else if (clear_single_view) {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
         state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-        ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
+        ma_cameras_.reset(); icp_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
         if (ma_) ma_->resetInputs();
         state_.gpu_ready=false; state_.depth_ready=false;
         latest_gpu_mesh_.reset(); gpu_mesh_.reset(); depth_.release();
@@ -548,7 +548,7 @@ void PipelineWorker::cleanCaptures() {
     }
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-    ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
+    ma_cameras_.reset(); icp_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
     frame_.reset(); state_.image_camera.reset();
     state_.has_rectified=false; state_.gpu_ready=false; state_.depth_ready=false;
     latest_gpu_mesh_.reset(); gpu_mesh_.reset(); depth_.release();
@@ -716,7 +716,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     publish(); // Publish readiness before delivering the depth texture.
     emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
-    buildPointCloud();
+    buildPointCloud(!selection_mask.isNull());
     // A successful cloud build retains this capture (or replaces its retake
     // slot), so use the committed view count rather than capture_slot_ + 1.
     const int views = int(captures_.size());
@@ -760,6 +760,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         state_.ma_clouds = std::move(clouds);
         state_.predicted_cameras = std::move(cameras);
         ma_cameras_ = state_.predicted_cameras;
+        icp_cameras_.reset();
         state_.original_ma_cameras.reset();
         state_.icp_ready = true;
         emit log(QString("MA GPU point clouds: %1 valid points · predicted rays/depth/scale decoded on device · XYZ/RGB stay on GPU")
@@ -772,7 +773,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         emit log("MA input ready for view 1 · inference starts at 2 views.");
     }
 }
-void PipelineWorker::buildPointCloud() {
+void PipelineWorker::buildPointCloud(bool masked) {
     reportProgress(92, "Building valid point cloud on GPU…");
     QElapsedTimer elapsed; elapsed.start();
     // The denoising mask is already uploaded for these inputs.
@@ -791,7 +792,19 @@ void PipelineWorker::buildPointCloud() {
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     const auto& camera=fs_->model_camera_parameters();
     cloud->camera={cv::Matx33d(camera.fx,0,camera.cx,0,camera.fy,camera.cy,0,0,1),{inputs.width,inputs.height}};
-    retainCapture(cloud);
+    SharedGPUMesh icp_cloud=cloud;
+    if (masked) {
+        // Retain full-image XYZ before FS reuses its buffers for the next capture.
+        // Unmasked captures share the display cloud without another allocation.
+        auto full_inputs=inputs;
+        full_inputs.mask=nullptr;
+        auto buffer=std::make_shared<fs::MeshGPUBuffer>();
+        auto full_cloud=std::make_shared<GPUMeshFrame>(*cloud);
+        full_cloud->stats=fs::build_point_cloud_gpu(full_inputs,*buffer);
+        full_cloud->buffer=std::move(buffer);
+        icp_cloud=std::move(full_cloud);
+    }
+    retainCapture(cloud,std::move(icp_cloud));
     latest_gpu_mesh_=cloud;
     emit log(QString("GPU point cloud: %1 ms · %2 valid points · XYZ/RGB remain on GPU")
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(stats.point_count));
@@ -800,18 +813,18 @@ void PipelineWorker::buildPointCloud() {
     state_.status=QString("GPU point cloud ready · %1 valid points").arg(stats.point_count);
     emit log(state_.status);
 }
-void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
+void PipelineWorker::retainCapture(SharedGPUMesh point_cloud, SharedGPUMesh icp_point_cloud) {
     checkpoint();
     state_.icp_ready=false;
     CapturedStereoPair capture{state_.image_id,
         meshCamera(*frame_,frame_->rectified_left().size()),
         meshCamera(*frame_,{fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight}),
-        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
+        std::move(point_cloud),std::move(icp_point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
 }
-void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks) {
+void PipelineWorker::refineCameraPosesICP() {
     if (state_.live || !state_.depth_ready || !state_.icp_ready || captures_.size()<2 ||
         !ma_cameras_ || ma_cameras_->size()!=captures_.size() || !state_.predicted_cameras)
         throw std::runtime_error("Complete FS reconstruction and MA poses for at least two views before running ICP.");
@@ -821,7 +834,7 @@ void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks) {
     for (std::size_t i=0;i<captures_.size();++i) {
         checkpoint();
         const auto& capture=captures_[i];
-        const auto& cloud=capture.point_cloud;
+        const auto& cloud=capture.icp_point_cloud;
         if (capture.image_id!=(*ma_cameras_)[i].image_id || !cloud || !cloud->point_cloud ||
             !cloud->buffer || !cloud->stream_owner || !cloud->stats.point_count)
             throw std::runtime_error("FS points no longer match the MA poses. Complete reconstruction before ICP.");
@@ -829,20 +842,10 @@ void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks) {
         view.vertices=cloud->buffer->vertices(); view.vertex_count=cloud->buffer->vertex_slots();
         view.device=cloud->device; view.stream=cloud->stream;
         view.camera_to_world=(*ma_cameras_)[i].camera_to_world;
-        const auto selected=masks.value(capture.image_id);
-        if (!selected.isNull()) {
-            const auto size=cloud->camera.image_size;
-            if (view.vertex_count!=std::size_t(size.area()))
-                throw std::runtime_error("ICP mask requires pixel-aligned FS point slots.");
-            const auto gray=selected.convertToFormat(QImage::Format_Grayscale8)
-                .scaled(size.width,size.height,Qt::IgnoreAspectRatio,Qt::FastTransformation);
-            view.selection.resize(view.vertex_count);
-            for (int y=0;y<size.height;++y)
-                std::copy_n(gray.constScanLine(y),size.width,view.selection.data()+std::size_t(y)*size.width);
-        }
+        emit log(QString("ICP input view %1 · %2 valid FS points").arg(i+1).arg(cloud->stats.point_count));
         views.push_back(std::move(view));
     }
-    emit log("Manual ICP · FS points · original MA poses · view 1 fixed · accumulated previous views · GPU point-to-plane / Tukey\n"
+    emit log("Manual ICP · all valid FS points · region masks ignored · original MA poses · view 1 fixed · accumulated previous views · GPU point-to-plane / Tukey\n"
              "Voxels 4/2/1 mm; correspondence 25/10/4 mm; iterations 50/30/14.\n"
              "Accept: fitness ≥ 0.3, RMSE ≤ 4 mm, translation ≤ 30 mm, rotation ≤ 10°.");
     const auto results=fs::refine_camera_poses_icp(views,[this] { checkpoint(); },
@@ -865,9 +868,28 @@ void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks) {
     // Atomic snapshot replacement updates FS/MA rendering and all pose exports.
     // Depth and camera-space point buffers stay unchanged, including on failure.
     state_.predicted_cameras=std::move(cameras);
+    icp_cameras_=state_.predicted_cameras;
     state_.original_ma_cameras=ma_cameras_;
     state_.status=QString("ICP complete · %1 / %2 camera corrections accepted · view 1 fixed · %3 ms")
         .arg(accepted).arg(results.size()-1).arg(elapsed.elapsed());
+    emit log(state_.status);
+    publish();
+}
+void PipelineWorker::undoCameraPosesICP() {
+    if (state_.live || !state_.depth_ready || !state_.icp_ready || captures_.size()<2 ||
+        !ma_cameras_ || ma_cameras_->size()!=captures_.size() ||
+        state_.original_ma_cameras!=ma_cameras_ || !state_.predicted_cameras ||
+        state_.predicted_cameras->size()!=captures_.size())
+        throw std::runtime_error("Run ICP on the current completed views before undoing it.");
+    for (std::size_t i=0;i<captures_.size();++i)
+        if (captures_[i].image_id!=(*ma_cameras_)[i].image_id ||
+            captures_[i].image_id!=(*state_.predicted_cameras)[i].image_id)
+            throw std::runtime_error("Camera poses no longer match the current captures.");
+    checkpoint();
+    // Restore the same immutable MA snapshot for rendering and subsequent exports.
+    state_.predicted_cameras=ma_cameras_;
+    state_.original_ma_cameras.reset();
+    state_.status="ICP undone · original MA camera poses restored.";
     emit log(state_.status);
     publish();
 }
@@ -916,25 +938,33 @@ void PipelineWorker::buildMeshGPU(const QImage& selection_mask, double max_edge_
 void PipelineWorker::saveScanResults(const QString& directory, const QHash<quint64,QImage>& masks, bool overwrite) {
     if (state_.live || !state_.depth_ready || captures_.empty())
         throw std::runtime_error("Complete a capture before saving scan results.");
-    if (captures_.size()>1 && (!state_.predicted_cameras || state_.predicted_cameras->size()!=captures_.size()))
+    if (captures_.size()>1 && (!state_.icp_ready || !state_.predicted_cameras ||
+        state_.predicted_cameras->size()!=captures_.size() || !ma_cameras_ || ma_cameras_->size()!=captures_.size()))
         throw std::runtime_error("Complete MA camera poses for every view before saving.");
     std::vector<ScanExportView> views;
     views.reserve(captures_.size());
     for (const auto& capture:captures_) {
         checkpoint();
-        auto pose=cv::Matx44d::eye();
+        auto pose=cv::Matx44d::eye(), before_icp=cv::Matx44d::eye();
+        std::optional<cv::Matx44d> after_icp;
         if (captures_.size()>1) {
-            const auto found=std::find_if(state_.predicted_cameras->begin(),state_.predicted_cameras->end(),
-                [&](const auto& camera) { return camera.image_id==capture.image_id; });
-            if (found==state_.predicted_cameras->end())
-                throw std::runtime_error("MA camera poses do not match the completed views.");
-            pose=found->camera_to_world;
+            const auto poseFor=[&](const SharedPredictedCameras& cameras) {
+                const auto found=std::find_if(cameras->begin(),cameras->end(),
+                    [&](const auto& camera) { return camera.image_id==capture.image_id; });
+                if (found==cameras->end())
+                    throw std::runtime_error("Camera poses do not match the completed views.");
+                return found->camera_to_world;
+            };
+            pose=poseFor(state_.predicted_cameras);
+            before_icp=poseFor(ma_cameras_);
+            if (icp_cameras_) after_icp=poseFor(icp_cameras_);
         }
         if (!capture.point_cloud) throw std::runtime_error("A completed view has no FS projection parameters.");
         const auto mask=masks.value(capture.image_id);
         if (!mask.isNull() && mask.size()!=QSize(capture.image_camera.image_size.width,capture.image_camera.image_size.height))
             throw std::runtime_error("A mask does not match its view's rectified left image.");
-        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_rgb,mask,capture.fs_depth});
+        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_rgb,mask,capture.fs_depth,
+            before_icp,after_icp,bool(state_.original_ma_cameras)});
     }
     state_.status="Saving all scan views…"; publish();
     QElapsedTimer elapsed; elapsed.start();
@@ -1107,7 +1137,7 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
 void PipelineWorker::shutdown() {
     disconnectCameras(); captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_clouds.reset();
-    ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
+    ma_cameras_.reset(); icp_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false;
     latest_gpu_mesh_.reset(); gpu_mesh_.reset(); ma_.reset(); state_.ma_ready = false;
     sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();
 }

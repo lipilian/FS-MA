@@ -197,16 +197,18 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_);
     fs_cloud_->setChecked(true);
     refine_poses_=button("Refine poses (ICP)","refineCameraPosesICP");
-    refine_poses_->setToolTip("Refine camera poses using FS points and the current regions. View 1 stays fixed. Runs only when clicked.");
+    refine_poses_->setToolTip("Refine camera poses using all valid FS points, including outside region masks. View 1 stays fixed. Runs only when clicked.");
+    undo_icp_=button("Undo ICP","undoCameraPosesICP");
+    undo_icp_->setToolTip("Restore the original MA camera poses for display and saving.");
     cloud_controls->addWidget(fs_cloud_); cloud_controls->addWidget(ma_cloud_); cloud_controls->addStretch();
-    cloud_controls->addWidget(refine_poses_);
+    cloud_controls->addWidget(refine_poses_); cloud_controls->addWidget(undo_icp_);
     connect(refine_poses_,&QPushButton::clicked,this,[this] {
         if (!refine_poses_->isEnabled()) return;
-        QHash<quint64,QImage> masks;
-        for (auto it=capture_previews_.cbegin();it!=capture_previews_.cend();++it)
-            if (!it->mask.isNull()) masks.insert(it.key(),it->mask);
-        if (!inlineMaskMode() && mask_->hasSelection()) masks.insert(state_.image_id,exportMask());
-        controller_.submit([masks=std::move(masks)](auto& worker) { worker.refineCameraPosesICP(masks); });
+        controller_.submit([](auto& worker) { worker.refineCameraPosesICP(); });
+    });
+    connect(undo_icp_,&QPushButton::clicked,this,[this] {
+        if (!undo_icp_->isEnabled()) return;
+        controller_.submit([](auto& worker) { worker.undoCameraPosesICP(); });
     });
     scene_layout->addLayout(cloud_controls);
     camera_image_mode_ = new QComboBox; camera_image_mode_->setObjectName("cameraImageMode");
@@ -421,7 +423,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             if (!state_.action_failed && state_.ma_clouds && state_.ma_clouds!=displayed_ma_clouds_) presentMAResult();
             else if (!state_.action_failed && state_.predicted_cameras &&
                      state_.predicted_cameras!=displayed_cameras_) {
-                // ICP changes poses only. Preserve the selected cloud source,
+                // ICP and Undo ICP change poses only. Preserve the selected cloud source,
                 // GPU uploads, view framing and the active image/region.
                 displayed_cameras_=state_.predicted_cameras;
                 displayed_original_cameras_=state_.original_ma_cameras;
@@ -761,9 +763,12 @@ void ReconstructionWindow::refresh() {
     const bool transferring=capture_transition_pending_ || capture_transition_->isRunning();
     const bool ready = !busy_ && !closing_ && !gpu_upload_pending_ && !ma_upload_pending_ && !transferring;
     const bool idle = ready && !drawing_mask_, frozen = state_.has_rectified && !state_.live;
-    refine_poses_->setEnabled(idle && frozen && reconstruction_valid_ && state_.depth_ready && state_.icp_ready &&
+    const bool poses_ready=idle && frozen && reconstruction_valid_ && state_.depth_ready && state_.icp_ready &&
         state_.capture_count>=2 && state_.predicted_cameras &&
-        state_.predicted_cameras->size()==std::size_t(state_.capture_count));
+        state_.predicted_cameras->size()==std::size_t(state_.capture_count);
+    refine_poses_->setEnabled(poses_ready);
+    undo_icp_->setEnabled(poses_ready && state_.original_ma_cameras &&
+        state_.original_ma_cameras->size()==std::size_t(state_.capture_count));
     const bool importing=!state_.import_directory.isEmpty();
     import_->setEnabled(idle); capture_calibration_->setEnabled(idle && has_confirmed_calibration_); camera_->setEnabled(idle);
     import_->setToolTip(importing ? QString("Import folder: %1\n%2 / %3 pairs imported. Choose another folder to start from its first pair.")

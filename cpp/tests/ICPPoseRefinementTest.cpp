@@ -52,9 +52,6 @@ void run(bool gpu) {
             views[i].vertices=buffers[i].ptr; views[i].device=0;
         }
     }
-    // Exercise the same per-pixel mask used by the manual UI action.
-    views[1].selection.assign(b.size(),255);
-    for (std::size_t i=0;i<101*12;++i) views[1].selection[i]=0;
     const auto results=fs::refine_camera_poses_icp(views);
     require(results[0].reference && results[0].camera_to_world==anchor,"ICP moved the reference camera");
     for (int i=1;i<=2;++i) {
@@ -67,12 +64,14 @@ void run(bool gpu) {
             "ICP replaced a non-overlapping view's MA pose");
     if (gpu) checked(cudaMemcpy(b.data(),buffers[1].ptr,b.size()*sizeof(fs::MeshGPUVertex),cudaMemcpyDeviceToHost));
     require(std::memcmp(b.data(),original.data(),b.size()*sizeof(fs::MeshGPUVertex))==0,"ICP mutated the input point buffer");
-    // An empty selected reference must fail without silently using unselected points.
-    views[0].selection.assign(a.size(),0);
+    // A reference containing only zero/NaN points must fail on CPU and CUDA.
+    const auto reference=views[0];
+    views[0].vertices+=views[0].vertex_count-2;
+    views[0].vertex_count=2;
     bool rejected=false;
     try { fs::refine_camera_poses_icp(views); } catch (const std::runtime_error&) { rejected=true; }
-    require(rejected,"ICP accepted an empty reference mask");
-    views[0].selection.clear();
+    require(rejected,"ICP accepted a reference with no valid points");
+    views[0]=reference;
     bool cancelled=false, stop=false;
     try {
         fs::refine_camera_poses_icp(views,[&] { if (stop) throw std::runtime_error("cancelled"); },
@@ -87,7 +86,7 @@ int main() {
         int devices=0;
         if (cudaGetDeviceCount(&devices)==cudaSuccess && devices>0) run(true);
         else std::cout<<"GPU verification skipped: no CUDA device\n";
-        std::cout<<"PASS: anchored multiview ICP, pose convention, masks, rejection, immutable points and cancellation\n";
+        std::cout<<"PASS: anchored multiview ICP, pose convention, valid points, rejection, immutable points and cancellation\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

@@ -22,6 +22,9 @@ template<int N> QJsonArray matrix(const cv::Matx<double,N,N>& value) {
     }
     return rows;
 }
+bool validPose(const cv::Matx44d& pose) {
+    return cv::checkRange(cv::Mat(pose)) && pose(3,0)==0 && pose(3,1)==0 && pose(3,2)==0 && pose(3,3)==1;
+}
 QImage exportMask(const QImage& source) {
     constexpr int width=2448, height=2048;
     QImage output(width,height,QImage::Format_Grayscale8);
@@ -67,14 +70,23 @@ QStringList writeScanResults(const QString& directory, const std::vector<ScanExp
             view.intrinsic(2,0)!=0 || view.intrinsic(2,1)!=0 || view.intrinsic(2,2)!=1 ||
             cv::norm(cv::Mat(view.intrinsic),cv::Mat(views.front().intrinsic),cv::NORM_INF)>1e-9)
             throw std::runtime_error("All views must have the same valid FS projection intrinsics.");
-        if (!cv::checkRange(cv::Mat(view.camera_to_world)) || view.camera_to_world(3,0)!=0 ||
-            view.camera_to_world(3,1)!=0 || view.camera_to_world(3,2)!=0 || view.camera_to_world(3,3)!=1)
+        if (!validPose(view.camera_to_world) || !validPose(view.camera_to_world_before_icp) ||
+            (view.camera_to_world_after_icp && !validPose(*view.camera_to_world_after_icp)))
             throw std::runtime_error("Invalid camera-to-world pose in scan results.");
+        if (view.icp_applied && !view.camera_to_world_after_icp)
+            throw std::runtime_error("Active ICP pose is missing from scan results.");
+        const auto& active=view.icp_applied ? *view.camera_to_world_after_icp : view.camera_to_world_before_icp;
+        if (view.camera_to_world!=active)
+            throw std::runtime_error("Active camera pose does not match the exported ICP state.");
         if (view.rgb.size()!=QSize(960,800) || view.rgb.format()!=QImage::Format_RGB888 ||
             view.depth.type()!=CV_32FC1 || view.depth.size()!=cv::Size(960,800) ||
             !cv::checkRange(view.depth,true,nullptr,0,std::numeric_limits<float>::max()))
             throw std::runtime_error("Each view requires its completed 960 x 800 RGB and float32 Z depth.");
-        cameras.append(QJsonObject{{"view",i+1},{"extrinsic",matrix(view.camera_to_world)}});
+        cameras.append(QJsonObject{{"view",i+1},{"extrinsic",matrix(view.camera_to_world)},
+            {"extrinsic_before_icp",matrix(view.camera_to_world_before_icp)},
+            {"extrinsic_after_icp",view.camera_to_world_after_icp
+                ? QJsonValue(matrix(*view.camera_to_world_after_icp)) : QJsonValue(QJsonValue::Null)},
+            {"icp_applied",view.icp_applied}});
     }
     const auto json=QJsonDocument(QJsonObject{
         {"intrinsic",matrix(views.front().intrinsic)},

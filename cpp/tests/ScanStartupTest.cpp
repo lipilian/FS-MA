@@ -29,6 +29,7 @@
 #include <QTimer>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -56,6 +57,12 @@ QJsonObject checkScanFiles(const QString& directory,int count) {
     const auto json=QJsonDocument::fromJson(file.readAll()).object();
     require(json.value("views").toArray().size()==count && json.value("intrinsic").toArray().size()==3 &&
             json.value("extrinsic_convention")=="camera_to_world", "Invalid scan camera JSON");
+    for (const auto& value:json.value("views").toArray()) {
+        const auto view=value.toObject();
+        require(view.value("extrinsic_before_icp").toArray().size()==4 &&
+                (view.value("extrinsic_after_icp").isNull() || view.value("extrinsic_after_icp").toArray().size()==4) &&
+                view.value("icp_applied").isBool(),"Scan JSON omitted before/after ICP poses or active state");
+    }
     auto expected=scanResultFileNames(count); expected.sort();
     require(QDir(directory).entryList(QDir::Files,QDir::Name)==expected,"Unexpected scan export files");
     for (int i=1;i<=count;++i) {
@@ -653,6 +660,8 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     PipelineState state;
     SharedGPUMesh geometry;
     QImage latest_left,latest_mask;
+    QStringList logs;
+    QObject::connect(&worker,&PipelineWorker::log,[&](QString message) { logs.push_back(std::move(message)); });
     QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState update) { state=std::move(update); });
     QObject::connect(&worker,&PipelineWorker::gpuMeshReady,[&](SharedGPUMesh update) { geometry=std::move(update); });
     QObject::connect(&worker,&PipelineWorker::images,[&](QImage left,QImage,QImage mask) {
@@ -678,12 +687,23 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             require(latest_mask==QImage(mask_path).convertToFormat(QImage::Format_Grayscale8),
                     "Real imported mask pixels changed during stereo rectification");
         cameras.push_back(*state.image_camera); ids.push_back(state.image_id); images.push_back(latest_left);
-        run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
+        // Exercise both shared full-image points and a masked display capture.
+        QImage selection;
+        if (i==1) {
+            selection=QImage(latest_left.size(),QImage::Format_Grayscale8);
+            selection.fill(0);
+            for (int y=0;y<selection.height();++y)
+                std::fill_n(selection.scanLine(y),selection.width()/2,255);
+        }
+        run([&](auto& w) { w.reconstruct(0,1,selection,true,.003F); });
         require(state.capture_count==i+1 && geometry && geometry->point_cloud && geometry->stats.point_count>0,
                 "Imported FS reconstruction did not retain a valid point cloud");
         QTemporaryDir depth_output;
         run([&](auto& w) { w.saveResults(depth_output.path(),{false,false,false,false,true},{}); });
         depths.push_back(cv::imread(depth_output.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED));
+        if (!selection.isNull())
+            require(quint64(cv::countNonZero(depths.back()>0))>geometry->stats.point_count,
+                    "Masked capture fixture has no valid FS points outside its display region");
         if (i==0) {
             fs_intrinsic=geometry->camera.intrinsics;
             QTemporaryDir scan_output;
@@ -694,6 +714,10 @@ int checkImportedScan(const QString& directory, const QString& engine) {
                 require(exported_mask==latest_mask,"Imported full-resolution mask failed to round-trip through scan export");
             }
             const auto pose=json.value("views").toArray()[0].toObject().value("extrinsic").toArray();
+            const auto view=json.value("views").toArray()[0].toObject();
+            require(view.value("extrinsic_before_icp")==view.value("extrinsic") &&
+                    view.value("extrinsic_after_icp").isNull() && !view.value("icp_applied").toBool(),
+                    "Single-view export invented an ICP pose");
             for (int r=0;r<4;++r) for (int c=0;c<4;++c)
                 require(pose[r].toArray()[c].toDouble()==(r==c ? 1 : 0),"Single-view export must use identity before MA runs");
             QTemporaryDir output;
@@ -767,6 +791,10 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         const auto depth=cv::imread(scan_output.filePath("depth"+number+".tiff").toStdString(),cv::IMREAD_UNCHANGED);
         require(cv::norm(depth,depths[i],cv::NORM_INF)==0,"Historical FS Z depth was overwritten by a later view");
         const auto pose=json.value("views").toArray()[i].toObject().value("extrinsic").toArray();
+        const auto view=json.value("views").toArray()[i].toObject();
+        require(view.value("extrinsic_before_icp")==view.value("extrinsic") &&
+                view.value("extrinsic_after_icp").isNull() && !view.value("icp_applied").toBool(),
+                "Export before ICP did not preserve MA poses or invented an ICP result");
         for (int r=0;r<4;++r) for (int c=0;c<4;++c)
             require(pose[r].toArray()[c].toDouble()==(*poses_before)[i].camera_to_world(r,c),"Export changed MA camera-to-world poses");
     }
@@ -782,7 +810,12 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
             "Saving recomputed geometry/poses or changed the import cursor");
     require(state.icp_ready,"Completed MA did not enable manual ICP");
+    logs.clear();
     run([](auto& w) { w.refineCameraPosesICP(); });
+    for (int i=0;i<2;++i)
+        require(logs.contains(QString("ICP input view %1 · %2 valid FS points")
+            .arg(i+1).arg(cv::countNonZero(depths[i]>0))),
+            "ICP did not receive every valid FS point, including outside the display mask");
     const auto refined=state.predicted_cameras;
     require(refined && refined!=poses_before && refined->front().camera_to_world==poses_before->front().camera_to_world &&
             geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
@@ -791,16 +824,59 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     run([&](auto& w) { w.saveScanResults(refined_output.path(),{}); });
     const auto refined_json=checkScanFiles(refined_output.path(),2);
     for (int i=0;i<2;++i) {
-        const auto exported=refined_json.value("views").toArray()[i].toObject().value("extrinsic").toArray();
-        for (int r=0;r<4;++r) for (int c=0;c<4;++c)
+        const auto view=refined_json.value("views").toArray()[i].toObject();
+        const auto exported=view.value("extrinsic").toArray();
+        const auto original=view.value("extrinsic_before_icp").toArray();
+        require(view.value("icp_applied").toBool() && view.value("extrinsic_after_icp")==view.value("extrinsic"),
+                "Export did not mark the ICP result as active");
+        for (int r=0;r<4;++r) for (int c=0;c<4;++c) {
             require(exported[r].toArray()[c].toDouble()==(*refined)[i].camera_to_world(r,c),
                     "Scan export ignored the manually refined camera poses");
+            require(original[r].toArray()[c].toDouble()==(*poses_before)[i].camera_to_world(r,c),
+                    "Scan export lost the original MA camera pose after ICP");
+        }
     }
     run([](auto& w) { w.refineCameraPosesICP(); });
     for (int i=0;i<2;++i)
         require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
                 "Repeated manual ICP compounded the camera correction");
-    std::cout<<"PASS: explicit real-scan ICP, immutable FS/MA points, anchored poses, repeatability and refined camera export\n";
+    const auto last_refined=state.predicted_cameras;
+    run([](auto& w) { w.undoCameraPosesICP(); });
+    require(state.predicted_cameras==poses_before && !state.original_ma_cameras && state.icp_ready &&
+            geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
+            "Undo ICP did not restore the MA snapshot or changed the retained geometry");
+    QTemporaryDir undone_output;
+    run([&](auto& w) { w.saveScanResults(undone_output.path(),{}); });
+    const auto undone_json=checkScanFiles(undone_output.path(),2);
+    for (int i=0;i<2;++i) {
+        const auto view=undone_json.value("views").toArray()[i].toObject();
+        const auto exported=view.value("extrinsic").toArray(), after=view.value("extrinsic_after_icp").toArray();
+        require(!view.value("icp_applied").toBool() && view.value("extrinsic_before_icp")==view.value("extrinsic"),
+                "Undo export did not mark the original pose as active");
+        for (int r=0;r<4;++r) for (int c=0;c<4;++c) {
+            require(exported[r].toArray()[c].toDouble()==(*poses_before)[i].camera_to_world(r,c),
+                    "Scan export retained ICP poses after Undo ICP");
+            require(after[r].toArray()[c].toDouble()==(*last_refined)[i].camera_to_world(r,c),
+                    "Undo export lost the latest ICP result for comparison");
+        }
+    }
+    run([](auto& w) { w.refineCameraPosesICP(); });
+    for (int i=0;i<2;++i)
+        require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
+                "ICP could not be reapplied consistently after undo");
+    std::cout<<"PASS: real-scan ICP with all valid FS points regardless of mask, immutable geometry, anchored poses, undo/export and reapply\n";
+    // A new MA inference with the same capture IDs must discard the old ICP snapshot.
+    run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
+    QTemporaryDir renewed_output;
+    run([&](auto& w) { w.saveScanResults(renewed_output.path(),{}); });
+    const auto renewed=checkScanFiles(renewed_output.path(),2);
+    for (const auto& value:renewed.value("views").toArray()) {
+        const auto view=value.toObject();
+        require(view.value("extrinsic_after_icp").isNull() && !view.value("icp_applied").toBool() &&
+                view.value("extrinsic_before_icp")==view.value("extrinsic"),
+                "A fresh MA inference retained the previous ICP export snapshot");
+    }
+    std::cout<<"PASS: JSON preserves original/latest ICP poses, active state after undo, and clears stale ICP after new MA inference\n";
     worker.shutdown();
     std::cout<<"PASS: imported FS points/mesh, depth export, two-view MA and historical camera snapshots\n";
     std::cout<<"PASS: historical/current SAM feature switching and independent geometry/import state\n";

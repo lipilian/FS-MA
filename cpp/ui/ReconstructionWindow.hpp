@@ -81,7 +81,7 @@ private:
     QImage rectified_left_, rectified_right_, live_left_, live_right_, depth_image_;
     QPushButton *import_, *camera_, *retake_, *restart_, *capture_, *start_draw_, *finish_draw_, *clear_;
     QPushButton* manual_reconstruct_{nullptr}; // Only the calibrated fs_gui workspace uses this control.
-    QPushButton* refine_poses_;
+    QPushButton *refine_poses_, *undo_icp_;
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *denoise_;

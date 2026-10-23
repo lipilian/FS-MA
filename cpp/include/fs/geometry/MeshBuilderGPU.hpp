@@ -7,6 +7,7 @@
 namespace fs {
 // Borrowed, read-only inputs owned by FS. XYZ is packed FP32 [height][width][3]
 // in metres; mask is packed uint8 [height][width], with nonzero selecting pixels.
+// The mask is required for meshes; point clouds allow nullptr to select all pixels.
 // RGB is the FS left input: FP32 NCHW [1][3][height][width], RGB order, 0..255.
 // Use only during the serialized worker action. Do not retain these pointers:
 // reconstruction/denoising can replace XYZ, input preparation overwrites RGB,
@@ -68,6 +69,7 @@ private:
 MeshGPUStats build_mesh_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output,
                             double max_edge_m = .01);
 // Preserve every selected finite XYZ sample with Z>0, including isolated points.
+// A null inputs.mask preserves all valid samples regardless of region selection.
 // XYZ/RGB stay on the device; only point count and bounds are downloaded.
 MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output);
 // Decode predicted unit rays * exp(depth) * exp(scale) into camera-space metres

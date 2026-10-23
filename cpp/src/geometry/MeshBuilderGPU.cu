@@ -113,7 +113,7 @@ __global__ void build_points(MeshGPUInputs in, MeshGPUVertex* vertices, MeshGPUS
         const int id=y*in.width+x, plane=in.width*in.height;
         const float3 p=make_float3(in.xyz[3*id],in.xyz[3*id+1],in.xyz[3*id+2]);
         vertices[id]={};
-        if (in.mask[id] && valid(p)) {
+        if ((!in.mask || in.mask[id]) && valid(p)) {
             vertices[id]={p.x,p.y,p.z,in.rgb[id]/255.f,in.rgb[plane+id]/255.f,in.rgb[2*plane+id]/255.f};
             stats.point_count=1;
             stats.low[0]=stats.high[0]=p.x;
@@ -198,9 +198,9 @@ std::size_t MeshGPUBuffer::vertex_slots() const { return impl_->slots; }
 
 MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output) {
     output.impl_->slots=0;
-    if (!inputs.xyz || !inputs.rgb || !inputs.mask || !inputs.stream || inputs.width<1 || inputs.height<1 ||
+    if (!inputs.xyz || !inputs.rgb || !inputs.stream || inputs.width<1 || inputs.height<1 ||
         std::size_t(inputs.width)*inputs.height>std::size_t(std::numeric_limits<int>::max()/3))
-        throw std::invalid_argument("GPU point cloud needs aligned device XYZ, RGB and mask, positive dimensions and the FS stream");
+        throw std::invalid_argument("GPU point cloud needs aligned device XYZ/RGB, positive dimensions and the FS stream");
     const dim3 block(side,side), grid((inputs.width+side-1)/side,(inputs.height+side-1)/side);
     auto& storage=*output.impl_;
     const std::size_t slots=std::size_t(inputs.width)*inputs.height;

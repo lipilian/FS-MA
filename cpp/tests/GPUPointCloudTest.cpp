@@ -125,6 +125,18 @@ int main() {
         for (int c=0; c<3; ++c) require(stats.low[c]==0 && stats.high[c]==0,"Empty cloud retained old bounds");
         for (auto v : download(output)) require(v.z==0,"Empty cloud retained old vertices");
 
+        // ICP ignores the region mask, including an all-black selection, but
+        // still excludes zero, negative, NaN and infinite XYZ samples.
+        auto full_inputs=inputs; full_inputs.mask=nullptr;
+        fs::MeshGPUBuffer full_output;
+        const auto full_stats=fs::build_point_cloud_gpu(full_inputs,full_output);
+        require(full_stats.point_count==retained.size()+1,"Unmasked point cloud lost valid points outside the region");
+        const auto full_vertices=download(full_output);
+        for (int i=0;i<count;++i) {
+            const bool valid=i==4 || std::find(retained.begin(),retained.end(),i)!=retained.end();
+            require(full_vertices[i].z==(valid ? 1.f : 0.f),"Unmasked point cloud did not preserve exactly the valid samples");
+        }
+
         // Sharing the buffer and reduction implementation must preserve meshes.
         xyz={0,0,1, .01f,0,1, 0,.01f,1, .01f,.01f,1}; rgb.assign(12,128); mask.assign(4,255);
         device.upload(xyz,rgb,mask); inputs.width=inputs.height=2;

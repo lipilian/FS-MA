@@ -10,6 +10,7 @@
 #include <opencv2/imgproc.hpp>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -34,10 +35,22 @@ void verify(const QString& directory,const std::vector<ScanExportView>& expected
         const auto& view=expected[i];
         const auto camera=views[i].toObject();
         const auto pose=camera.value("extrinsic").toArray();
+        const auto before=camera.value("extrinsic_before_icp").toArray();
+        const auto after=camera.value("extrinsic_after_icp");
         require(camera.value("view").toInt()==i+1 && pose.size()==4,"View numbering or pose dimensions are wrong");
-        for (int r=0;r<4;++r) for (int c=0;c<4;++c)
+        require(before.size()==4 && camera.value("icp_applied").isBool() &&
+                camera.value("icp_applied").toBool()==view.icp_applied,"Missing original pose or incorrect active ICP state");
+        require(view.camera_to_world_after_icp ? after.isArray() && after.toArray().size()==4 : after.isNull(),
+                "Export lost the ICP result or invented one before ICP ran");
+        for (int r=0;r<4;++r) for (int c=0;c<4;++c) {
             require(pose[r].toArray()[c].toDouble()==view.camera_to_world(r,c),
                     "Export transposed/inverted/rebased an MA pose");
+            require(before[r].toArray()[c].toDouble()==view.camera_to_world_before_icp(r,c),
+                    "Export changed the original pose before ICP");
+            if (view.camera_to_world_after_icp)
+                require(after.toArray()[r].toArray()[c].toDouble()==(*view.camera_to_world_after_icp)(r,c),
+                        "Export changed the saved pose after ICP");
+        }
         const auto rgb=cv::imread((directory+"/rgb"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
         require(rgb.size()==cv::Size(960,800) && rgb.type()==CV_8UC3,"RGB PNG has incorrect dimensions/type");
         cv::Mat decoded; cv::cvtColor(rgb,decoded,cv::COLOR_BGR2RGB);
@@ -67,6 +80,7 @@ int main(int argc,char** argv) {
             view.intrinsic={602.25,0,481.125,0,603.5,398.625,0,0,1};
             // First camera deliberately has a nonidentity rotation/translation.
             view.camera_to_world={0,-1,0,i*.03125,1,0,0,-.0625,0,0,1,.125,0,0,0,1};
+            view.camera_to_world_before_icp=view.camera_to_world;
             view.rgb=QImage(960,800,QImage::Format_RGB888);
             view.depth=cv::Mat(800,960,CV_32FC1);
             for (int y=0;y<800;++y) for (int x=0;x<960;++x) {
@@ -91,8 +105,22 @@ int main(int argc,char** argv) {
         try { writeScanResults(output.path(),views); } catch (const std::exception&) { refused=true; }
         require(refused && read(output.filePath("cameras.json"))==before,"Export overwrote files without confirmation");
         views.back().camera_to_world(0,3)+=.125;
+        views.back().camera_to_world_before_icp=views.back().camera_to_world;
         writeScanResults(output.path(),views,true);
         verify(output.path(),views);
+        for (std::size_t i=0;i<views.size();++i) {
+            auto& view=views[i];
+            view.camera_to_world_after_icp=view.camera_to_world_before_icp;
+            if (i>0) (*view.camera_to_world_after_icp)(1,3)+=.002;
+            view.camera_to_world=*view.camera_to_world_after_icp;
+            view.icp_applied=true;
+        }
+        writeScanResults(output.path(),views,true); verify(output.path(),views);
+        for (auto& view:views) {
+            view.camera_to_world=view.camera_to_world_before_icp;
+            view.icp_applied=false; // Undo keeps the most recent ICP result for comparison.
+        }
+        writeScanResults(output.path(),views,true); verify(output.path(),views);
         QTemporaryDir aborted;
         int checks=0; bool cancelled=false;
         try {
@@ -108,9 +136,20 @@ int main(int argc,char** argv) {
         try { writeScanResults(aborted.path(),mismatched); } catch (const std::exception&) { refused=true; }
         require(refused && QDir(aborted.path()).entryList(QDir::Files|QDir::NoDotAndDotDot).isEmpty(),
                 "Export silently shared incompatible intrinsics between views");
+        for (bool after : {false,true}) {
+            auto invalid=views;
+            auto& pose=after ? *invalid.back().camera_to_world_after_icp : invalid.back().camera_to_world_before_icp;
+            pose(0,3)=std::numeric_limits<double>::quiet_NaN();
+            refused=false;
+            try { writeScanResults(aborted.path(),invalid); } catch (const std::exception&) { refused=true; }
+            require(refused && QDir(aborted.path()).entryList(QDir::Files|QDir::NoDotAndDotDot).isEmpty(),
+                    "Export accepted a nonfinite before/after ICP pose or wrote partial results");
+        }
         QTemporaryDir single;
         views.resize(1); views.front().camera_to_world=cv::Matx44d::eye(); views.front().mask={};
+        views.front().camera_to_world_before_icp=cv::Matx44d::eye(); views.front().camera_to_world_after_icp.reset();
         writeScanResults(single.path(),views); verify(single.path(),views);
+        std::cout<<"PASS: exact before/after ICP poses, active pose compatibility, null before ICP, retained result after undo and invalid-pose rejection\n";
         std::cout<<"PASS: one/five-view flat export, exact RGB and float32 depth, binary full-resolution masks, shared K and camera-to-world poses\n";
         std::cout<<"PASS: zero undrawn masks, identity single view, overwrite guard, staged cancellation and incompatible-intrinsic rejection\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

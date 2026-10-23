@@ -37,8 +37,6 @@ Cloud cloud(const ICPView& view) {
     if (!view.vertex_count) return Cloud(device);
     if (!view.vertices || view.vertex_count>std::size_t(std::numeric_limits<int64_t>::max()))
         throw std::runtime_error("Invalid ICP point buffer");
-    if (!view.selection.empty() && view.selection.size()!=view.vertex_count)
-        throw std::runtime_error("ICP selection does not match the point buffer");
     if (view.device>=0) {
         const auto selected=cudaSetDevice(view.device);
         if (selected!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(selected));
@@ -47,12 +45,10 @@ Cloud cloud(const ICPView& view) {
     }
     static_assert(sizeof(MeshGPUVertex)==6*sizeof(float));
     const auto count=static_cast<int64_t>(view.vertex_count);
-    // A read-only strided XYZ view into the interleaved rendering buffer.
+    // A read-only strided XYZ view into the interleaved FS point buffer.
     // SelectByMask creates owned storage before normals/transforms are applied.
     const core::Tensor positions(const_cast<MeshGPUVertex*>(view.vertices),core::Float32,{count,3},{6,1},device);
-    auto valid=positions.IsFinite().All(core::SizeVector{1}).LogicalAnd(positions.IndexExtract(1,2).Gt(0));
-    if (!view.selection.empty())
-        valid=valid.LogicalAnd(core::Tensor(view.selection,{count},core::UInt8).To(device).Gt(0));
+    const auto valid=positions.IsFinite().All(core::SizeVector{1}).LogicalAnd(positions.IndexExtract(1,2).Gt(0));
     return Cloud(positions).SelectByMask(valid);
 }
 }
@@ -73,7 +69,7 @@ std::vector<ICPViewResult> refine_camera_poses_icp(
         sources.push_back(cloud(views[i]));
     }
     if (sources.front().IsEmpty() || sources.front().GetPointPositions().GetLength()<30)
-        throw std::runtime_error("ICP reference view has too few selected FS points");
+        throw std::runtime_error("ICP reference view has too few valid FS points");
     results.front().reference=true;
     results.front().message="Reference view; pose unchanged";
     if (on_view) on_view(0,results.front());
@@ -90,7 +86,7 @@ std::vector<ICPViewResult> refine_camera_poses_icp(
             auto target=merged.VoxelDownSample(fine_voxel);
             if (sources[i].IsEmpty() || sources[i].GetPointPositions().GetLength()<30 ||
                 target.IsEmpty() || target.GetPointPositions().GetLength()<30) {
-                result.message="Too few selected FS points; MA pose retained";
+                result.message="Too few valid FS points; MA pose retained";
             } else {
                 target.EstimateNormals(30,.006);
                 check();
