@@ -34,6 +34,8 @@ bool rigid(const cv::Matx44d& pose) {
 }
 Cloud cloud(const ICPView& view) {
     const core::Device device(view.device<0 ? "CPU:0" : "CUDA:"+std::to_string(view.device));
+    if (!view.selection_mask.empty() && view.selection_mask.size()!=view.vertex_count)
+        throw std::runtime_error("ICP selection mask does not match the point buffer");
     if (!view.vertex_count) return Cloud(device);
     if (!view.vertices || view.vertex_count>std::size_t(std::numeric_limits<int64_t>::max()))
         throw std::runtime_error("Invalid ICP point buffer");
@@ -48,7 +50,11 @@ Cloud cloud(const ICPView& view) {
     // A read-only strided XYZ view into the interleaved FS point buffer.
     // SelectByMask creates owned storage before normals/transforms are applied.
     const core::Tensor positions(const_cast<MeshGPUVertex*>(view.vertices),core::Float32,{count,3},{6,1},device);
-    const auto valid=positions.IsFinite().All(core::SizeVector{1}).LogicalAnd(positions.IndexExtract(1,2).Gt(0));
+    auto valid=positions.IsFinite().All(core::SizeVector{1}).LogicalAnd(positions.IndexExtract(1,2).Gt(0));
+    if (!view.selection_mask.empty()) {
+        const core::Tensor selection(view.selection_mask,{count},core::UInt8,device);
+        valid=valid.LogicalAnd(selection.Ne(0));
+    }
     return Cloud(positions).SelectByMask(valid);
 }
 }
@@ -67,6 +73,7 @@ std::vector<ICPViewResult> refine_camera_poses_icp(
             throw std::runtime_error("ICP requires rigid camera-to-world poses and points on one device");
         results[i].camera_to_world=views[i].camera_to_world;
         sources.push_back(cloud(views[i]));
+        results[i].point_count=sources.back().IsEmpty() ? 0 : sources.back().GetPointPositions().GetLength();
     }
     if (sources.front().IsEmpty() || sources.front().GetPointPositions().GetLength()<30)
         throw std::runtime_error("ICP reference view has too few valid FS points");

@@ -197,14 +197,15 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_);
     fs_cloud_->setChecked(true);
     refine_poses_=button("Refine poses (ICP)","refineCameraPosesICP");
-    refine_poses_->setToolTip("Refine camera poses using all valid FS points, including outside region masks. View 1 stays fixed. Runs only when clicked.");
+    refine_poses_->setToolTip("Refine camera poses using valid FS points inside each view's current region mask. View 1 stays fixed. Runs only when clicked.");
     undo_icp_=button("Undo ICP","undoCameraPosesICP");
     undo_icp_->setToolTip("Restore the original MA camera poses for display and saving.");
     cloud_controls->addWidget(fs_cloud_); cloud_controls->addWidget(ma_cloud_); cloud_controls->addStretch();
     cloud_controls->addWidget(refine_poses_); cloud_controls->addWidget(undo_icp_);
     connect(refine_poses_,&QPushButton::clicked,this,[this] {
         if (!refine_poses_->isEnabled()) return;
-        controller_.submit([](auto& worker) { worker.refineCameraPosesICP(); });
+        const auto masks=captureMasks();
+        controller_.submit([masks](auto& worker) { worker.refineCameraPosesICP(masks); });
     });
     connect(undo_icp_,&QPushButton::clicked,this,[this] {
         if (!undo_icp_->isEnabled()) return;
@@ -689,6 +690,16 @@ QImage ReconstructionWindow::exportMask() const {
     // The existing export saves the latest pair, even while reviewing an older camera.
     return inlineMaskMode() ? capture_previews_.value(state_.image_id).mask : mask_->mask();
 }
+QHash<quint64,QImage> ReconstructionWindow::captureMasks() const {
+    QHash<quint64,QImage> masks;
+    for (auto it=capture_previews_.cbegin();it!=capture_previews_.cend();++it)
+        if (!it->mask.isNull()) masks.insert(it.key(),it->mask);
+    if (!inlineMaskMode()) {
+        masks.remove(state_.image_id);
+        if (mask_->hasSelection()) masks.insert(state_.image_id,mask_->mask());
+    }
+    return masks;
+}
 void ReconstructionWindow::saveScanResults() {
     const auto directory=QFileDialog::getExistingDirectory(this,"Save scan results",save_directory_->text());
     if (directory.isEmpty()) return;
@@ -702,10 +713,7 @@ void ReconstructionWindow::saveScanResults() {
     if (overwrite && QMessageBox::question(this,"Replace existing files?",
         "These files already exist in the chosen folder:\n"+existing.join("\n")+"\n\nReplace them?",
         QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
-    QHash<quint64,QImage> masks;
-    for (auto it=capture_previews_.cbegin();it!=capture_previews_.cend();++it)
-        if (!it->mask.isNull()) masks.insert(it.key(),it->mask);
-    if (!inlineMaskMode() && mask_->hasSelection()) masks.insert(state_.image_id,mask_->mask());
+    const auto masks=captureMasks();
     controller_.submit([=](auto& worker) { worker.saveScanResults(directory,masks,overwrite); });
 }
 void ReconstructionWindow::buildMeshGPU() {

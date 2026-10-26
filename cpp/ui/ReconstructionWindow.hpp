@@ -49,6 +49,7 @@ private:
     void finishInlineDraw();
     void saveScanResults();
     QImage exportMask() const;
+    QHash<quint64,QImage> captureMasks() const;
     PipelineController& controller_;
     PipelineState state_;
     const bool has_confirmed_calibration_;

@@ -20,8 +20,7 @@ enum class CameraMode { Sentech, RealSenseD435 };
 struct CapturedStereoPair {
     quint64 image_id{0};
     fs::MeshCamera image_camera, ma_camera;
-    SharedGPUMesh point_cloud;
-    SharedGPUMesh icp_point_cloud; // All valid FS points, including outside the display mask.
+    SharedGPUMesh point_cloud; // Retained FS points; current per-view masks are applied when ICP runs.
     QImage ma_image;
     QImage fs_rgb; // Exact resized FS input, owned independently of its reusable buffers.
     cv::Mat fs_depth; // Final float32 Z; shares the immutable CPU result allocation.
@@ -75,8 +74,8 @@ public:
                  const std::shared_ptr<std::atomic_uint64_t>& current_request, const QImage& image = {});
     // Triangle meshes are available only for single-view FS geometry.
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
-    // Explicit user action on all valid FS points; never called from MA inference.
-    void refineCameraPosesICP();
+    // Current per-view masks in rectified-left coordinates, including historical edits.
+    void refineCameraPosesICP(const QHash<quint64,QImage>& masks = {});
     void undoCameraPosesICP();
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,
@@ -100,8 +99,8 @@ private:
     void emitPreview();
     void checkpoint() const;
     void reportProgress(int percent, const QString& stage);
-    void buildPointCloud(bool masked);
-    void retainCapture(SharedGPUMesh point_cloud, SharedGPUMesh icp_point_cloud);
+    void buildPointCloud();
+    void retainCapture(SharedGPUMesh point_cloud);
     void loadCapture(const QString& directory, const QString& left_name, const QString& right_name,
                      bool use_capture_calibration, bool append);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,
@@ -139,7 +138,6 @@ private:
     quint64 sam_image_id_{0};
     std::shared_ptr<fs::MA_VGGT> ma_;
     SharedPredictedCameras ma_cameras_; // Original MA poses; repeated ICP never compounds corrections.
-    SharedPredictedCameras icp_cameras_; // Latest completed ICP for this MA snapshot; retained after Undo for export.
     // Filtered Z depth retained for TIFF export; geometry stays on the GPU.
     cv::Mat depth_;
     QByteArray calibration_json_;

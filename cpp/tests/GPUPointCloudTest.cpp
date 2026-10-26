@@ -125,8 +125,8 @@ int main() {
         for (int c=0; c<3; ++c) require(stats.low[c]==0 && stats.high[c]==0,"Empty cloud retained old bounds");
         for (auto v : download(output)) require(v.z==0,"Empty cloud retained old vertices");
 
-        // ICP ignores the region mask, including an all-black selection, but
-        // still excludes zero, negative, NaN and infinite XYZ samples.
+        // Callers without a selection mask retain all valid points, while
+        // still excluding zero, negative, NaN and infinite XYZ samples.
         auto full_inputs=inputs; full_inputs.mask=nullptr;
         fs::MeshGPUBuffer full_output;
         const auto full_stats=fs::build_point_cloud_gpu(full_inputs,full_output);

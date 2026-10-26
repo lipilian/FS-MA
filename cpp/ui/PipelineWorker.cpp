@@ -716,7 +716,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     publish(); // Publish readiness before delivering the depth texture.
     emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
-    buildPointCloud(!selection_mask.isNull());
+    buildPointCloud();
     // A successful cloud build retains this capture (or replaces its retake
     // slot), so use the committed view count rather than capture_slot_ + 1.
     const int views = int(captures_.size());
@@ -773,7 +773,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         emit log("MA input ready for view 1 · inference starts at 2 views.");
     }
 }
-void PipelineWorker::buildPointCloud(bool masked) {
+void PipelineWorker::buildPointCloud() {
     reportProgress(92, "Building valid point cloud on GPU…");
     QElapsedTimer elapsed; elapsed.start();
     // The denoising mask is already uploaded for these inputs.
@@ -792,19 +792,7 @@ void PipelineWorker::buildPointCloud(bool masked) {
     if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     const auto& camera=fs_->model_camera_parameters();
     cloud->camera={cv::Matx33d(camera.fx,0,camera.cx,0,camera.fy,camera.cy,0,0,1),{inputs.width,inputs.height}};
-    SharedGPUMesh icp_cloud=cloud;
-    if (masked) {
-        // Retain full-image XYZ before FS reuses its buffers for the next capture.
-        // Unmasked captures share the display cloud without another allocation.
-        auto full_inputs=inputs;
-        full_inputs.mask=nullptr;
-        auto buffer=std::make_shared<fs::MeshGPUBuffer>();
-        auto full_cloud=std::make_shared<GPUMeshFrame>(*cloud);
-        full_cloud->stats=fs::build_point_cloud_gpu(full_inputs,*buffer);
-        full_cloud->buffer=std::move(buffer);
-        icp_cloud=std::move(full_cloud);
-    }
-    retainCapture(cloud,std::move(icp_cloud));
+    retainCapture(cloud);
     latest_gpu_mesh_=cloud;
     emit log(QString("GPU point cloud: %1 ms · %2 valid points · XYZ/RGB remain on GPU")
         .arg(elapsed.nsecsElapsed()/1e6,0,'f',3).arg(stats.point_count));
@@ -813,18 +801,18 @@ void PipelineWorker::buildPointCloud(bool masked) {
     state_.status=QString("GPU point cloud ready · %1 valid points").arg(stats.point_count);
     emit log(state_.status);
 }
-void PipelineWorker::retainCapture(SharedGPUMesh point_cloud, SharedGPUMesh icp_point_cloud) {
+void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     checkpoint();
     state_.icp_ready=false;
     CapturedStereoPair capture{state_.image_id,
         meshCamera(*frame_,frame_->rectified_left().size()),
         meshCamera(*frame_,{fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight}),
-        std::move(point_cloud),std::move(icp_point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
+        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
 }
-void PipelineWorker::refineCameraPosesICP() {
+void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks) {
     if (state_.live || !state_.depth_ready || !state_.icp_ready || captures_.size()<2 ||
         !ma_cameras_ || ma_cameras_->size()!=captures_.size() || !state_.predicted_cameras)
         throw std::runtime_error("Complete FS reconstruction and MA poses for at least two views before running ICP.");
@@ -834,7 +822,7 @@ void PipelineWorker::refineCameraPosesICP() {
     for (std::size_t i=0;i<captures_.size();++i) {
         checkpoint();
         const auto& capture=captures_[i];
-        const auto& cloud=capture.icp_point_cloud;
+        const auto& cloud=capture.point_cloud;
         if (capture.image_id!=(*ma_cameras_)[i].image_id || !cloud || !cloud->point_cloud ||
             !cloud->buffer || !cloud->stream_owner || !cloud->stats.point_count)
             throw std::runtime_error("FS points no longer match the MA poses. Complete reconstruction before ICP.");
@@ -842,14 +830,25 @@ void PipelineWorker::refineCameraPosesICP() {
         view.vertices=cloud->buffer->vertices(); view.vertex_count=cloud->buffer->vertex_slots();
         view.device=cloud->device; view.stream=cloud->stream;
         view.camera_to_world=(*ma_cameras_)[i].camera_to_world;
-        emit log(QString("ICP input view %1 · %2 valid FS points").arg(i+1).arg(cloud->stats.point_count));
+        const auto mask=masks.value(capture.image_id).convertToFormat(QImage::Format_Grayscale8);
+        if (!mask.isNull()) {
+            if (cv::Size(mask.width(),mask.height())!=capture.image_camera.image_size ||
+                view.vertex_count!=std::size_t(cloud->camera.image_size.area()))
+                throw std::runtime_error("ICP requires a mask aligned with each capture's rectified-left image.");
+            cv::Mat resized;
+            cv::resize(cv::Mat(mask.height(),mask.width(),CV_8UC1,
+                               const_cast<uchar*>(mask.constBits()),mask.bytesPerLine()),
+                       resized,cloud->camera.image_size,0,0,cv::INTER_NEAREST);
+            view.selection_mask.assign(resized.ptr<unsigned char>(),resized.ptr<unsigned char>()+resized.total());
+        }
         views.push_back(std::move(view));
     }
-    emit log("Manual ICP · all valid FS points · region masks ignored · original MA poses · view 1 fixed · accumulated previous views · GPU point-to-plane / Tukey\n"
+    emit log("Manual ICP · valid FS points inside region masks · original MA poses · view 1 fixed · accumulated previous views · GPU point-to-plane / Tukey\n"
              "Voxels 4/2/1 mm; correspondence 25/10/4 mm; iterations 50/30/14.\n"
              "Accept: fitness ≥ 0.3, RMSE ≤ 4 mm, translation ≤ 30 mm, rotation ≤ 10°.");
     const auto results=fs::refine_camera_poses_icp(views,[this] { checkpoint(); },
         [this,&views](std::size_t i,const fs::ICPViewResult& result) {
+            emit log(QString("ICP input view %1 · %2 valid FS points inside mask").arg(i+1).arg(result.point_count));
             if (result.reference) emit log("ICP view 1 · reference camera pose unchanged.");
             else emit log(QString("ICP view %1 · %2 · fitness %3 · RMSE %4 mm · correction %5 mm / %6°")
                 .arg(i+1).arg(QString::fromStdString(result.message)).arg(result.fitness,0,'f',4)

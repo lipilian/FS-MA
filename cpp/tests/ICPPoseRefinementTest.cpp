@@ -62,6 +62,40 @@ void run(bool gpu) {
     }
     require(!results[3].accepted && results[3].camera_to_world==views[3].camera_to_world,
             "ICP replaced a non-overlapping view's MA pose");
+    // Imported scans retain full point buffers; their current masks are applied
+    // only when ICP starts, including to the reference/target cloud.
+    auto masked_views=views;
+    masked_views.resize(2);
+    std::size_t selected_counts[2]{};
+    for (int i=0;i<2;++i) {
+        auto& mask=masked_views[i].selection_mask;
+        mask.assign(masked_views[i].vertex_count,0);
+        for (std::size_t j=i;j<mask.size();j+=2) {
+            mask[j]=i ? 255 : 1;
+            const auto& p=(*data[i])[j];
+            selected_counts[i]+=std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && p.z>0;
+        }
+    }
+    const auto masked=fs::refine_camera_poses_icp(masked_views);
+    require(masked[0].point_count==selected_counts[0] && masked[1].point_count==selected_counts[1],
+            "ICP did not intersect each view's current mask with valid XYZ");
+    require(masked[1].accepted && cv::norm(masked[1].camera_to_world-truth)<.003,
+            "Masked ICP failed to recover the camera pose");
+    std::fill(masked_views[1].selection_mask.begin(),masked_views[1].selection_mask.end(),0);
+    const auto empty_source=fs::refine_camera_poses_icp(masked_views);
+    require(empty_source[1].point_count==0 && !empty_source[1].accepted &&
+            empty_source[1].camera_to_world==masked_views[1].camera_to_world,
+            "An empty source mask fell back to all valid points");
+    std::fill(masked_views[0].selection_mask.begin(),masked_views[0].selection_mask.end(),0);
+    bool empty_reference_rejected=false;
+    try { fs::refine_camera_poses_icp(masked_views); }
+    catch (const std::runtime_error&) { empty_reference_rejected=true; }
+    require(empty_reference_rejected,"An empty reference mask fell back to all valid points");
+    masked_views[0].selection_mask.pop_back();
+    bool bad_mask_rejected=false;
+    try { fs::refine_camera_poses_icp(masked_views); }
+    catch (const std::runtime_error&) { bad_mask_rejected=true; }
+    require(bad_mask_rejected,"ICP accepted a mask with a different point count");
     if (gpu) checked(cudaMemcpy(b.data(),buffers[1].ptr,b.size()*sizeof(fs::MeshGPUVertex),cudaMemcpyDeviceToHost));
     require(std::memcmp(b.data(),original.data(),b.size()*sizeof(fs::MeshGPUVertex))==0,"ICP mutated the input point buffer");
     // A reference containing only zero/NaN points must fail on CPU and CUDA.
@@ -86,7 +120,7 @@ int main() {
         int devices=0;
         if (cudaGetDeviceCount(&devices)==cudaSuccess && devices>0) run(true);
         else std::cout<<"GPU verification skipped: no CUDA device\n";
-        std::cout<<"PASS: anchored multiview ICP, pose convention, valid points, rejection, immutable points and cancellation\n";
+        std::cout<<"PASS: anchored multiview ICP, current per-view masks, empty/misaligned masks, pose convention, rejection, immutable points and cancellation\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

@@ -9,18 +9,21 @@
 namespace fs {
 // Borrowed immutable camera-space FS points. device=-1 denotes host memory
 // (also useful for offline verification); otherwise it is a CUDA device index.
-// Always uses every finite XYZ sample with Z>0; region masks do not select points.
+// Only finite XYZ samples with Z>0 and a nonzero selection mask are used.
 struct ICPView {
     const MeshGPUVertex* vertices{nullptr};
     std::size_t vertex_count{0};
     int device{-1};
     cudaStream_t stream{nullptr};
     cv::Matx44d camera_to_world{cv::Matx44d::eye()};
+    // Optional host mask, one byte per vertex slot; empty selects all valid points.
+    std::vector<unsigned char> selection_mask;
 };
 
 struct ICPViewResult {
     cv::Matx44d camera_to_world{cv::Matx44d::eye()};
     bool reference{false}, computed{false}, accepted{false};
+    std::size_t point_count{0}; // Valid selected samples before voxel downsampling.
     double fitness{0}, rmse_m{0}, translation_m{0}, rotation_deg{0};
     std::string message;
 };
