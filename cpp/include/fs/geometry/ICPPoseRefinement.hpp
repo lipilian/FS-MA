@@ -7,7 +7,7 @@
 #include <vector>
 
 namespace fs {
-inline constexpr double kDefaultICPTranslationLimitM = .03;
+inline constexpr double kDefaultICPTranslationLimitM = .035;
 
 // Borrowed immutable camera-space FS points. device=-1 denotes host memory
 // (also useful for offline verification); otherwise it is a CUDA device index.

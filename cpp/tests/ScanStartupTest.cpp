@@ -746,9 +746,9 @@ void checkInlineMaskDrawing(bool importing) {
     auto* icp=window.findChild<QPushButton*>("refineCameraPosesICP");
     auto* translation_limit=window.findChild<QDoubleSpinBox*>("icpTranslationLimit");
     require(icp && !icp->isEnabled(),"ICP must be disabled before matching MA poses are ready");
-    require(translation_limit && translation_limit->value()==30 && translation_limit->suffix()==" mm" &&
+    require(translation_limit && translation_limit->value()==35 && translation_limit->suffix()==" mm" &&
             translation_limit->isEnabled() && !translation_limit->isReadOnly(),
-            "ICP translation limit must be editable in millimetres and default to 30 mm");
+            "ICP translation limit must be editable in millimetres and default to 35 mm");
     require(translation_limit->mapTo(&window,QPoint()).x()+translation_limit->width()<=icp->mapTo(&window,QPoint()).x(),
             "Translation limit must appear immediately before the ICP button");
     translation_limit->setValue(35.5);
