@@ -177,8 +177,8 @@ void checkGeometryExport(const QString& directory, const GPUMeshFrame& source, b
     require(stream.status()==QDataStream::Ok, "Truncated PLY data");
     const auto depth=cv::imread((directory+"/depth.tiff").toStdString(),cv::IMREAD_UNCHANGED);
     require(depth.type()==CV_32FC1 && depth.size()==cv::Size(960,800) && cv::checkRange(depth), "Invalid depth TIFF");
-    // The TIFF holds the current FS view. MA PLY combines all predicted views
-    // on a different grid; its point count is checked against GPU stats above.
+    // The TIFF holds the current FS view. TSDF combines all integrated views;
+    // its point count is checked against GPU stats above.
     if (source.point_cloud && !world)
         require(quint64(cv::countNonZero(depth))==vertices, "Saved depth does not match the captured point cloud");
 }
@@ -649,6 +649,7 @@ void checkInlineMaskDrawing(bool importing) {
         state.import_directory="/inline-mask-test"; state.import_total=3; state.import_sequence_started=true;
     }
     const QSize image_size=importing ? QSize(320,240) : QSize(1296,1080);
+    SharedGPUMesh latest_geometry;
     const auto seed=[&](int id,const QImage& imported_mask=QImage{}) {
         state.image_id=id; state.capture_count=id;
         if (importing) state.import_index=id;
@@ -657,6 +658,7 @@ void checkInlineMaskDrawing(bool importing) {
         controller.images(left,left,imported_mask); controller.depthImage(left,0,1);
         auto cloud=std::make_shared<GPUMeshFrame>(); cloud->image_id=id; cloud->point_cloud=true;
         cloud->stats.point_count=100;
+        latest_geometry=cloud;
         controller.gpuMeshReady(cloud);
         QCoreApplication::processEvents();
         view->gpuMeshPresented(cloud); QCoreApplication::processEvents();
@@ -774,6 +776,43 @@ void checkInlineMaskDrawing(bool importing) {
     controller.busyChanged(true);
     require(!icp->isEnabled() && !translation_limit->isEnabled(),"ICP controls must be disabled during another worker action");
     controller.busyChanged(false);
+    // Exercise completed ICP/Undo snapshots without inference, preserving each
+    // view's drawn, cleared or imported-and-edited mask across display changes.
+    require(!window.findChild<QRadioButton*>("maPointCloud"),"MA point-cloud option must be removed");
+    state.ma_cameras=cameras;
+    controller.stateChanged(state); controller.busyChanged(false);
+    view->gpuMeshPresented(latest_geometry);
+    QCoreApplication::processEvents();
+    view->cameraClicked(2); const auto second_mask=editor->mask();
+    view->cameraClicked(3);
+    for (const auto* source:{"fsPointCloud","tsdfGeometry"}) {
+        auto refined=std::make_shared<std::vector<PredictedCameraFrame>>(*cameras);
+        (*refined)[1].camera_to_world(0,3)=.01;
+        controller.busyChanged(true);
+        state.predicted_cameras=refined; state.original_ma_cameras=cameras;
+        controller.stateChanged(state); controller.busyChanged(false);
+        if (QString(source)=="tsdfGeometry") {
+            auto scene=std::make_shared<TsdfScene>();
+            auto mesh=std::make_shared<GPUMeshFrame>(); mesh->world_space=true; mesh->stats.triangle_count=100;
+            scene->mesh=mesh; state.tsdf=scene;
+            controller.stateChanged(state); controller.busyChanged(false);
+        }
+        window.findChild<QRadioButton*>(source)->setChecked(true);
+        require(undo_icp->isEnabled(),"Completed ICP did not enable Undo");
+        controller.busyChanged(true);
+        state.predicted_cameras=cameras; state.original_ma_cameras.reset(); state.tsdf.reset();
+        controller.stateChanged(state); controller.busyChanged(false);
+        QCoreApplication::processEvents();
+        require(window.findChild<QRadioButton*>("fsPointCloud")->isChecked() &&
+                window.findChild<QComboBox*>("meshMode")->currentIndex()==0 &&
+                !window.findChild<QRadioButton*>("tsdfGeometry")->isEnabled() && !undo_icp->isEnabled(),
+                "Undo must display FS point clouds at the original MA poses and invalidate TSDF");
+        require(editor->mask()==edited,"Undo changed the selected view's edited mask");
+        view->cameraClicked(1); require(editor->mask().isNull(),"Undo restored a cleared mask");
+        view->cameraClicked(2); require(editor->mask()==second_mask,"Undo changed a historical drawn mask");
+        view->cameraClicked(3); require(editor->mask()==edited,"Undo lost the edited imported mask");
+    }
+    std::cout<<"PASS: FS/TSDF only; Undo restores FS point-cloud display and preserves all per-view masks\n";
     if (!screenshot_directory.isEmpty())
         require(window.grab().save(screenshot_directory+"/icp-controls.png"),"Cannot save ICP controls screenshot");
     translation_limit->findChild<QLineEdit*>()->setText("42.5");
@@ -889,27 +928,18 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         }
     }
     require(state.predicted_cameras && state.predicted_cameras->size()==2 &&
-            state.ma_clouds && state.ma_clouds->size()==2,"Two imported views did not produce MA output");
+            state.ma_cameras==state.predicted_cameras,"Two imported views did not produce MA poses");
     for (int i=0;i<2;++i) {
         const auto& predicted=(*state.predicted_cameras)[i];
-        const auto& cloud=(*state.ma_clouds)[i];
         require(predicted.image_id==ids[i] && predicted.camera.image_size==cameras[i].image_size &&
                 predicted.camera.intrinsics==cameras[i].intrinsics,
                 "Historical camera changed after releasing its stereo images");
-        require(cloud && cloud->stats.point_count>0 && cloud->image_id==ids[i],
-                "MA output lost a retained view");
-        auto scaled=cameras[i].intrinsics;
-        for (int j=0;j<3;++j) {
-            scaled(0,j)*=double(fs::MA_VGGT::kInputWidth)/cameras[i].image_size.width;
-            scaled(1,j)*=double(fs::MA_VGGT::kInputHeight)/cameras[i].image_size.height;
-        }
-        require(cloud->camera.intrinsics==scaled &&
-                cloud->camera.image_size==cv::Size(fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight),
-                "MA camera snapshot does not match its image grid");
+        require(predicted.image.size()==QSize(fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight),
+                "MA camera texture does not match its input grid");
     }
     const auto geometry_before=geometry;
     const auto poses_before=state.predicted_cameras;
-    const auto clouds_before=state.ma_clouds;
+    const auto ma_poses_before=state.ma_cameras;
     QImage result;
     quint64 response_id=0, response_revision=0;
     QObject::connect(&worker,&PipelineWorker::maskReady,[&](quint64 id,quint64 revision,QImage mask,QString) {
@@ -930,7 +960,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         else if (index==0) require(result==historical,"Returning to the historical camera reused another image's SAM features");
         ++*request;
     }
-    require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_clouds==clouds_before &&
+    require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_cameras==ma_poses_before &&
             state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
             "Historical SAM editing changed FS/MA output or the import cursor");
     QTemporaryDir scan_output;
@@ -959,7 +989,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     require(cv::norm(saved_mask,expected_mask,cv::NORM_INF)==0 &&
             cv::countNonZero(cv::imread(scan_output.filePath("mask02.png").toStdString(),cv::IMREAD_UNCHANGED))==0,
             "Export assigned a historical mask to the wrong view or invented an undrawn mask");
-    require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_clouds==clouds_before &&
+    require(geometry==geometry_before && state.predicted_cameras==poses_before && state.ma_cameras==ma_poses_before &&
             state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
             "Saving recomputed geometry/poses or changed the import cursor");
     require(state.icp_ready,"Completed MA did not enable manual ICP");
@@ -975,26 +1005,31 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         require(logs.contains(QString("ICP input view %1 · %2 valid FS points inside mask")
             .arg(i+1).arg(selected_point_counts[i])),
             "ICP did not receive exactly the valid FS points inside the capture mask");
-    require(state.tsdf && state.tsdf->mesh && state.tsdf->points && state.status.contains("ICP poses"),
-            "ICP did not automatically extract TSDF using its completed pose snapshot");
+    require(!state.tsdf && state.status.startsWith("ICP complete") && state.progress==100 &&
+            !logs.join('\n').contains("TSDF"),"ICP must finish without running TSDF");
+    const auto icp_poses=state.predicted_cameras;
+    run([&](auto& w) { w.buildTSDF(icp_masks,{}); });
+    require(state.tsdf && state.tsdf->mesh && state.tsdf->points && state.status.contains("ICP poses") &&
+            state.predicted_cameras==icp_poses,"Manual TSDF did not use the completed ICP pose snapshot");
     for (const auto& output:{state.tsdf->mesh,state.tsdf->points}) {
         QTemporaryDir tsdf_output;
-        run([&](auto& w) { w.saveResults(tsdf_output.path(),{false,false,false,true,false},{},output); });
-        require(QFileInfo(tsdf_output.filePath("mesh.ply")).size()>100,"TSDF geometry export failed");
+        run([&](auto& w) { w.saveResults(tsdf_output.path(),{false,false,false,true,true},{},output); });
+        checkGeometryExport(tsdf_output.path(),*output,true);
     }
     const auto refined=state.predicted_cameras;
     require(refined && refined!=poses_before && refined->front().camera_to_world==poses_before->front().camera_to_world &&
-            geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
+            geometry==geometry_before && state.ma_cameras==ma_poses_before && state.import_index==2,
             "ICP moved the anchor, rebuilt geometry, or changed the import cursor");
     QTemporaryDir refined_output;
     run([&](auto& w) { w.saveScanResults(refined_output.path(),{}); });
     const auto refined_json=checkScanFiles(refined_output.path(),2,state.image_camera->image_size);
     require(refined_json.value("views")==json.value("views"),
             "Scan export must keep the original MA extrinsic poses after ICP");
-    require(state.predicted_cameras==refined && geometry==geometry_before && state.ma_clouds==clouds_before,
+    require(state.predicted_cameras==refined && geometry==geometry_before && state.ma_cameras==ma_poses_before,
             "Saving original MA extrinsics changed the active ICP poses or geometry");
     logs.clear();
     run([&](auto& w) { w.refineCameraPosesICP(icp_masks,0); });
+    require(!state.tsdf && !logs.join('\n').contains("TSDF"),"Re-running ICP retained stale TSDF or fused automatically");
     require(logs.join('\n').contains("translation ≤ 0 mm"),"ICP log did not report the requested translation limit");
     for (int i=0;i<2;++i)
         for (int r=0;r<3;++r)
@@ -1004,10 +1039,13 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     for (int i=0;i<2;++i)
         require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
                 "Repeated manual ICP compounded the camera correction");
+    run([&](auto& w) { w.buildTSDF(icp_masks,{}); });
+    logs.clear();
     run([](auto& w) { w.undoCameraPosesICP(); });
     require(!state.tsdf && state.predicted_cameras==poses_before && !state.original_ma_cameras && state.icp_ready &&
-            geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
+            geometry==geometry_before && state.ma_cameras==ma_poses_before && state.import_index==2,
             "Undo ICP did not restore the MA snapshot or changed the retained geometry");
+    require(!logs.join('\n').contains("TSDF"),"Undo ICP automatically ran TSDF");
     QTemporaryDir undone_output;
     run([&](auto& w) { w.saveScanResults(undone_output.path(),{}); });
     const auto undone_json=checkScanFiles(undone_output.path(),2,state.image_camera->image_size);
@@ -1017,7 +1055,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     for (int i=0;i<2;++i)
         require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
                 "ICP could not be reapplied consistently after undo");
-    std::cout<<"PASS: TSDF MA fallback, automatic ICP fusion, mask/settings/pose invalidation and world-space PLY export\n";
+    std::cout<<"PASS: manual TSDF with MA/ICP poses, independent ICP/Undo, mask/settings/pose invalidation and world-space PLY export\n";
     std::cout<<"PASS: real-scan ICP with mask-filtered valid FS points, unmasked fallback, immutable geometry, anchored poses, undo/export and reapply\n";
     // Editing a historical view and clearing the current view must affect the
     // next ICP request without reconstructing or reusing an old selection.
@@ -1036,7 +1074,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     require(logs.contains(QString("ICP input view 1 · %1 valid FS points inside mask").arg(revised_count)) &&
             logs.contains(QString("ICP input view 2 · %1 valid FS points inside mask").arg(cv::countNonZero(depths.back()>0))) &&
             logs.join('\n').contains("translation ≤ 35.5 mm") &&
-            geometry==geometry_before && state.ma_clouds==clouds_before,
+            geometry==geometry_before && state.ma_cameras==ma_poses_before,
             "ICP ignored an edited historical mask, retained a cleared mask, or rebuilt geometry");
     std::cout<<"PASS: ICP applies edited historical masks and cleared masks without reconstructing imported point clouds\n";
     // A new MA inference with the same capture IDs must replace the export's original pose snapshot.
@@ -1066,10 +1104,9 @@ int checkLiveScan(QApplication& app) {
     QPointer<ReconstructionWindow> window;
     bool finished=false, passed=false;
     QString failure;
-    int phase=0, ready_ticks=0, presented=0, fs_captures=0, ma_presented=0, landed=0, expected_views=0;
+    int phase=0, ready_ticks=0, presented=0, fs_captures=0, landed=0, expected_views=0;
     QTemporaryDir point_export, mesh_export, ma_export;
     require(point_export.isValid() && mesh_export.isValid() && ma_export.isValid(), "Cannot create export test directories");
-    SharedGPUClouds latest_ma_clouds;
     QHash<quint64,QImage> captured_left, captured_right;
     std::vector<quint64> preview_ids;
     quint64 replaced_view_id=0;
@@ -1165,22 +1202,9 @@ int checkLiveScan(QApplication& app) {
                         } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
                     });
                     QObject::connect(view,&MeshView::renderFailed,&app,[&](QString error) { finish(error); });
-                    QObject::connect(view,&MeshView::maCloudsPresented,&app,[&](SharedGPUClouds clouds) {
-                        if (finished) return;
-                        try {
-                            require(phase>=7 && clouds && clouds->size()==size_t(captured_views()), "MA renderer did not present the complete current view set");
-                            unsigned long long points=0;
-                            for (const auto& mesh:*clouds) {
-                                require(mesh->point_cloud && !mesh->stats.triangle_count && mesh->camera.image_size==cv::Size(518,434), "MA result is not a point cloud on the predicted grid");
-                                points+=mesh->stats.point_count;
-                            }
-                            require(points>0 && clouds!=latest_ma_clouds, "MA point cloud snapshot was empty or reused after new inference");
-                            ++ma_presented; latest_ma_clouds=clouds;
-                            std::cout<<"MA point clouds displayed: "<<clouds->size()<<" views, "<<points<<" points\n";
-                            require(!window->findChild<CaptureTransition*>()->isRunning(), "Switching to MA restarted the capture transfer");
-                            require(window->findChild<QRadioButton*>("maPointCloud")->isChecked() && window->findChild<QComboBox*>("meshMode")->currentIndex()==0,
-                                    "Manual MA selection did not display point clouds");
-                        } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
+                    require(!window->findChild<QRadioButton*>("maPointCloud"),"MA point-cloud option must be removed");
+                    QObject::connect(view,&MeshView::maCloudsPresented,&app,[&](SharedGPUClouds) {
+                        finish("Scan workspace unexpectedly displayed MA point clouds");
                     });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
                         if (finished || !mesh) return;
@@ -1198,7 +1222,7 @@ int checkLiveScan(QApplication& app) {
                                 require(!window->findChild<StereoImageView*>("capturePreview")->isProcessing(),
                                         "FS points appeared before capture computation finished");
                                 require(window->findChild<QRadioButton*>("fsPointCloud")->isChecked() &&
-                                        !window->findChild<QWidget*>("maPointCloud")->isEnabled(),
+                                        !window->findChild<QWidget*>("maPointCloud"),
                                         "FS was not selected during the completed capture transfer");
                                 ++fs_captures;
                                 QTimer::singleShot(350,&app,[&] {
@@ -1356,22 +1380,14 @@ int checkLiveScan(QApplication& app) {
             if ((phase==8 || phase==10) && capture->isEnabled()) {
                 require(captured_views()==2, "Capture more did not append, or Retake appended instead of replacing");
                 require(retake->isVisible() && retake->isEnabled(), "Retake is unavailable for captured images");
-                require(window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Two-view MA reconstruction did not complete");
+                require(window->findChild<QPushButton*>("refineCameraPosesICP")->isEnabled(), "Two-view MA poses did not enable ICP");
                 require(!preview->isProcessing(), "Two-view processing animation did not stop");
                 require(fs_captures==(phase==8 ? 1 : 2) && landed==fs_captures+1, "FS point cloud or its transfer did not complete for capture/retake");
-                require(window->findChild<QRadioButton*>("fsPointCloud")->isChecked(), "Capture/retake must default to FS even after viewing MA");
+                require(window->findChild<QRadioButton*>("fsPointCloud")->isChecked(), "Capture/retake must display FS points");
                 require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Current camera did not turn green after landing");
                 screenshot(QString("fs-landed-%1").arg(fs_captures));
                 check_previews();
-                phase=phase==8 ? 15 : 16;
-                window->findChild<QRadioButton*>("maPointCloud")->click();
-                return;
-            }
-            if ((phase==15 || phase==16) && retake->isEnabled() && ma_presented==fs_captures) {
-                require(window->findChild<QRadioButton*>("maPointCloud")->isChecked(), "Manual MA selection was not retained");
-                require(!window->findChild<QComboBox*>("meshMode")->isEnabled(), "MA point clouds still expose mesh modes");
-                check_previews();
-                if (phase==15) { phase=9; ready_ticks=0; retake->click(); }
+                if (phase==8) { phase=9; ready_ticks=0; retake->click(); }
                 else { phase=12; ready_ticks=0; capture->click(); }
                 return;
             }
@@ -1387,18 +1403,11 @@ int checkLiveScan(QApplication& app) {
                 require(landed==fs_captures+1,"Additional capture skipped its landing animation");
                 require(hasGreenCamera(window->findChild<QOpenGLWidget*>()),"Additional capture lost the green current camera");
                 check_previews();
-                phase=17; window->findChild<QRadioButton*>("maPointCloud")->click();
-                return;
-            }
-            if (phase==17 && retake->isEnabled() && ma_presented==fs_captures) {
-                require(latest_ma_clouds && latest_ma_clouds->size()==size_t(expected_views),
-                        "Manual MA selection did not display all current views");
-                require(!window->findChild<QComboBox*>("meshMode")->isEnabled(), "MA point clouds still expose mesh modes");
-                check_previews();
+                require(window->findChild<QPushButton*>("refineCameraPosesICP")->isEnabled(),"Completed MA poses did not enable ICP");
                 if (expected_views<PipelineState::kMaxCaptures) { phase=12; ready_ticks=0; capture->click(); }
                 else {
                     require(!capture->isEnabled(), "Five-view capture limit was lost");
-                    screenshot("ma-five-landed");
+                    screenshot("fs-five-landed");
                     selectSaveFolder(window->findChild<QPushButton*>("openSaveResults"),ma_export.path());
                     phase=14;
                 }
@@ -1426,14 +1435,25 @@ int checkLiveScan(QApplication& app) {
                 phase=20; window->findChild<QPushButton*>("refineCameraPosesICP")->click(); return;
             }
             if (phase==20 && retake->isEnabled()) {
+                require(window->findChild<QLabel*>("status")->text().startsWith("ICP complete") &&
+                        !window->findChild<QRadioButton*>("tsdfGeometry")->isEnabled(),"ICP ran TSDF or retained stale fusion");
+                phase=23; window->findChild<QPushButton*>("buildTSDF")->click(); return;
+            }
+            if (phase==23 && retake->isEnabled()) {
                 require(window->findChild<QLabel*>("status")->text().contains("ICP poses") &&
-                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"ICP did not automatically rebuild and display TSDF");
+                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"Manual TSDF did not use ICP poses");
                 screenshot("tsdf-icp-mesh"); phase=21;
                 window->findChild<QPushButton*>("undoCameraPosesICP")->click(); return;
             }
             if (phase==21 && retake->isEnabled()) {
+                require(window->findChild<QLabel*>("status")->text().startsWith("ICP undone") &&
+                        window->findChild<QRadioButton*>("fsPointCloud")->isChecked() &&
+                        !window->findChild<QRadioButton*>("tsdfGeometry")->isEnabled(),"Undo ICP did not restore FS point-cloud display");
+                phase=24; window->findChild<QPushButton*>("buildTSDF")->click(); return;
+            }
+            if (phase==24 && retake->isEnabled()) {
                 require(window->findChild<QLabel*>("status")->text().contains("MA poses") &&
-                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"Undo ICP did not rebuild TSDF from MA poses");
+                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"Manual TSDF after Undo did not use MA poses");
                 window->findChild<MeshView*>()->cameraClicked(preview_ids.back());
                 window->findChild<QPushButton*>("startDraw")->click();
                 require(window->findChild<QPushButton*>("finishDraw")->isEnabled(),"TSDF view prevented mask editing");
@@ -1442,13 +1462,13 @@ int checkLiveScan(QApplication& app) {
             if (phase==22 && retake->isEnabled()) {
                 require(!window->findChild<QRadioButton*>("tsdfGeometry")->isEnabled() &&
                         window->findChild<QRadioButton*>("fsPointCloud")->isChecked(),"Mask confirmation retained stale TSDF");
-                std::cout<<"PASS: live TSDF controls, MA fallback, automatic ICP fusion, mesh/points, undo rebuild and mask invalidation\n";
+                std::cout<<"PASS: live manual TSDF controls, MA/ICP poses, mesh/points, independent Undo and mask invalidation\n";
                 phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); return;
             }
             if (phase==11 && capture->isEnabled()) {
                 require(captured_views()==0 && capture->text()=="Capture pair" && !retake->isVisible(),
                         "Restart did not restore the empty capture toolbar");
-                require(!window->findChild<QWidget*>("maPointCloud")->isEnabled(), "Restart retained MA geometry");
+                require(!window->findChild<QRadioButton*>("maPointCloud"), "Restart restored the removed MA point-cloud option");
                 require(!preview->isProcessing(), "Restart retained the processing animation");
                 require(!hasSceneContent(window->findChild<QOpenGLWidget*>()), "Restart retained geometry or projected the live preview in 3D");
                 const auto live_image=preview->image();
@@ -1487,8 +1507,8 @@ int checkLiveScan(QApplication& app) {
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: ZED default FS points for 1–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, scan dataset export and clean shutdown\n";
-    std::cout<<"PASS: camera selection restores each original stereo pair and depth in FS/MA modes, replaces retaken images and clears on restart\n";
+    std::cout<<"PASS: ZED default FS points for 1–5 views and retake, MA poses, camera transfers, restart, region updates, GPU wireframe, scan dataset export and clean shutdown\n";
+    std::cout<<"PASS: camera selection restores each original stereo pair and depth in FS/TSDF modes, replaces retaken images and clears on restart\n";
     return 0;
 }
 }

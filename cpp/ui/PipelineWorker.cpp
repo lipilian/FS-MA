@@ -159,7 +159,9 @@ PLYMesh downloadMeshForExport(const GPUMeshFrame& source, const std::function<vo
         }
         if (!valid) continue; // Includes the zeroed, unused triangle slots.
         const double area=.5*cv::norm((p[1]-p[0]).cross(p[2]-p[0]));
-        if (!(area>0) || !std::isfinite(area)) continue;
+        // Raw TSDF extraction can contain zero-area faces. Preserve those
+        // compact world-space faces so export matches the displayed mesh.
+        if ((!source.world_space && !(area>0)) || !std::isfinite(area)) continue;
         cv::Vec3i face;
         for (int k=0;k<3;++k) {
             const auto& v=vertices[i+k];
@@ -233,7 +235,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
                                 const QString& ma_engine) {
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
+    state_.predicted_cameras.reset(); state_.ma_cameras.reset();
     ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false; state_.tsdf.reset();
     timer_->stop(); state_.live = false; state_.engine_ready = false; state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release();
     const auto engine_file = QFileInfo(engine_path).absoluteFilePath();
@@ -468,7 +470,7 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
     if (append) capture_slot_=int(captures_.size());
     else {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
-        state_.predicted_cameras.reset(); state_.ma_clouds.reset();
+        state_.predicted_cameras.reset(); state_.ma_cameras.reset();
         ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false; state_.tsdf.reset();
         if (ma_) ma_->resetInputs();
     }
@@ -548,7 +550,7 @@ void PipelineWorker::startCapturePreview(bool append) {
     if (append) capture_slot_=int(captures_.size());
     else if (clear_single_view) {
         captures_.clear(); capture_slot_=0; state_.capture_count=0;
-        state_.predicted_cameras.reset(); state_.ma_clouds.reset();
+        state_.predicted_cameras.reset(); state_.ma_cameras.reset();
         ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false; state_.tsdf.reset();
         if (ma_) ma_->resetInputs();
         state_.gpu_ready=false; state_.depth_ready=false;
@@ -567,7 +569,7 @@ void PipelineWorker::cleanCaptures() {
         state_.live=false; state_.import_index=0; state_.import_sequence_started=false;
     }
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
+    state_.predicted_cameras.reset(); state_.ma_cameras.reset();
     ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false; state_.tsdf.reset();
     frame_.reset(); state_.image_camera.reset();
     state_.has_rectified=false; state_.gpu_ready=false; state_.depth_ready=false;
@@ -743,45 +745,25 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         checkpoint();
         emit log(QString("MA inference complete · %1 views · %2 ms · raw depths/poses/scale on GPU · independent stream")
             .arg(views).arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
-        reportProgress(99, "Building MA point clouds and positioning cameras…");
+        reportProgress(99, "Positioning cameras from MA poses…");
         const auto poses = ma_->downloadCameraPoses();
         auto cameras = std::make_shared<std::vector<PredictedCameraFrame>>();
-        auto clouds = std::make_shared<std::vector<SharedGPUMesh>>();
         cameras->reserve(views);
-        clouds->reserve(views);
-        constexpr int width=fs::MA_VGGT::kInputWidth, height=fs::MA_VGGT::kInputHeight;
-        constexpr std::size_t plane=std::size_t(width)*height;
-        unsigned long long point_count=0;
         for (int i = 0; i < views; ++i) {
             const auto& capture = captures_[i];
             cameras->push_back({capture.image_camera, poses[i], capture.image_id, capture.ma_image});
-            auto buffer=std::make_shared<fs::MeshGPUBuffer>();
-            auto cloud=std::make_shared<GPUMeshFrame>();
-            cloud->stats=fs::build_ma_point_cloud_gpu({ma_->depthsDevice()+i*6*plane,
-                ma_->inputDevice()+i*7*plane,ma_->scaleDevice(),width,height,ma_->stream()},*buffer);
-            cloud->buffer=std::move(buffer); cloud->point_cloud=true;
-            cloud->camera=capture.ma_camera;
-            cloud->image_id=capture.image_id;
-            cloud->stream=ma_->stream(); cloud->stream_owner=ma_;
-            const auto error=cudaGetDevice(&cloud->device);
-            if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
-            point_count+=cloud->stats.point_count;
-            clouds->push_back(std::move(cloud));
             checkpoint();
         }
         checkpoint();
-        // Publish complete immutable geometry and matching poses together. A failed
-        // inference/build leaves the previous MA scene available during retakes.
-        state_.ma_clouds = std::move(clouds);
+        // Publish the completed pose snapshot; retain FS geometry for display.
         state_.predicted_cameras = std::move(cameras);
         ma_cameras_ = state_.predicted_cameras;
+        state_.ma_cameras = ma_cameras_;
         state_.original_ma_cameras.reset();
         state_.icp_ready = true;
-        emit log(QString("MA GPU point clouds: %1 valid points · predicted rays/depth/scale decoded on device · XYZ/RGB stay on GPU")
-            .arg(point_count));
         emit log(QString("MA poses ready · %1 views with 518 × 434 image textures · predicted camera-to-world poses in metres")
             .arg(views));
-        state_.status = QString("Capture complete · MA GPU point clouds ready for %1 views.").arg(views);
+        state_.status = QString("Capture complete · FS point clouds positioned with MA poses for %1 views.").arg(views);
         publish();
     } else {
         emit log("MA input ready for view 1 · inference starts at 2 views.");
@@ -820,20 +802,17 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     state_.icp_ready=false; state_.tsdf.reset();
     CapturedStereoPair capture{state_.image_id,
         meshCamera(*frame_,frame_->rectified_left().size()),
-        meshCamera(*frame_,{fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight}),
         std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
 }
-void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks, double max_translation_m,
-                                           const fs::TsdfOptions& tsdf_options) {
+void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks, double max_translation_m) {
     if (state_.live || !state_.depth_ready || !state_.icp_ready || captures_.size()<2 ||
         !ma_cameras_ || ma_cameras_->size()!=captures_.size() || !state_.predicted_cameras)
         throw std::runtime_error("Complete FS reconstruction and MA poses for at least two views before running ICP.");
     if (!std::isfinite(max_translation_m) || max_translation_m<0)
         throw std::invalid_argument("ICP translation limit must be finite and nonnegative.");
-    tsdf_options.validate();
     state_.tsdf.reset();
     reportProgress(5,"Preparing FS point clouds for ICP…");
     QElapsedTimer elapsed; elapsed.start();
@@ -891,7 +870,6 @@ void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks, do
         .arg(accepted).arg(results.size()-1).arg(elapsed.elapsed());
     emit log(state_.status);
     publish();
-    buildTSDF(masks,tsdf_options);
 }
 void PipelineWorker::undoCameraPosesICP() {
     if (state_.live || !state_.depth_ready || !state_.icp_ready || captures_.size()<2 ||
@@ -1057,7 +1035,7 @@ void PipelineWorker::saveScanResults(const QString& directory, const QHash<quint
     emit log(state_.status);
 }
 void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOptions options,
-                                 const QImage& selection, SharedGPUMesh gpu_mesh, bool overwrite, SharedGPUClouds ma_geometry) {
+                                 const QImage& selection, SharedGPUMesh gpu_mesh, bool overwrite) {
     if (!frame_ || state_.live) throw std::runtime_error("Capture or import a frozen pair before saving.");
     if (!options.images && !options.calibration && !options.mask && !options.mesh && !options.depth)
         throw std::runtime_error("Select at least one item to save.");
@@ -1074,9 +1052,7 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
         const bool current_tsdf=state_.tsdf && gpu_mesh && (gpu_mesh==state_.tsdf->mesh || gpu_mesh==state_.tsdf->points);
         const bool current_gpu=gpu_mesh && (gpu_mesh==latest_gpu_mesh_.lock() || current_tsdf) &&
             (gpu_mesh->point_cloud ? gpu_mesh->stats.point_count : gpu_mesh->stats.triangle_count);
-        const bool current_ma=ma_geometry && !ma_geometry->empty() && state_.predicted_cameras &&
-            ma_geometry==state_.ma_clouds;
-        if (!state_.depth_ready || (ma_geometry ? !current_ma : !current_gpu))
+        if (!state_.depth_ready || !current_gpu)
             throw std::runtime_error("Generate the current displayed mesh before saving it.");
     }
     QStringList names;
@@ -1097,30 +1073,7 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
     std::optional<PLYMesh> mesh;
     if (options.mesh) {
         QElapsedTimer download; download.start();
-        if (ma_geometry) {
-            mesh.emplace();
-            for (const auto& frame:*ma_geometry) {
-                if (!(frame->stats.point_count || frame->stats.triangle_count)) continue;
-                const auto camera=std::find_if(state_.predicted_cameras->begin(),state_.predicted_cameras->end(),
-                    [&](const auto& item) { return item.image_id==frame->image_id; });
-                if (camera==state_.predicted_cameras->end()) throw std::runtime_error("MA export is missing a matching camera pose.");
-                auto part=downloadMeshForExport(*frame,[this] { checkpoint(); });
-                if (mesh->vertices.size()+part.vertices.size()>std::size_t(std::numeric_limits<int>::max()))
-                    throw std::runtime_error("MA export exceeds the PLY vertex index limit.");
-                const int offset=int(mesh->vertices.size());
-                for (size_t i=0;i<part.vertices.size();++i) {
-                    if (i%4096==0) checkpoint();
-                    const auto& p=part.vertices[i];
-                    const auto world=camera->camera_to_world*cv::Vec4d(p[0],p[1],p[2],1);
-                    const cv::Vec3f point{float(world[0]),float(world[1]),float(world[2])};
-                    if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2]))
-                        throw std::runtime_error("MA export contains invalid world coordinates.");
-                    mesh->vertices.push_back(point); // World-space Z may be negative.
-                }
-                mesh->colors.insert(mesh->colors.end(),part.colors.begin(),part.colors.end());
-                for (const auto& triangle:part.triangles) mesh->triangles.push_back(triangle+cv::Vec3i::all(offset));
-            }
-        } else mesh=downloadMeshForExport(*gpu_mesh,[this] { checkpoint(); });
+        mesh=downloadMeshForExport(*gpu_mesh,[this] { checkpoint(); });
         emit log(QString("GPU geometry export download + filtering: %1 ms · %2 triangles · %3 vertices · RGB uint8 0–255")
             .arg(download.nsecsElapsed()/1e6,0,'f',3).arg(mesh->triangles.size()).arg(mesh->vertices.size()));
     }
@@ -1157,7 +1110,7 @@ void PipelineWorker::saveResults(const QString& directory, ReconstructionSaveOpt
             "property uchar red\nproperty uchar green\nproperty uchar blue\n"
             "element face %2\nproperty list uchar int vertex_indices\nend_header\n")
             .arg(mesh->vertices.size()).arg(mesh->triangles.size())
-            .arg(ma_geometry ? "MA world frame" : "rectified left camera frame").toUtf8();
+            .arg(gpu_mesh->world_space ? "world frame" : "rectified left camera frame").toUtf8();
         if (file.write(header)!=header.size()) throw std::runtime_error("Cannot write mesh.ply header");
         QDataStream stream(&file); stream.setByteOrder(QDataStream::LittleEndian);
         stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
@@ -1219,7 +1172,7 @@ void PipelineWorker::segment(quint64 image_id, quint64 request_id, const std::ve
 }
 void PipelineWorker::shutdown() {
     disconnectCameras(); captures_.clear(); capture_slot_=0; state_.capture_count=0;
-    state_.predicted_cameras.reset(); state_.ma_clouds.reset();
+    state_.predicted_cameras.reset(); state_.ma_cameras.reset();
     ma_cameras_.reset(); state_.original_ma_cameras.reset(); state_.icp_ready=false; state_.tsdf.reset();
     latest_gpu_mesh_.reset(); gpu_mesh_.reset(); ma_.reset(); state_.ma_ready = false;
     sam_.reset(); state_.sam_ready = false; fs_.reset(); state_.engine_ready = false; frame_.reset(); emit stopped();

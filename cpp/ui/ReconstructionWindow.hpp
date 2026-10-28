@@ -40,7 +40,7 @@ private:
     void showImages();
     void setCaptureProcessing(bool processing);
     void presentGeometry(SharedGPUMesh mesh);
-    void presentMAResult();
+    void presentCameraPoses();
     void startCaptureTransition();
     void cancelCapturePresentation();
     void refreshWorkspace();
@@ -61,10 +61,9 @@ private:
     bool capture_processing_{false};
     bool capture_mesh_requested_{false}, capture_transition_pending_{false};
     SharedGPUMesh pending_capture_cloud_, pending_capture_mesh_;
-    SharedGPUClouds displayed_ma_clouds_;
+    SharedPredictedCameras displayed_ma_cameras_;
     SharedPredictedCameras displayed_cameras_;
     SharedPredictedCameras displayed_original_cameras_;
-    bool ma_cloud_valid_{false}, ma_upload_pending_{false};
     quint64 highlighted_camera_id_{0}, transition_camera_id_{0};
     struct CapturePreview {
         QImage left, right, depth;
@@ -108,7 +107,7 @@ private:
     MeshView* mesh_view_;
     StereoImageView *preview_, *right_preview_;
     CaptureTransition* capture_transition_;
-    QRadioButton *fs_cloud_, *ma_cloud_, *tsdf_cloud_;
+    QRadioButton *fs_cloud_, *tsdf_cloud_;
     QComboBox* mesh_mode_;
     QComboBox* camera_image_mode_;
     QComboBox* camera_mode_;

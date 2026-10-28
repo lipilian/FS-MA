@@ -21,7 +21,7 @@ enum class CameraMode { Sentech, Zed };
 // Full stereo images are needed only for the current pair; the UI owns review images.
 struct CapturedStereoPair {
     quint64 image_id{0};
-    fs::MeshCamera image_camera, ma_camera;
+    fs::MeshCamera image_camera;
     SharedGPUMesh point_cloud; // Retained FS points; current per-view masks are applied when ICP runs.
     QImage ma_image;
     QImage fs_rgb; // Exact resized FS input, owned independently of its reusable buffers.
@@ -47,7 +47,7 @@ struct PipelineState {
     std::optional<fs::MeshCamera> image_camera;
     SharedPredictedCameras predicted_cameras;
     SharedPredictedCameras original_ma_cameras; // Comparison overlay after manual ICP completes.
-    SharedGPUClouds ma_clouds;
+    SharedPredictedCameras ma_cameras; // Original MA output; displayed FS points use these poses before ICP.
     SharedTsdfScene tsdf;
 };
 Q_DECLARE_METATYPE(PipelineState)
@@ -79,14 +79,12 @@ public:
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
     // Current per-view masks in rectified-left coordinates, including historical edits.
     void refineCameraPosesICP(const QHash<quint64,QImage>& masks = {},
-                             double max_translation_m = fs::kDefaultICPTranslationLimitM,
-                             const fs::TsdfOptions& tsdf_options = {});
+                             double max_translation_m = fs::kDefaultICPTranslationLimitM);
     void undoCameraPosesICP();
     void buildTSDF(const QHash<quint64,QImage>& masks, const fs::TsdfOptions& options);
     void clearTSDF();
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
-                     const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,
-                     SharedGPUClouds ma_geometry = {});
+                     const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false);
     void saveScanResults(const QString& directory, const QHash<quint64,QImage>& masks, bool overwrite = false);
     void shutdown();
 signals:
