@@ -622,21 +622,34 @@ void checkInlineMaskDrawing() {
     QCoreApplication::processEvents();
     require(submitted==0,"Drawing or clearing a mask triggered FS/MA reconstruction");
     auto* icp=window.findChild<QPushButton*>("refineCameraPosesICP");
+    auto* translation_limit=window.findChild<QDoubleSpinBox*>("icpTranslationLimit");
     require(icp && !icp->isEnabled(),"ICP must be disabled before matching MA poses are ready");
+    require(translation_limit && translation_limit->value()==30 && translation_limit->suffix()==" mm" &&
+            translation_limit->isEnabled() && !translation_limit->isReadOnly(),
+            "ICP translation limit must be editable in millimetres and default to 30 mm");
+    require(translation_limit->mapTo(&window,QPoint()).x()+translation_limit->width()<=icp->mapTo(&window,QPoint()).x(),
+            "Translation limit must appear immediately before the ICP button");
+    translation_limit->setValue(35.5);
+    require(submitted==0,"Editing the translation limit started ICP automatically");
     auto cameras=std::make_shared<std::vector<PredictedCameraFrame>>(3);
     for (int i=0;i<3;++i) { (*cameras)[i].image_id=i+1; (*cameras)[i].camera_to_world=cv::Matx44d::eye(); }
     state.predicted_cameras=cameras; state.icp_ready=true;
     controller.stateChanged(state);
     require(icp->isEnabled() && submitted==0,"Completing MA must enable manual ICP without running it");
     start->click();
-    require(!icp->isEnabled(),"ICP must not run while a region is being edited");
+    require(!icp->isEnabled() && !translation_limit->isEnabled(),"ICP controls must be disabled while a region is being edited");
     finish->click();
-    require(icp->isEnabled(),"Finishing a region did not restore manual ICP");
+    require(icp->isEnabled() && translation_limit->isEnabled() && translation_limit->value()==35.5,
+            "Finishing a region did not restore manual ICP with the selected limit");
     controller.busyChanged(true);
-    require(!icp->isEnabled(),"ICP must not run concurrently with another worker action");
+    require(!icp->isEnabled() && !translation_limit->isEnabled(),"ICP controls must be disabled during another worker action");
     controller.busyChanged(false);
+    if (!screenshot_directory.isEmpty())
+        require(window.grab().save(screenshot_directory+"/icp-controls.png"),"Cannot save ICP controls screenshot");
+    translation_limit->findChild<QLineEdit*>()->setText("42.5");
     const int before_icp=submitted;
     icp->click();
+    require(translation_limit->value()==42.5,"ICP click did not commit the manually typed translation limit");
     timeout.restart();
     while (!controller.state().action_failed && timeout.elapsed()<5000)
         QCoreApplication::processEvents(QEventLoop::AllEvents,20);
@@ -833,6 +846,13 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             "Scan export must keep the original MA extrinsic poses after ICP");
     require(state.predicted_cameras==refined && geometry==geometry_before && state.ma_clouds==clouds_before,
             "Saving original MA extrinsics changed the active ICP poses or geometry");
+    logs.clear();
+    run([&](auto& w) { w.refineCameraPosesICP(icp_masks,0); });
+    require(logs.join('\n').contains("translation ≤ 0 mm"),"ICP log did not report the requested translation limit");
+    for (int i=0;i<2;++i)
+        for (int r=0;r<3;++r)
+            require((*state.predicted_cameras)[i].camera_to_world(r,3)==(*poses_before)[i].camera_to_world(r,3),
+                    "A zero translation limit allowed the worker to move a camera");
     run([&](auto& w) { w.refineCameraPosesICP(icp_masks); });
     for (int i=0;i<2;++i)
         require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
@@ -864,9 +884,10 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     require(revised_count>=30 && revised_count<cv::countNonZero(depths.front()>0),
             "Historical-mask fixture does not select a usable subset");
     logs.clear();
-    run([&](auto& w) { w.refineCameraPosesICP(icp_masks); });
+    run([&](auto& w) { w.refineCameraPosesICP(icp_masks,.0355); });
     require(logs.contains(QString("ICP input view 1 · %1 valid FS points inside mask").arg(revised_count)) &&
             logs.contains(QString("ICP input view 2 · %1 valid FS points inside mask").arg(cv::countNonZero(depths.back()>0))) &&
+            logs.join('\n').contains("translation ≤ 35.5 mm") &&
             geometry==geometry_before && state.ma_clouds==clouds_before,
             "ICP ignored an edited historical mask, retained a cleared mask, or rebuilt geometry");
     std::cout<<"PASS: ICP applies edited historical masks and cleared masks without reconstructing imported point clouds\n";

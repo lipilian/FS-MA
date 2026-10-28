@@ -7,6 +7,8 @@
 #include <vector>
 
 namespace fs {
+inline constexpr double kDefaultICPTranslationLimitM = .03;
+
 // Borrowed immutable camera-space FS points. device=-1 denotes host memory
 // (also useful for offline verification); otherwise it is a CUDA device index.
 // Only finite XYZ samples with Z>0 and a nonzero selection mask are used.
@@ -30,10 +32,12 @@ struct ICPViewResult {
 
 // tbsa_panorama defaults: reference view 0, accumulated previous views,
 // point-to-plane / Tukey, three scales, reject excessive corrections.
+// max_translation_m is a finite, nonnegative displacement limit in metres.
 // Does not modify input buffers or poses. Cancellation throws via checkpoint;
 // callers should publish all returned poses together only after completion.
 std::vector<ICPViewResult> refine_camera_poses_icp(
     const std::vector<ICPView>& views,
+    double max_translation_m = kDefaultICPTranslationLimitM,
     const std::function<void()>& checkpoint = {},
     const std::function<void(std::size_t, const ICPViewResult&)>& on_view = {});
 } // namespace fs

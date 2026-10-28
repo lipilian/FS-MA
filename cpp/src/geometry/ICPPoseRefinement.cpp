@@ -60,10 +60,12 @@ Cloud cloud(const ICPView& view) {
 }
 
 std::vector<ICPViewResult> refine_camera_poses_icp(
-    const std::vector<ICPView>& views, const std::function<void()>& checkpoint,
+    const std::vector<ICPView>& views, double max_translation_m, const std::function<void()>& checkpoint,
     const std::function<void(std::size_t, const ICPViewResult&)>& on_view) {
     const auto check=[&] { if (checkpoint) checkpoint(); };
     check();
+    if (!std::isfinite(max_translation_m) || max_translation_m<0)
+        throw std::invalid_argument("ICP translation limit must be finite and nonnegative.");
     if (views.size()<2) throw std::runtime_error("ICP requires at least two completed views");
     std::vector<Cloud> sources;
     std::vector<ICPViewResult> results(views.size());
@@ -113,7 +115,7 @@ std::vector<ICPViewResult> refine_camera_poses_icp(
                 result.translation_m=std::sqrt(translation_squared);
                 result.rotation_deg=std::acos(std::clamp((rotation_trace-1)*.5,-1.,1.))*180/std::acos(-1.);
                 result.accepted=rigid(refined) && std::isfinite(result.fitness) && std::isfinite(result.rmse_m) &&
-                    result.fitness>=.3 && result.rmse_m<=.004 && result.translation_m<=.03 && result.rotation_deg<=10;
+                    result.fitness>=.3 && result.rmse_m<=.004 && result.translation_m<=max_translation_m && result.rotation_deg<=10;
                 if (result.accepted) result.camera_to_world=refined;
                 result.message=result.accepted ? "Accepted" : "Rejected; MA pose retained";
             }

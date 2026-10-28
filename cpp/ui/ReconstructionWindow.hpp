@@ -86,7 +86,7 @@ private:
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *denoise_;
-    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_, *mesh_edge_;
+    QDoubleSpinBox *minimum_, *maximum_, *neighbor_distance_, *mesh_edge_, *icp_translation_limit_;
     QLabel *input_, *calibration_, *status_, *time_, *scene_status_, *depth_status_, *steps_;
     QProgressBar* progress_;
     std::array<QWidget*,PipelineState::kMaxCaptures> capture_segments_{};

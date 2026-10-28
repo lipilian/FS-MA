@@ -1,5 +1,6 @@
 #pragma once
 #include "CalibrationWorker.hpp"
+#include "fs/geometry/ICPPoseRefinement.hpp"
 #include "fs/inference/FS.hpp"
 #include "fs/inference/MA-VGGT.hpp"
 #include "fs/inference/SamSegmenter.hpp"
@@ -75,7 +76,8 @@ public:
     // Triangle meshes are available only for single-view FS geometry.
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
     // Current per-view masks in rectified-left coordinates, including historical edits.
-    void refineCameraPosesICP(const QHash<quint64,QImage>& masks = {});
+    void refineCameraPosesICP(const QHash<quint64,QImage>& masks = {},
+                             double max_translation_m = fs::kDefaultICPTranslationLimitM);
     void undoCameraPosesICP();
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,

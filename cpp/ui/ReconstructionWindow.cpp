@@ -196,16 +196,26 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* cloud_source=new QButtonGroup(this); cloud_source->setExclusive(true);
     cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_);
     fs_cloud_->setChecked(true);
+    icp_translation_limit_=decimal(fs::kDefaultICPTranslationLimitM*1000,0,1000," mm");
+    icp_translation_limit_->setObjectName("icpTranslationLimit");
+    icp_translation_limit_->setDecimals(1); icp_translation_limit_->setSingleStep(1);
+    icp_translation_limit_->setKeyboardTracking(false);
+    icp_translation_limit_->setAccessibleName("ICP translation limit");
+    icp_translation_limit_->setToolTip("Maximum camera translation from the original MA pose. Larger corrections are rejected. Applied when you click Refine poses (ICP).");
     refine_poses_=button("Refine poses (ICP)","refineCameraPosesICP");
     refine_poses_->setToolTip("Refine camera poses using valid FS points inside each view's current region mask. View 1 stays fixed. Runs only when clicked.");
     undo_icp_=button("Undo ICP","undoCameraPosesICP");
-    undo_icp_->setToolTip("Restore the original MA camera poses for display and saving.");
+    undo_icp_->setToolTip("Restore the original MA camera poses for display.");
     cloud_controls->addWidget(fs_cloud_); cloud_controls->addWidget(ma_cloud_); cloud_controls->addStretch();
+    auto* translation_label=new QLabel("Translation limit"); translation_label->setBuddy(icp_translation_limit_);
+    cloud_controls->addWidget(translation_label); cloud_controls->addWidget(icp_translation_limit_);
     cloud_controls->addWidget(refine_poses_); cloud_controls->addWidget(undo_icp_);
     connect(refine_poses_,&QPushButton::clicked,this,[this] {
         if (!refine_poses_->isEnabled()) return;
+        icp_translation_limit_->interpretText();
+        const double max_translation_m=icp_translation_limit_->value()/1000;
         const auto masks=captureMasks();
-        controller_.submit([masks](auto& worker) { worker.refineCameraPosesICP(masks); });
+        controller_.submit([masks,max_translation_m](auto& worker) { worker.refineCameraPosesICP(masks,max_translation_m); });
     });
     connect(undo_icp_,&QPushButton::clicked,this,[this] {
         if (!undo_icp_->isEnabled()) return;
@@ -775,6 +785,7 @@ void ReconstructionWindow::refresh() {
         state_.capture_count>=2 && state_.predicted_cameras &&
         state_.predicted_cameras->size()==std::size_t(state_.capture_count);
     refine_poses_->setEnabled(poses_ready);
+    icp_translation_limit_->setEnabled(idle);
     undo_icp_->setEnabled(poses_ready && state_.original_ma_cameras &&
         state_.original_ma_cameras->size()==std::size_t(state_.capture_count));
     const bool importing=!state_.import_directory.isEmpty();

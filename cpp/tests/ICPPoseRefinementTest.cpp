@@ -62,6 +62,21 @@ void run(bool gpu) {
     }
     require(!results[3].accepted && results[3].camera_to_world==views[3].camera_to_world,
             "ICP replaced a non-overlapping view's MA pose");
+    auto limited_views=views;
+    limited_views.resize(2);
+    const auto strict=fs::refine_camera_poses_icp(limited_views,.001);
+    require(strict[1].computed && strict[1].translation_m>.001 && !strict[1].accepted &&
+            strict[1].camera_to_world==limited_views[1].camera_to_world,
+            "A tighter translation limit did not reject the correction and retain the MA pose");
+    const auto relaxed=fs::refine_camera_poses_icp(limited_views,.02);
+    require(relaxed[1].accepted && cv::norm(relaxed[1].camera_to_world-truth)<.003,
+            "Increasing the translation limit did not accept the same recoverable correction");
+    for (double invalid : {-1.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+        bool refused=false;
+        try { fs::refine_camera_poses_icp(limited_views,invalid); }
+        catch (const std::invalid_argument&) { refused=true; }
+        require(refused,"ICP accepted a negative or nonfinite translation limit");
+    }
     // Imported scans retain full point buffers; their current masks are applied
     // only when ICP starts, including to the reference/target cloud.
     auto masked_views=views;
@@ -108,7 +123,7 @@ void run(bool gpu) {
     views[0]=reference;
     bool cancelled=false, stop=false;
     try {
-        fs::refine_camera_poses_icp(views,[&] { if (stop) throw std::runtime_error("cancelled"); },
+        fs::refine_camera_poses_icp(views,fs::kDefaultICPTranslationLimitM,[&] { if (stop) throw std::runtime_error("cancelled"); },
             [&](std::size_t,const fs::ICPViewResult&) { stop=true; });
     } catch (const std::runtime_error& e) { cancelled=std::string(e.what())=="cancelled"; }
     require(cancelled,"ICP swallowed cancellation and returned partially refined poses");
@@ -120,7 +135,7 @@ int main() {
         int devices=0;
         if (cudaGetDeviceCount(&devices)==cudaSuccess && devices>0) run(true);
         else std::cout<<"GPU verification skipped: no CUDA device\n";
-        std::cout<<"PASS: anchored multiview ICP, current per-view masks, empty/misaligned masks, pose convention, rejection, immutable points and cancellation\n";
+        std::cout<<"PASS: anchored multiview ICP, adjustable translation limit, current per-view masks, empty/misaligned masks, pose convention, rejection, immutable points and cancellation\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }
