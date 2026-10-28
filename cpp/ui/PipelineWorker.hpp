@@ -14,7 +14,7 @@ struct ReconstructionSaveOptions {
     bool images{true}, calibration{true}, mask{true}, mesh{true}, depth{true};
 };
 
-enum class CameraMode { Sentech, RealSenseD435 };
+enum class CameraMode { Sentech, Zed };
 
 // Camera/texture snapshots and completed GPU output retained for multi-view work.
 // Full stereo images are needed only for the current pair; the UI owns review images.
@@ -127,7 +127,7 @@ private:
     std::vector<std::pair<QString,QString>> import_pairs_;
     struct ImportCalibration {
         QString directory, description, filename;
-        bool own{true}, compact{false};
+        bool own{true}, compact{false}, rectified{false};
         StereoCalibration calibration;
         std::optional<cv::Size> image_size;
         QByteArray json;

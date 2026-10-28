@@ -44,7 +44,7 @@ InferenceSplashWindow::InferenceSplashWindow(bool calibration_completed) : QWidg
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(28,24,28,24); layout->setSpacing(14);
     auto* step = label(calibration_completed
         ? "CALIBRATION  ✓     →     PREPARING INFERENCE     →     RECONSTRUCTION"
-        : "PREPARING INFERENCE     →     INTEL REALSENSE SCANNING");
+        : "PREPARING INFERENCE     →     STEREOLABS ZED SCANNING");
     step->setObjectName("step"); layout->addWidget(step);
     auto* title = label("Preparing FoundationStereo + SAM 2.1 + MapAnything"); title->setObjectName("title"); layout->addWidget(title);
     layout->addWidget(label("The reconstruction workspace will open when all three models have loaded successfully."));

@@ -1,6 +1,6 @@
 #include "ReconstructionWindow.hpp"
 #include "ScanExport.hpp"
-#include "fs/capture/RealSenseStereoSource.hpp"
+#include "fs/capture/ZedStereoSource.hpp"
 #include "widgets/MaskEditor.hpp"
 #include "widgets/MeshView.hpp"
 #include "widgets/StereoImageView.hpp"
@@ -67,7 +67,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     if (!state_.engine_ready || !state_.sam_ready || !state_.ma_ready)
         throw std::logic_error("Reconstruction window requires loaded FoundationStereo, SAM and MapAnything sessions.");
     setObjectName("reconstructionWindow"); setWindowTitle("FoundationStereo · Reconstruction"); resize(1500, 950); setMinimumSize(1120, 740);
-    if (!calibration) setWindowTitle("FoundationStereo · RealSense Scan");
+    if (!calibration) setWindowTitle("FoundationStereo · ZED Scan");
     setStyleSheet(R"(
         QMainWindow, QWidget#root { background: #f3f6fa; color: #20314a; }
         QWidget { font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -98,21 +98,21 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* root = new QWidget; root->setObjectName("root"); setCentralWidget(root);
     auto* outer = new QVBoxLayout(root); outer->setContentsMargins(22,18,22,18); outer->setSpacing(10);
     auto* step = label(calibration ? "01  /  CALIBRATION  ✓     →     02  /  RECONSTRUCTION"
-                                  : "MODELS READY  ✓     →     INTEL REALSENSE SCANNING");
+                                  : "MODELS READY  ✓     →     STEREOLABS ZED SCANNING");
     step->setObjectName("step"); outer->addWidget(step);
-    auto* title = label(calibration ? "Reconstruction workspace" : "RealSense scan workspace"); title->setObjectName("title"); outer->addWidget(title);
+    auto* title = label(calibration ? "Reconstruction workspace" : "ZED scan workspace"); title->setObjectName("title"); outer->addWidget(title);
     auto* toolbar = new QHBoxLayout;
     capture_toolbar_=toolbar;
     import_ = button("Import folder…", "importCapture"); camera_ = button("Connect cameras", "connectCameras");
     camera_mode_ = new QComboBox; camera_mode_->setObjectName("cameraMode");
     if (calibration) camera_mode_->addItem("Sentech stereo", int(CameraMode::Sentech));
-    camera_mode_->addItem("Intel RealSense D435", int(CameraMode::RealSenseD435));
+    camera_mode_->addItem("Stereolabs ZED", int(CameraMode::Zed));
     camera_mode_->setToolTip(calibration
-        ? "Sentech: confirmed calibration. D435: factory-calibrated IR pair, center-cropped from 1280 × 800 to 960 × 800. Disconnect before switching."
-        : "D435: factory-calibrated IR pair, center-cropped from 1280 × 800 to 960 × 800.");
-    if (!RealSenseStereoSource::available()) {
-        auto* item = static_cast<QStandardItemModel*>(camera_mode_->model())->item(camera_mode_->findData(int(CameraMode::RealSenseD435)));
-        item->setEnabled(false); item->setToolTip("Install librealsense2-dev and rebuild to enable D435 support.");
+        ? "Sentech: confirmed calibration. ZED: rectified RGB, 1920 × 1080 → center crop 1296 × 1080 → 960 × 800. Disconnect before switching."
+        : "ZED: rectified RGB, 1920 × 1080 → center crop 1296 × 1080 → 960 × 800.");
+    if (!ZedStereoSource::available()) {
+        auto* item=static_cast<QStandardItemModel*>(camera_mode_->model())->item(camera_mode_->findData(int(CameraMode::Zed)));
+        item->setEnabled(false); item->setToolTip("Install the Stereolabs ZED SDK and rebuild to enable ZED capture.");
     }
     camera_mode_->setCurrentIndex(camera_mode_->findData(int(state_.camera_mode)));
     retake_ = button("Retake", "retake");
@@ -165,7 +165,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         .arg(QString::fromStdString(calibration->left_serial), QString::fromStdString(calibration->right_serial))
         .arg(calibration->image_size.width).arg(calibration->image_size.height)
         .arg(calibration->checked ? "Independent check performed" : "No independent check (optional)")));
-    else layout->addWidget(label("Live capture uses the RealSense factory IR calibration. No manual calibration is required."));
+    else layout->addWidget(label("Live capture uses the ZED SDK calibration, adjusted for the center crop. No manual calibration is required."));
     settings_layout->addWidget(input_group);
     auto* depth = group("Depth range", layout); auto* form = new QFormLayout;
     depth_panel_ = depth;
@@ -628,7 +628,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(neighbor_distance_,&QDoubleSpinBox::valueChanged,this,depth_settings_changed);
     connect(clear_,&QPushButton::clicked,this,[this] {
         mask_->clearMask();
-        if (!has_confirmed_calibration_ && !inlineMaskMode()) reconstructCurrent();
     });
     connect(overlay,&QCheckBox::toggled,mask_,&MaskEditor::setOverlayVisible);
     connect(brush_size_,&QSpinBox::valueChanged,mask_,&MaskEditor::setBrushSize);
@@ -669,14 +668,6 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     connect(mask_,&MaskEditor::selectionChanged,this,[this] {
         if (inlineMaskMode()) { refresh(); return; }
         reconstruction_valid_=false; refresh();
-        if (!has_confirmed_calibration_ && mask_->hasSelection()) {
-            // Finish draw (or Enter) commits the selection. Wait for its UI
-            // updates to finish before starting work on the frozen input.
-            const auto image_id=state_.image_id;
-            QTimer::singleShot(0,this,[this,image_id] {
-                if (state_.image_id==image_id && mask_->hasSelection()) reconstructCurrent();
-            });
-        }
     });
     connect(mask_,&MaskEditor::hint,status_,&QLabel::setText);
     auto* timer = new QTimer(this); timer->setInterval(200); connect(timer,&QTimer::timeout,this,[this] { if (busy_) time_->setText(QString("Running: %1 s").arg(elapsed_.elapsed()/1000.0,0,'f',1)); }); timer->start();
@@ -684,7 +675,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     refresh();
 }
 bool ReconstructionWindow::inlineMaskMode() const {
-    return !has_confirmed_calibration_ && !state_.import_directory.isEmpty();
+    // All scan sources share per-view drawing and translucent unselected FS
+    // geometry. Only the calibrated fs_gui keeps its separate region tab.
+    return !has_confirmed_calibration_;
 }
 void ReconstructionWindow::finishInlineDraw() {
     if (!inlineMaskMode() || !drawing_mask_ || mask_pending_) return;

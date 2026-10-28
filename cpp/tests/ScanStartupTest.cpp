@@ -1,5 +1,8 @@
 #include "DesktopController.hpp"
 #include "ScanExport.hpp"
+#include "fs/capture/ZedStereoSource.hpp"
+#include <QProgressBar>
+#include <QThread>
 #include "widgets/MeshView.hpp"
 #include "widgets/MaskEditor.hpp"
 #include "widgets/StereoImageView.hpp"
@@ -52,7 +55,7 @@ void selectSaveFolder(QPushButton* save,const QString& directory,bool accept=tru
     require(handled,"Save results did not open the destination folder chooser directly");
 }
 
-QJsonObject checkScanFiles(const QString& directory,int count) {
+QJsonObject checkScanFiles(const QString& directory,int count,cv::Size mask_size) {
     QFile file(directory+"/cameras.json"); require(file.open(QIODevice::ReadOnly),"Missing cameras.json");
     const auto json=QJsonDocument::fromJson(file.readAll()).object();
     require(json.value("views").toArray().size()==count && json.value("intrinsic").toArray().size()==3 &&
@@ -70,7 +73,7 @@ QJsonObject checkScanFiles(const QString& directory,int count) {
         const auto mask=cv::imread((directory+"/mask"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
         const auto depth=cv::imread((directory+"/depth"+number+".tiff").toStdString(),cv::IMREAD_UNCHANGED);
         require(rgb.type()==CV_8UC3 && rgb.size()==cv::Size(960,800),"Invalid scan RGB PNG");
-        require(mask.type()==CV_8UC1 && mask.size()==cv::Size(2448,2048) &&
+        require(mask.type()==CV_8UC1 && mask.size()==mask_size &&
                 cv::countNonZero((mask!=0)&(mask!=255))==0,"Invalid scan mask PNG");
         require(depth.type()==CV_32FC1 && depth.size()==cv::Size(960,800) && cv::checkRange(depth),
                 "Invalid scan float32 depth TIFF");
@@ -185,8 +188,8 @@ void checkUncalibratedPipeline() {
     PipelineState state;
     QObject::connect(&worker, &PipelineWorker::stateChanged, [&](PipelineState update) { state=std::move(update); });
     worker.execute([](auto&) {});
-    require(state.camera_mode==CameraMode::RealSenseD435 && !state.image_camera && !state.has_rectified,
-            "Calibration-free startup must select RealSense without invented intrinsics");
+    require(state.camera_mode==CameraMode::Zed && !state.image_camera && !state.has_rectified,
+            "Calibration-free startup must select ZED without invented intrinsics");
     worker.execute([](auto& w) { w.connectCameras(CameraMode::Sentech); });
     require(state.action_failed && state.status.contains("require confirmed calibration"),
             "Sentech must reject missing calibration without dereferencing it");
@@ -218,6 +221,116 @@ void checkUncalibratedPipeline() {
             "Capture import with its own calibration failed without a calibration session");
     worker.shutdown();
     std::cout<<"PASS: startup without calibration, guarded Sentech/import, missing model, saved capture import\n";
+}
+
+void checkRectifiedImport() {
+    QTemporaryDir dir;
+    require(dir.isValid(),"Cannot create rectified capture fixture");
+    cv::Mat rgb(1080,1296,CV_8UC3);
+    cv::RNG(42).fill(rgb,cv::RNG::UNIFORM,0,256);
+    cv::Mat bgr; cv::cvtColor(rgb,bgr,cv::COLOR_RGB2BGR);
+    for (const auto* name:{"left.png","right.png"})
+        require(cv::imwrite(dir.filePath(name).toStdString(),bgr),"Cannot write rectified capture fixture");
+    // Fractional principal points and unequal fx/fy make a second stereoRectify observable.
+    const cv::Mat k=(cv::Mat_<double>(3,3)<<1531.43,0,926.798-312,0,1530.25,534.157,0,0,1);
+    const cv::Mat d=cv::Mat::zeros(1,5,CV_64F), r=cv::Mat::eye(3,3,CV_64F);
+    const auto write=[&](double tx,double distortion) {
+        cv::FileStorage f(dir.filePath("calibration.json").toStdString(),cv::FileStorage::WRITE);
+        cv::Mat bad_d=d.clone(); bad_d.at<double>(0)=distortion;
+        f << "image_width" << 1296 << "image_height" << 1080 << "images_rectified" << 1
+          << "left_camera_matrix" << k << "right_camera_matrix" << k
+          << "left_distortion" << bad_d << "right_distortion" << d
+          << "right_to_left_rotation" << r
+          << "right_to_left_translation" << (cv::Mat_<double>(3,1)<<tx,0,0);
+    };
+    PipelineWorker worker({}, {}, {}, std::make_shared<std::atomic_bool>(false));
+    PipelineState state; QImage left,right;
+    QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState value) { state=std::move(value); });
+    QObject::connect(&worker,&PipelineWorker::images,[&](QImage l,QImage r,QImage) { left=l; right=r; });
+    write(-.063114874,0);
+    worker.execute([&](auto& w) { w.setImportDirectory(dir.path()); w.importNextPair(true); });
+    const auto expected=QImage(rgb.data,rgb.cols,rgb.rows,rgb.step,QImage::Format_RGB888).copy();
+    require(!state.action_failed && left==expected && right==expected && state.image_camera &&
+            cv::norm(cv::Mat(state.image_camera->intrinsics),k,cv::NORM_INF)==0,
+            "Rectified ZED import resampled pixels or changed crop intrinsics");
+    const auto original_id=state.image_id;
+    for (const auto invalid: {std::pair<double,double>{.063,0},{-.063,.01}}) {
+        write(invalid.first,invalid.second);
+        worker.execute([&](auto& w) { w.setImportDirectory(dir.path()); w.importNextPair(true); });
+        require(state.action_failed && state.image_id==original_id && left==expected,
+                "Invalid rectified calibration was accepted or replaced the retained capture");
+    }
+    worker.shutdown();
+    std::cout<<"PASS: rectified ZED import preserves 1296x1080 RGB and crop K; rejects reversed baseline / residual distortion\n";
+}
+
+// Fast live path: validates the actual SDK source, worker freeze, export/reimport
+// and exact shared FS resize, without requiring geometry in the camera's scene.
+int checkZedCapture(QApplication& app) {
+    require(ZedStereoSource::available(),"ZED SDK is missing from this build");
+    PipelineWorker worker({}, {}, {}, std::make_shared<std::atomic_bool>(false));
+    PipelineState state; QImage live_left,live_right,frozen_left,frozen_right;
+    QObject::connect(&worker,&PipelineWorker::stateChanged,[&](PipelineState value) { state=std::move(value); });
+    QObject::connect(&worker,&PipelineWorker::preview,[&](QImage l,QImage r) { live_left=l; live_right=r; });
+    QObject::connect(&worker,&PipelineWorker::images,[&](QImage l,QImage r,QImage) { frozen_left=l; frozen_right=r; });
+    for (int connection=0;connection<2;++connection) {
+        live_left={}; live_right={};
+        worker.execute([](auto& w) { w.connectCameras(CameraMode::Zed); });
+        require(!state.action_failed && state.connected && state.live,state.status.toUtf8().constData());
+        QElapsedTimer elapsed; elapsed.start();
+        while (live_left.isNull() && elapsed.elapsed()<10000) {
+            app.processEvents(); QThread::msleep(20);
+        }
+        require(live_left.size()==QSize(1296,1080) && live_right.size()==live_left.size(),
+                "ZED preview must preserve the 1296x1080 rectified crop");
+        worker.execute([](auto& w) { w.freeze(); });
+        require(!state.action_failed && !state.live && state.image_camera &&
+                frozen_left==live_left && frozen_right==live_right,
+                "Freeze must retain the SDK-rectified preview pixels without another remap");
+        worker.execute([](auto& w) { w.disconnectCameras(); });
+        require(!state.connected && !state.live,"ZED did not disconnect cleanly");
+    }
+    QTemporaryDir capture;
+    ReconstructionSaveOptions options;
+    options.mask=options.mesh=options.depth=false;
+    worker.execute([&](auto& w) { w.saveResults(capture.path(),options,{}); });
+    require(!state.action_failed,state.status.toUtf8().constData());
+    cv::FileStorage metadata(capture.filePath("calibration.json").toStdString(),cv::FileStorage::READ);
+    require(int(metadata["images_rectified"])==1 && int(metadata["sensor_width"])==1920 &&
+            int(metadata["sensor_height"])==1080 && int(metadata["crop_x"])==312,
+            "ZED export lost original sensor/crop/rectified metadata");
+    const auto calibration=StereoCalibration::from_file(capture.filePath("calibration.json").toStdString());
+    const auto original_left=frozen_left,original_right=frozen_right;
+    const auto original_camera=*state.image_camera;
+    worker.execute([&](auto& w) { w.setImportDirectory(capture.path()); w.importNextPair(true); });
+    require(!state.action_failed && frozen_left==original_left && frozen_right==original_right &&
+            state.image_camera && state.image_camera->intrinsics==original_camera.intrinsics,
+            "Saved ZED pair does not round-trip with identical RGB and calibration");
+    worker.shutdown();
+
+    const auto& k=original_camera.intrinsics;
+    StereoCameraParameters camera{k(0,0),k(1,1),k(0,2),k(1,2),
+        static_cast<float>(-calibration.right_to_left_translation.at<double>(0))};
+    const cv::Mat left(frozen_left.height(),frozen_left.width(),CV_8UC3,
+                        frozen_left.bits(),frozen_left.bytesPerLine());
+    const cv::Mat right(frozen_right.height(),frozen_right.width(),CV_8UC3,
+                         frozen_right.bits(),frozen_right.bytesPerLine());
+    FS engine;
+    engine.loadEngine("onnx/foundationstereo_800x960_gwc_plugin.engine");
+    engine.set_model_camera_parameters(camera,left.size());
+    engine.prepare_stereo_images(left,right); engine.synchronize();
+    cv::Mat expected; cv::resize(left,expected,{960,800},0,0,cv::INTER_LINEAR);
+    const auto scaled=engine.model_camera_parameters();
+    require(cv::norm(expected,engine.model_left(),cv::NORM_INF)==0,
+            "ZED model input differs from imported-image INTER_LINEAR resize");
+    require(std::abs(scaled.fx-camera.fx*20/27)<1e-9 && std::abs(scaled.fy-camera.fy*20/27)<1e-9 &&
+            std::abs(scaled.cx-camera.cx*20/27)<1e-9 && std::abs(scaled.cy-camera.cy*20/27)<1e-9 &&
+            scaled.baseline_meters==camera.baseline_meters,
+            "1296x1080 to 960x800 must scale K by 20/27 and preserve metric baseline");
+    std::cout<<"PASS: live ZED connect/reconnect, crop, exact freeze/export/reimport and FS INTER_LINEAR resize\n"
+             <<"FS K: fx="<<scaled.fx<<" fy="<<scaled.fy<<" cx="<<scaled.cx<<" cy="<<scaled.cy
+             <<" baseline="<<scaled.baseline_meters<<" m\n";
+    return 0;
 }
 
 void makeImportFixture(const QTemporaryDir& dir) {
@@ -500,7 +613,7 @@ void checkImportMasks() {
     std::cout<<"PASS: optional masks matched by number, exact rectified pixels, absent/zero masks, restart and invalid-mask retries\n";
 }
 
-void checkInlineMaskDrawing() {
+void checkInlineMaskDrawing(bool importing) {
     PipelineController controller({}, {}, {});
     controller.submit([](auto& w) {
         QTimer::singleShot(0,&w,[&w] {
@@ -524,20 +637,28 @@ void checkInlineMaskDrawing() {
     auto* capture=window.findChild<QPushButton*>("capturePair");
     auto* camera=window.findChild<QPushButton*>("connectCameras");
     auto* image_mode=window.findChild<QComboBox*>("cameraImageMode");
+    // This UI fixture supplies synthetic completed geometry and acknowledges
+    // presentation below; the offscreen renderer cannot present it itself.
+    QObject::disconnect(view,&MeshView::renderFailed,&window,nullptr);
     int submitted=0;
     QObject::connect(&controller,&PipelineController::busyChanged,[&](bool busy) { if (busy) ++submitted; });
     PipelineState state;
     state.engine_ready=state.sam_ready=state.ma_ready=state.has_rectified=state.depth_ready=state.gpu_ready=true;
-    state.import_directory="/inline-mask-test"; state.import_total=3; state.import_sequence_started=true;
+    state.camera_mode=CameraMode::Zed; state.connected=!importing;
+    if (importing) {
+        state.import_directory="/inline-mask-test"; state.import_total=3; state.import_sequence_started=true;
+    }
+    const QSize image_size=importing ? QSize(320,240) : QSize(1296,1080);
     const auto seed=[&](int id,const QImage& imported_mask=QImage{}) {
-        state.image_id=id; state.capture_count=state.import_index=id;
+        state.image_id=id; state.capture_count=id;
+        if (importing) state.import_index=id;
         controller.stateChanged(state);
-        QImage left(320,240,QImage::Format_RGB888); left.fill(QColor(id*40,90,150));
+        QImage left(image_size,QImage::Format_RGB888); left.fill(QColor(id*40,90,150));
         controller.images(left,left,imported_mask); controller.depthImage(left,0,1);
         auto cloud=std::make_shared<GPUMeshFrame>(); cloud->image_id=id; cloud->point_cloud=true;
         cloud->stats.point_count=100;
         controller.gpuMeshReady(cloud);
-        QCoreApplication::processEvents(); // The offscreen renderer reports that GL is unavailable.
+        QCoreApplication::processEvents();
         view->gpuMeshPresented(cloud); QCoreApplication::processEvents();
     };
     const auto paint=[&] {
@@ -552,16 +673,16 @@ void checkInlineMaskDrawing() {
     require(save && save->isEnabled(),"Completed view cannot be saved");
     selectSaveFolder(save,{},false);
     require(submitted==0,"Cancelling Save results submitted a worker action");
-    require(!start->isEnabled() && !tabs->isTabVisible(1),"Import drawing must select a camera without a region tab");
+    require(!start->isEnabled() && !tabs->isTabVisible(1),"Scan drawing must select a camera without a region tab");
     const QSize preview_size=stack->size();
     auto* preview=window.findChild<StereoImageView*>("capturePreview");
     const QRect image_area(0,44,preview->width(),preview->height()-44);
     const QImage preview_pixels=preview->grab().toImage().copy(image_area);
     view->cameraClicked(1);
-    require(start->isEnabled() && stack->currentWidget()==editor,"Single imported camera did not select the inline editor");
+    require(start->isEnabled() && stack->currentWidget()==editor,"Single captured/imported camera did not select the inline editor");
     start->click(); QCoreApplication::processEvents();
     require(tools->isVisible() && !capture->isEnabled() && !camera->isEnabled() && !save->isEnabled() && finish->isEnabled() &&
-            tabs->currentIndex()==0 && editor->imageSize()==QSize(320,240),
+            tabs->currentIndex()==0 && editor->imageSize()==image_size,
             "Inline drawing controls or original-resolution image are incorrect");
     auto* reset=window.findChild<QPushButton*>("resetMeshView");
     const QPoint reset_position=reset->mapTo(&window,QPoint());
@@ -580,14 +701,15 @@ void checkInlineMaskDrawing() {
     const auto screenshot_directory=qEnvironmentVariable("FS_SCAN_TEST_SCREENSHOTS");
     if (!screenshot_directory.isEmpty()) {
         QDir().mkpath(screenshot_directory);
-        require(window.grab().save(screenshot_directory+"/inline-mask.png"),"Cannot save inline mask screenshot");
+        require(window.grab().save(screenshot_directory+(importing ? "/inline-mask.png" : "/inline-camera-mask.png")),"Cannot save inline mask screenshot");
     }
     finish->click();
     QCoreApplication::processEvents();
     require(stack->size()==preview_size,"Finishing drawing resized the left preview");
     const auto first=editor->mask();
-    require(!first.isNull() && !tools->isVisible() && start->isEnabled() && capture->isEnabled(),
-            "Finish draw did not retain the mask and return to idle");
+    require(!first.isNull(),"Finish draw did not retain the mask");
+    require(!tools->isVisible() && start->isEnabled(),"Finish draw did not return to idle drawing controls");
+    require(capture->isEnabled(),"Finish draw did not restore the next capture action");
     seed(2);
     view->cameraClicked(2); start->click(); finish->click();
     require(editor->mask().isNull(),"A new camera inherited another view's mask");
@@ -603,7 +725,7 @@ void checkInlineMaskDrawing() {
     image_mode->setCurrentIndex(1);
     require(image_mode->currentIndex()==1 && stack->currentWidget()!=editor,
             "Drawing invalidated depth or prevented switching back to the depth preview");
-    QImage imported_mask(320,240,QImage::Format_Grayscale8); imported_mask.fill(0);
+    QImage imported_mask(image_size,QImage::Format_Grayscale8); imported_mask.fill(0);
     for (int y=0;y<40;++y) for (int x=0;x<40;++x) imported_mask.scanLine(y)[x]=255;
     seed(3,imported_mask);
     view->cameraClicked(3);
@@ -660,10 +782,16 @@ void checkInlineMaskDrawing() {
     controller.stateChanged(state); view->cameraClicked(1);
     require(!icp->isEnabled(),"Restart retained an enabled ICP action");
     require(!start->isEnabled(),"Restart retained an old camera's editable mask");
-    state.import_directory.clear(); controller.stateChanged(state);
-    require(tabs->isTabVisible(1) && editor->parentWidget()!=stack,"Leaving import mode did not restore the existing camera workspace");
+    state.import_directory.clear(); state.connected=state.live=true;
+    controller.stateChanged(state);
+    QImage live(image_size,QImage::Format_RGB888); live.fill(QColor(80,120,160));
+    controller.preview(live,live);
+    require(!tabs->isTabVisible(1) && editor->parentWidget()==stack && stack->currentWidget()==preview &&
+            preview->image()==live && !start->isEnabled(),
+            "Returning to camera preview changed the drawing layout or retained an editable old capture");
     window.allowClose(); controller.stop();
-    std::cout<<"PASS: inline import masks, single/historical camera selection, per-view persistence, clear, idle controls and no FS/MA jobs\n";
+    std::cout<<"PASS: inline "<<(importing ? "import" : "ZED capture")
+             <<" masks, single/historical camera selection, per-view persistence, clear, idle controls and no FS/MA jobs\n";
 }
 
 // Explicit opt-in: exercises real FS/MA inference from files without cameras or OpenGL.
@@ -735,7 +863,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             fs_intrinsic=geometry->camera.intrinsics;
             QTemporaryDir scan_output;
             run([&](auto& w) { w.saveScanResults(scan_output.path(),{{state.image_id,latest_mask}}); });
-            const auto json=checkScanFiles(scan_output.path(),1);
+            const auto json=checkScanFiles(scan_output.path(),1,state.image_camera->image_size);
             if (!latest_mask.isNull()) {
                 const auto exported_mask=QImage(scan_output.filePath("mask01.png")).convertToFormat(QImage::Format_Grayscale8);
                 require(exported_mask==latest_mask,"Imported full-resolution mask failed to round-trip through scan export");
@@ -799,7 +927,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             "Historical SAM editing changed FS/MA output or the import cursor");
     QTemporaryDir scan_output;
     run([&](auto& w) { w.saveScanResults(scan_output.path(),{{ids.front(),historical}}); });
-    const auto json=checkScanFiles(scan_output.path(),2);
+    const auto json=checkScanFiles(scan_output.path(),2,state.image_camera->image_size);
     const auto k=json.value("intrinsic").toArray();
     for (int r=0;r<3;++r) for (int c=0;c<3;++c)
         require(k[r].toArray()[c].toDouble()==fs_intrinsic(r,c),"Export used original/MA intrinsics instead of FS projection intrinsics");
@@ -819,9 +947,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     }
     const auto saved_mask=cv::imread(scan_output.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED);
     const auto gray=historical.convertToFormat(QImage::Format_Grayscale8);
-    cv::Mat expected_mask;
-    cv::resize(cv::Mat(gray.height(),gray.width(),CV_8UC1,const_cast<uchar*>(gray.constBits()),gray.bytesPerLine()),
-               expected_mask,{2448,2048},0,0,cv::INTER_NEAREST);
+    const cv::Mat expected_mask(gray.height(),gray.width(),CV_8UC1,const_cast<uchar*>(gray.constBits()),gray.bytesPerLine());
     require(cv::norm(saved_mask,expected_mask,cv::NORM_INF)==0 &&
             cv::countNonZero(cv::imread(scan_output.filePath("mask02.png").toStdString(),cv::IMREAD_UNCHANGED))==0,
             "Export assigned a historical mask to the wrong view or invented an undrawn mask");
@@ -841,7 +967,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             "ICP moved the anchor, rebuilt geometry, or changed the import cursor");
     QTemporaryDir refined_output;
     run([&](auto& w) { w.saveScanResults(refined_output.path(),{}); });
-    const auto refined_json=checkScanFiles(refined_output.path(),2);
+    const auto refined_json=checkScanFiles(refined_output.path(),2,state.image_camera->image_size);
     require(refined_json.value("views")==json.value("views"),
             "Scan export must keep the original MA extrinsic poses after ICP");
     require(state.predicted_cameras==refined && geometry==geometry_before && state.ma_clouds==clouds_before,
@@ -863,7 +989,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             "Undo ICP did not restore the MA snapshot or changed the retained geometry");
     QTemporaryDir undone_output;
     run([&](auto& w) { w.saveScanResults(undone_output.path(),{}); });
-    const auto undone_json=checkScanFiles(undone_output.path(),2);
+    const auto undone_json=checkScanFiles(undone_output.path(),2,state.image_camera->image_size);
     require(undone_json.value("views")==json.value("views"),
             "Scan export changed the original MA extrinsic poses after Undo ICP");
     run([&](auto& w) { w.refineCameraPosesICP(icp_masks); });
@@ -895,7 +1021,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     run([](auto& w) { w.reconstruct(0,1,{},true,.003F); });
     QTemporaryDir renewed_output;
     run([&](auto& w) { w.saveScanResults(renewed_output.path(),{}); });
-    const auto renewed=checkScanFiles(renewed_output.path(),2);
+    const auto renewed=checkScanFiles(renewed_output.path(),2,state.image_camera->image_size);
     require(state.predicted_cameras && !state.original_ma_cameras,
             "A fresh MA inference retained the previous ICP state");
     for (int i=0;i<2;++i) {
@@ -912,9 +1038,9 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     return 0;
 }
 
-// Explicit opt-in: needs the actual engines, D435 and an NVIDIA OpenGL display.
+// Explicit opt-in: needs the actual engines, ZED and an NVIDIA OpenGL display.
 int checkLiveScan(QApplication& app) {
-    DesktopController desktop(DesktopController::StartupMode::RealSenseScan);
+    DesktopController desktop(DesktopController::StartupMode::ZedScan);
     QPointer<ReconstructionWindow> window;
     bool finished=false, passed=false;
     QString failure;
@@ -937,7 +1063,8 @@ int checkLiveScan(QApplication& app) {
             require(mode->currentIndex()==0 && left->image()==captured_left.value(id) &&
                     right->image()==captured_right.value(id), "Camera click did not restore its original stereo pair");
             mode->setCurrentIndex(1);
-            require(mode->currentIndex()==1 && left->image().size()==captured_left.value(id).size() &&
+            // RGB retains the 1296x1080 crop; depth is on the fixed FS input grid.
+            require(mode->currentIndex()==1 && left->image().size()==QSize(960,800) &&
                     left->image()!=captured_left.value(id), "Selected view did not retain its own depth preview");
         }
         view->cameraClicked(preview_ids.back());
@@ -989,8 +1116,8 @@ int checkLiveScan(QApplication& app) {
                     require(mesh_edge && mesh_edge->value()==.01, "GPU mesh edge limit must default to 10 mm");
                     require(!window->findChild<QDoubleSpinBox*>("meshMaxDepthJump"), "Removed mesh depth-jump control still exists");
                     const auto* mode=window->findChild<QComboBox*>("cameraMode");
-                    require(mode && mode->count()==1 && mode->currentData().toInt()==int(CameraMode::RealSenseD435),
-                            "Scan workspace must default to RealSense only");
+                    require(mode && mode->count()==1 && mode->currentData().toInt()==int(CameraMode::Zed),
+                            "Scan workspace must default to ZED only");
                     const auto* calibration=window->findChild<QCheckBox*>("captureCalibration");
                     require(calibration && calibration->isChecked() && !calibration->isEnabled(),
                             "Capture import must use the capture's calibration");
@@ -1065,11 +1192,11 @@ int checkLiveScan(QApplication& app) {
                             return;
                         }
                         if (!(mesh->point_cloud ? mesh->stats.point_count : mesh->stats.triangle_count)) {
-                            finish("RealSense reconstruction produced empty geometry"); return;
+                            finish("ZED reconstruction produced empty geometry"); return;
                         }
                         ++presented;
                         if (presented==1 && mesh->point_cloud) { finish("First capture displayed intermediate points instead of the automatic GPU mesh"); return; }
-                        std::cout<<"RealSense geometry displayed: "<<mesh->stats.point_count<<" points, "<<mesh->stats.triangle_count<<" triangles\n";
+                        std::cout<<"ZED geometry displayed: "<<mesh->stats.point_count<<" points, "<<mesh->stats.triangle_count<<" triangles\n";
                         if (presented==1) QTimer::singleShot(350,&app,[&] {
                             if (finished || !window) return;
                             try {
@@ -1112,8 +1239,14 @@ int checkLiveScan(QApplication& app) {
                                     require(!window->findChild<CaptureTransition*>()->isRunning(), "Image transfer did not finish");
                                     require(hasGreenCamera(canvas),"First FS camera did not turn green after landing");
                                     screenshot("landed");
-                                    tabs->setCurrentIndex(1);
+                                    require(!tabs->isTabVisible(1),"ZED capture exposed a separate region tab");
+                                    window->findChild<MeshView*>()->cameraClicked(mesh->image_id);
+                                    auto* start=window->findChild<QPushButton*>("startDraw");
+                                    require(start->isEnabled(),"Captured camera cannot start inline mask drawing");
+                                    start->click();
                                     auto* editor=window->findChild<MaskEditor*>();
+                                    require(tabs->currentIndex()==0 && editor->isVisible() && editor->imageSize()==QSize(1296,1080),
+                                            "ZED mask drawing did not stay on the original-resolution scene preview");
                                     window->findChild<QPushButton*>("maskBrush")->click();
                                     const QPointF center=editor->rect().center();
                                     const QPointF global=editor->mapToGlobal(center.toPoint());
@@ -1122,10 +1255,13 @@ int checkLiveScan(QApplication& app) {
                                     QApplication::sendEvent(editor,&press); QApplication::sendEvent(editor,&release);
                                     auto* confirm=window->findChild<QPushButton*>("finishDraw");
                                     require(confirm->isEnabled(), "Region cannot be confirmed after brush input");
-                                    confirm->click(); // Must rebuild without any manual reconstruction button.
-                                } else if (presented==2) {
-                                    tabs->setCurrentIndex(1);
-                                    window->findChild<QPushButton*>("clearMask")->click();
+                                    confirm->click();
+                                    require(editor->hasSelection() && presented==1 && capture->isEnabled() &&
+                                            window->findChild<QPushButton*>("startDraw")->isEnabled(),
+                                            "Confirming a ZED mask rebuilt geometry or did not return to idle");
+                                    screenshot("inline-camera-mask");
+                                    selectSaveFolder(window->findChild<QPushButton*>("openSaveResults"),point_export.path());
+                                    phase=4;
                                 } else {
                                     if (!mesh->point_cloud) {
                                         auto* mode=window->findChild<QComboBox*>("meshMode");
@@ -1147,16 +1283,28 @@ int checkLiveScan(QApplication& app) {
                 }
             }
             if (!window) return;
+            if (window->findChild<QProgressBar*>("calculationProgress")->format().contains("Failed ·"))
+                throw std::runtime_error(window->findChild<QLabel*>("status")->text().toStdString());
             if ((phase==4 || phase==6) && window->findChild<QPushButton*>("openSaveResults")->isEnabled()) {
                 const auto status=window->findChild<QLabel*>("status")->text();
                 if (!status.startsWith("Saved ")) throw std::runtime_error(status.toStdString());
-                checkScanFiles(phase==4 ? point_export.path() : mesh_export.path(),1);
+                checkScanFiles(phase==4 ? point_export.path() : mesh_export.path(),1,{1296,1080});
                 if (phase==4) {
+                    require(cv::countNonZero(cv::imread(point_export.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED))>0,
+                            "Inline ZED mask was not exported with its captured view");
+                    window->findChild<QPushButton*>("startDraw")->click();
+                    window->findChild<QPushButton*>("clearMask")->click();
+                    window->findChild<QPushButton*>("finishDraw")->click();
+                    require(presented==1 && !window->findChild<MaskEditor*>()->hasSelection() &&
+                            window->findChild<QPushButton*>("capturePair")->isEnabled(),
+                            "Clearing a ZED mask rebuilt geometry or did not return to idle");
                     phase=5; window->buildMeshGPU(); // Function remains available without a button.
                 } else {
                     const auto points_depth=cv::imread(point_export.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     const auto mesh_depth=cv::imread(mesh_export.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     require(cv::norm(points_depth,mesh_depth,cv::NORM_INF)==0, "GPU mesh build changed the saved depth");
+                    require(cv::countNonZero(cv::imread(mesh_export.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED))==0,
+                            "Cleared ZED mask was not retained for export");
                     require(captured_views()==1, "Mesh export changed the captured view count");
                     auto* capture=window->findChild<QPushButton*>("capturePair");
                     require(capture->isEnabled() && capture->text()=="Capture more", "Cannot start the next capture");
@@ -1236,7 +1384,7 @@ int checkLiveScan(QApplication& app) {
             }
             if (phase==14 && retake->isEnabled()) {
                 require(window->findChild<QLabel*>("status")->text().startsWith("Saved "), "Multi-view scan export failed");
-                checkScanFiles(ma_export.path(),5);
+                checkScanFiles(ma_export.path(),5,{1296,1080});
                 phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); return;
             }
             if (phase==11 && capture->isEnabled()) {
@@ -1259,6 +1407,12 @@ int checkLiveScan(QApplication& app) {
                 ready_ticks=0;
                 if (phase==0) { camera->click(); phase=1; }
                 else {
+                    const auto depth_limit=qEnvironmentVariable("FS_SCAN_TEST_MAX_DEPTH");
+                    if (!depth_limit.isEmpty()) {
+                        bool ok=false; const double maximum=depth_limit.toDouble(&ok);
+                        require(ok && std::isfinite(maximum) && maximum>0,"Invalid FS_SCAN_TEST_MAX_DEPTH");
+                        window->findChild<QDoubleSpinBox*>("maximumDepth")->setValue(maximum);
+                    }
                     capture->click(); phase=3;
                     require(preview->isProcessing(), "Capture did not enter the calculation state");
                     require(!window->findChild<CaptureTransition*>()->isRunning(), "Transfer started before calculation");
@@ -1271,11 +1425,11 @@ int checkLiveScan(QApplication& app) {
             }
         } catch (const std::exception& error) { finish(QString::fromUtf8(error.what())); }
     });
-    QTimer::singleShot(180000,&app,[&] { finish("Timed out waiting for RealSense startup / capture / display"); });
+    QTimer::singleShot(180000,&app,[&] { finish("Timed out waiting for ZED startup / capture / display"); });
     desktop.show(); poll.start(200);
     app.exec();
     require(passed, failure.isEmpty() ? "Scan closed before producing a point cloud" : failure.toUtf8().constData());
-    std::cout<<"PASS: D435 default FS points for 1–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, scan dataset export and clean shutdown\n";
+    std::cout<<"PASS: ZED default FS points for 1–5 views and retake, manual MA selection, camera transfers, restart, region updates, GPU wireframe, scan dataset export and clean shutdown\n";
     std::cout<<"PASS: camera selection restores each original stereo pair and depth in FS/MA modes, replaces retaken images and clears on restart\n";
     return 0;
 }
@@ -1283,6 +1437,7 @@ int checkLiveScan(QApplication& app) {
 
 int main(int argc, char** argv) {
     const bool live=argc==2 && std::string(argv[1])=="--live";
+    const bool zed_capture=argc==2 && std::string(argv[1])=="--zed-capture";
     const bool imported=argc==4 && std::string(argv[1])=="--import";
     if (!live) qputenv("QT_QPA_PLATFORM","offscreen");
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
@@ -1291,14 +1446,17 @@ int main(int argc, char** argv) {
     cv::setNumThreads(4);
     try {
         if (live) return checkLiveScan(app);
+        if (zed_capture) return checkZedCapture(app);
         if (imported) return checkImportedScan(QString::fromLocal8Bit(argv[2]),QString::fromLocal8Bit(argv[3]));
         checkCapturePresentation();
         checkUncalibratedPipeline();
+        checkRectifiedImport();
         checkImportFolder();
         checkRectificationCache();
         checkImportControls();
         checkImportMasks();
-        checkInlineMaskDrawing();
+        checkInlineMaskDrawing(true);
+        checkInlineMaskDrawing(false);
         return 0;
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;

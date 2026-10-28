@@ -1,6 +1,6 @@
 #include "PipelineWorker.hpp"
 #include "ScanExport.hpp"
-#include "fs/capture/RealSenseStereoSource.hpp"
+#include "fs/capture/ZedStereoSource.hpp"
 #include <QDir>
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -57,6 +57,23 @@ QString findImportMask(const QDir& directory,const QString& left_name) {
 }
 QImage image(const cv::Mat& rgb) {
     return QImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888).copy();
+}
+StereoCameraParameters rectifiedCamera(const StereoCalibration& calibration) {
+    cv::Mat k, right, rotation, translation;
+    calibration.left_camera_matrix.convertTo(k,CV_64F);
+    calibration.right_camera_matrix.convertTo(right,CV_64F);
+    calibration.right_to_left_rotation.convertTo(rotation,CV_64F);
+    calibration.right_to_left_translation.reshape(1,3).convertTo(translation,CV_64F);
+    if (k.size()!=cv::Size(3,3) || right.size()!=k.size() || rotation.size()!=k.size() ||
+        translation.size()!=cv::Size(1,3) || cv::norm(k,right,cv::NORM_INF)>1e-6 ||
+        cv::norm(calibration.left_distortion,cv::NORM_INF)>1e-9 ||
+        cv::norm(calibration.right_distortion,cv::NORM_INF)>1e-9 ||
+        cv::norm(rotation,cv::Mat::eye(3,3,CV_64F),cv::NORM_INF)>1e-6 ||
+        translation.at<double>(0)>=0 || std::abs(translation.at<double>(1))>1e-9 ||
+        std::abs(translation.at<double>(2))>1e-9)
+        throw std::runtime_error("Rectified capture requires equal intrinsics, zero distortion and a horizontal left-to-right baseline.");
+    return {k.at<double>(0,0),k.at<double>(1,1),k.at<double>(0,2),k.at<double>(1,2),
+            static_cast<float>(-translation.at<double>(0))};
 }
 fs::MeshCamera meshCamera(const StereoFrame& frame, cv::Size mesh_size) {
     const auto camera=frame.rectified_camera_parameters();
@@ -176,8 +193,8 @@ PipelineWorker::PipelineWorker(ConfirmedCalibration calibration, QString path, S
         camera_size_ = confirmed_->image_size;
         camera_calibration_json_ = QByteArray::fromStdString(fs::calibration::serialize(*confirmed_));
     } else {
-        state_.camera_mode = CameraMode::RealSenseD435;
-        state_.calibration = "RealSense factory calibration will be read when the camera connects.";
+        state_.camera_mode = CameraMode::Zed;
+        state_.calibration = "ZED SDK calibration will be read when the camera connects.";
     }
     camera_calibration_description_ = confirmed_path_;
     camera_calibration_filename_ = state_.calibration_filename;
@@ -287,7 +304,7 @@ void PipelineWorker::prepare(std::unique_ptr<StereoFrame> frame, QString input, 
     state_.image_camera = meshCamera(*frame_, frame_->rectified_left().size());
     ++state_.image_id; if (sam_) sam_->clearImage(); publish();
     emit images(image(frame_->rectified_left()), image(frame_->rectified_right()),std::move(rectified_mask));
-    const QString preparation = already_rectified ? "rectified by camera"
+    const QString preparation = already_rectified ? "already rectified"
         : QString("rectified in %1 ms").arg(elapsed.elapsed());
     state_.status = QString("Pair ready · %1 × %2 · %3. Reconstruct the full image or optionally select a region.")
         .arg(frame_->left().cols).arg(frame_->left().rows).arg(preparation);
@@ -387,6 +404,7 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
         if (use_capture_calibration) {
             cv::FileStorage metadata(calibration_path.toStdString(),cv::FileStorage::READ);
             snapshot.compact=metadata["left_camera_matrix"].empty() && !metadata["K1"].empty();
+            snapshot.rectified=!metadata["images_rectified"].empty() && int(metadata["images_rectified"])!=0;
             snapshot.calibration=StereoCalibration::from_file(calibration_path.toStdString());
             if (snapshot.compact) {
                 // Compact K1/D1/K2/D2/R/T files use millimetres; reconstruction uses metres.
@@ -422,6 +440,8 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
     if (snapshot.image_size && (left.size()!=*snapshot.image_size || right.size()!=*snapshot.image_size))
         throw std::runtime_error("Capture images do not match calibration image dimensions.");
     auto frame=std::make_unique<StereoFrame>(left,right,snapshot.calibration);
+    if (snapshot.rectified)
+        frame=std::make_unique<StereoFrame>(left,right,rectifiedCamera(snapshot.calibration));
     QByteArray calibration_json=snapshot.json;
     if (snapshot.compact) {
         // Build export metadata from the cached metre-based values and this pair's grid.
@@ -432,6 +452,7 @@ void PipelineWorker::loadCapture(const QString& directory, const QString& left_n
             << "left_distortion" << calibration.left_distortion << "right_distortion" << calibration.right_distortion
             << "right_to_left_rotation" << calibration.right_to_left_rotation
             << "right_to_left_translation" << calibration.right_to_left_translation;
+        if (snapshot.rectified) normalized << "images_rectified" << 1;
         calibration_json=QByteArray::fromStdString(normalized.releaseAndGetString());
     }
     checkpoint(); prepare(std::move(frame),dir.absolutePath()+"\n"+left_name+" / "+right_name,
@@ -459,25 +480,25 @@ void PipelineWorker::connectCameras(CameraMode mode) {
     state_.import_sequence_started=false; import_pairs_.clear();
     import_calibration_.reset();
     if (mode == CameraMode::Sentech && !confirmed_)
-        throw std::runtime_error("Sentech cameras require confirmed calibration. Use fs_gui to calibrate them, or connect an Intel RealSense D435.");
+        throw std::runtime_error("Sentech cameras require confirmed calibration. Use fs_gui to calibrate them, or connect a Stereolabs ZED camera.");
     if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
     disconnectCameras();
-    state_.status = mode == CameraMode::RealSenseD435 ? "Connecting Intel RealSense D435…" : "Connecting Sentech stereo cameras…";
+    state_.status = mode == CameraMode::Zed ? "Connecting Stereolabs ZED…" : "Connecting Sentech stereo cameras…";
     publish();
     SharedStereoSource next;
     StereoCalibration calibration;
     cv::Size size;
     QString description, filename;
     QByteArray json;
-    if (mode == CameraMode::RealSenseD435) {
-        auto realsense = std::make_shared<RealSenseStereoSource>();
-        realsense->start();
-        calibration = realsense->calibration(); size = realsense->image_size();
-        description = QString("D435 %1 · factory IR calibration · 1280 × 800 → center crop 960 × 800")
-            .arg(QString::fromStdString(realsense->serial()));
-        filename = "calibration.json";
-        json = QByteArray::fromStdString(realsense->calibration_json());
-        next = std::move(realsense);
+    if (mode == CameraMode::Zed) {
+        auto zed=std::make_shared<ZedStereoSource>();
+        zed->start();
+        calibration=zed->calibration(); size=zed->image_size();
+        description=QString("ZED %1 · SDK rectified RGB · 1920 × 1080 → center crop 1296 × 1080 → FS 960 × 800")
+            .arg(QString::fromStdString(zed->serial()));
+        filename="calibration.json";
+        json=QByteArray::fromStdString(zed->calibration_json());
+        next=std::move(zed);
     } else {
         SentechStereoOptions options;
         options.left = confirmed_->left_serial; options.right = confirmed_->right_serial; options.exposure_us = exposure_us_;
@@ -565,12 +586,12 @@ void PipelineWorker::cleanCaptures() {
     emit log(state_.status);
 }
 QString PipelineWorker::liveStatus() const {
-    if (state_.camera_mode == CameraMode::RealSenseD435)
-        return "D435 · live IR rectified by camera · 960 × 800 center crop · capture to freeze a stereo pair.";
+    if (state_.camera_mode == CameraMode::Zed)
+        return "ZED · live rectified RGB · 1296 × 1080 center crop · capture to reconstruct at 960 × 800.";
     return "Live rectified RGB · capture to freeze a stereo pair. Independent streams; hold the subject still.";
 }
 void PipelineWorker::emitPreview() {
-    if (state_.camera_mode == CameraMode::RealSenseD435) {
+    if (state_.camera_mode == CameraMode::Zed) {
         emit preview(image(latest_->left.rgb), image(latest_->right.rgb));
         return;
     }
@@ -614,18 +635,12 @@ void PipelineWorker::freeze() {
     if (!state_.live || !latest_ || last_pair_.elapsed() > 1000)
         throw std::runtime_error("No fresh stereo pair. Wait for the live preview and capture again.");
     std::unique_ptr<StereoFrame> frame;
-    if (state_.camera_mode == CameraMode::RealSenseD435) {
-        // D435 Y8 streams are already rectified. Keep the cropped SDK intrinsics
-        // and horizontal baseline instead of generating new projection matrices.
-        const auto& k = camera_calibration_.left_camera_matrix;
-        const StereoCameraParameters camera{k.at<double>(0,0), k.at<double>(1,1),
-            k.at<double>(0,2), k.at<double>(1,2),
-            static_cast<float>(std::abs(camera_calibration_.right_to_left_translation.at<double>(0)))};
-        frame = std::make_unique<StereoFrame>(latest_->left.rgb, latest_->right.rgb, camera);
+    if (state_.camera_mode == CameraMode::Zed) {
+        frame=std::make_unique<StereoFrame>(latest_->left.rgb,latest_->right.rgb,rectifiedCamera(camera_calibration_));
     } else {
         frame = std::make_unique<StereoFrame>(latest_->left.rgb, latest_->right.rgb, camera_calibration_);
     }
-    const QString input = (state_.camera_mode == CameraMode::RealSenseD435 ? "D435 IR · " : "Sentech · ") + QString("Camera capture · L #%1 / R #%2 · host gap %3 ms")
+    const QString input = (state_.camera_mode == CameraMode::Zed ? "ZED RGB · " : "Sentech · ") + QString("Camera capture · L #%1 / R #%2 · host gap %3 ms")
         .arg(latest_->left.frame_id).arg(latest_->right.frame_id)
         .arg(fs::calibration::arrival_skew(*latest_) / 1e6, 0, 'f', 1);
     prepare(std::move(frame), input, camera_calibration_description_, camera_calibration_filename_, camera_calibration_json_);
@@ -954,9 +969,10 @@ void PipelineWorker::saveScanResults(const QString& directory, const QHash<quint
         }
         if (!capture.point_cloud) throw std::runtime_error("A completed view has no FS projection parameters.");
         const auto mask=masks.value(capture.image_id);
-        if (!mask.isNull() && mask.size()!=QSize(capture.image_camera.image_size.width,capture.image_camera.image_size.height))
+        const QSize mask_size(capture.image_camera.image_size.width,capture.image_camera.image_size.height);
+        if (!mask.isNull() && mask.size()!=mask_size)
             throw std::runtime_error("A mask does not match its view's rectified left image.");
-        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_rgb,mask,capture.fs_depth});
+        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_rgb,mask,capture.fs_depth,mask_size});
     }
     state_.status="Saving all scan views…"; publish();
     QElapsedTimer elapsed; elapsed.start();

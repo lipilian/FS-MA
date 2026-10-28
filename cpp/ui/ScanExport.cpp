@@ -25,17 +25,15 @@ template<int N> QJsonArray matrix(const cv::Matx<double,N,N>& value) {
 bool validPose(const cv::Matx44d& pose) {
     return cv::checkRange(cv::Mat(pose)) && pose(3,0)==0 && pose(3,1)==0 && pose(3,2)==0 && pose(3,3)==1;
 }
-QImage exportMask(const QImage& source) {
-    constexpr int width=2448, height=2048;
-    QImage output(width,height,QImage::Format_Grayscale8);
+QImage exportMask(const QImage& source, const QSize& size) {
+    QImage output(size,QImage::Format_Grayscale8);
     if (output.isNull()) throw std::runtime_error("Cannot allocate export mask");
     if (source.isNull()) { output.fill(0); return output; }
     const auto gray=source.convertToFormat(QImage::Format_Grayscale8);
     const cv::Mat input(gray.height(),gray.width(),CV_8UC1,
                         const_cast<uchar*>(gray.constBits()),gray.bytesPerLine());
-    cv::Mat target(height,width,CV_8UC1,output.bits(),output.bytesPerLine());
-    cv::resize(input,target,target.size(),0,0,cv::INTER_NEAREST);
-    cv::threshold(target,target,0,255,cv::THRESH_BINARY);
+    cv::Mat target(size.height(),size.width(),CV_8UC1,output.bits(),output.bytesPerLine());
+    cv::threshold(input,target,0,255,cv::THRESH_BINARY);
     return output;
 }
 }
@@ -72,6 +70,8 @@ QStringList writeScanResults(const QString& directory, const std::vector<ScanExp
             throw std::runtime_error("All views must have the same valid FS projection intrinsics.");
         if (!validPose(view.camera_to_world))
             throw std::runtime_error("Invalid camera-to-world pose in scan results.");
+        if (view.mask_size.isEmpty() || (!view.mask.isNull() && view.mask.size()!=view.mask_size))
+            throw std::runtime_error("Each mask must match its view's rectified left image dimensions.");
         if (view.rgb.size()!=QSize(960,800) || view.rgb.format()!=QImage::Format_RGB888 ||
             view.depth.type()!=CV_32FC1 || view.depth.size()!=cv::Size(960,800) ||
             !cv::checkRange(view.depth,true,nullptr,0,std::numeric_limits<float>::max()))
@@ -101,7 +101,7 @@ QStringList writeScanResults(const QString& directory, const std::vector<ScanExp
             if (!view.rgb.save(&file,"PNG")) throw std::runtime_error("Cannot encode scan RGB PNG");
         });
         queue("mask"+number+".png",[&](auto& file) {
-            if (!exportMask(view.mask).save(&file,"PNG")) throw std::runtime_error("Cannot encode scan mask PNG");
+            if (!exportMask(view.mask,view.mask_size).save(&file,"PNG")) throw std::runtime_error("Cannot encode scan mask PNG");
         });
         queue("depth"+number+".tiff",[&](auto& file) {
             std::vector<uchar> encoded;

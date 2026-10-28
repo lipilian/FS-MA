@@ -39,7 +39,7 @@ void showMainWindow(QWidget* window) {
 } // namespace
 
 DesktopController::DesktopController(StartupMode mode) : mode_(mode) {
-    if (mode_ == StartupMode::RealSenseScan) return;
+    if (mode_ == StartupMode::ZedScan) return;
     calibration_ = std::make_unique<CalibrationController>();
     window_ = std::make_unique<CalibrationWindow>(*calibration_);
     connect(window_.get(), &CalibrationWindow::closeRequested, this, [this] {
@@ -64,7 +64,7 @@ void DesktopController::prepareInference() {
     if (pipeline_ || cancelled_) return;
     try {
         // Model loading and all later inference share one pipeline worker.
-        // RealSense obtains its calibration from the device when it connects.
+        // ZED obtains rectified calibration from the SDK when it connects.
         pipeline_ = std::make_unique<PipelineController>(confirmed_, saved_path_, std::move(source_), camera_exposure_us_);
         splash_ = std::make_unique<InferenceSplashWindow>(mode_ == StartupMode::Calibration);
         connect(splash_.get(), &InferenceSplashWindow::retryRequested, this, &DesktopController::initializeInference);
@@ -108,13 +108,13 @@ void DesktopController::openReconstruction() {
         reconstruction_ = std::make_unique<ReconstructionWindow>(*pipeline_, confirmed_, saved_path_);
         connect(reconstruction_.get(), &ReconstructionWindow::closeRequested, pipeline_.get(), &PipelineController::stop);
         showMainWindow(reconstruction_.get()); splash_->allowClose(); splash_.reset();
-        if (mode_ == StartupMode::RealSenseScan)
-            pipeline_->submit([](auto& worker) { worker.connectCameras(CameraMode::RealSenseD435); });
+        if (mode_ == StartupMode::ZedScan)
+            pipeline_->submit([](auto& worker) { worker.connectCameras(CameraMode::Zed); });
     } catch (const std::exception& e) {
         if (splash_) splash_->showFailure(QString::fromUtf8(e.what()));
     }
 }
 void DesktopController::show() {
-    if (mode_ == StartupMode::RealSenseScan) prepareInference();
+    if (mode_ == StartupMode::ZedScan) prepareInference();
     else showMainWindow(window_.get());
 }

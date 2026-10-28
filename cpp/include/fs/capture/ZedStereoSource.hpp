@@ -5,13 +5,13 @@
 #include <memory>
 #include <string>
 
-// D435 left/right infrared streams, center-cropped from 1280x800 to 960x800.
-// Intrinsics are shifted to the cropped grid. Frames are expanded to RGB for the existing
-// FoundationStereo pipeline; depth still comes from FoundationStereo.
-class RealSenseStereoSource final : public IStereoSource {
+// SDK-rectified RGB at 1920x1080, center-cropped to 1296x1080.
+// FS performs the same INTER_LINEAR resize to 960x800 used for imported images.
+// Calibration describes the cropped grid, in metres; no second rectification.
+class ZedStereoSource final : public IStereoSource {
 public:
-    RealSenseStereoSource();
-    ~RealSenseStereoSource() override;
+    ZedStereoSource();
+    ~ZedStereoSource() override;
     static bool available() noexcept;
     void start() override;
     void stop() noexcept override;

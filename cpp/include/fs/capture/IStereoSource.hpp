@@ -16,7 +16,7 @@ struct StereoCameraPair {
     CameraFrame left;
     CameraFrame right;
     // Synchronization depends on the source: Sentech uses independent streams;
-    // RealSense uses the left/right IR frames from one device frameset.
+    // ZED retrieves both rectified views from one grab.
 };
 
 class IStereoSource {

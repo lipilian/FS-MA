@@ -8,7 +8,7 @@
 class DesktopController : public QObject {
     Q_OBJECT
 public:
-    enum class StartupMode { Calibration, RealSenseScan };
+    enum class StartupMode { Calibration, ZedScan };
     explicit DesktopController(StartupMode mode = StartupMode::Calibration);
     void show();
 private:

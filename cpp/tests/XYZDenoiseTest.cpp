@@ -181,7 +181,7 @@ void checkNormals() {
 }
 
 void checkMasksAndReference() {
-    // Partial CUDA blocks, edges and corners, with the actual 40 cm D435 spacing.
+    // Partial CUDA blocks, edges and corners, at 40 cm with a 644.26 px focal length.
     constexpr int w=17,h=19,center=9*w+8;
     Device device(w*h);
     auto points=plane(w,h,0,0,{0,0,.4},.4/644.259460449219);

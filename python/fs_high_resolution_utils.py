@@ -49,7 +49,7 @@ def _repository_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
         if (candidate / "FoundationStereo").is_dir():
             return candidate
-    raise RuntimeError("请从 FS_realsense 或其子目录启动 notebook。")
+    raise RuntimeError("请从 FS_Engine 或其子目录启动 notebook。")
 
 
 def load_foundation_stereo_model(fs_root: Path, device: Any) -> tuple[Any, Path]:

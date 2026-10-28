@@ -51,11 +51,12 @@ void verify(const QString& directory,const std::vector<ScanExportView>& expected
         for (int y=0;y<800;++y)
             require(std::memcmp(depth.ptr(y),view.depth.ptr(y),960*sizeof(float))==0,"Export changed metric Z-depth bits");
         const auto mask=cv::imread((directory+"/mask"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
-        require(mask.size()==cv::Size(2448,2048) && mask.type()==CV_8UC1,"Mask is not 2048 x 2448 uint8");
+        require(mask.size()==cv::Size(view.mask_size.width(),view.mask_size.height()) && mask.type()==CV_8UC1,
+                "Mask did not preserve its rectified-left image dimensions");
         for (int y=0;y<mask.rows;++y) for (int x=0;x<mask.cols;++x) {
             const int want=view.mask.isNull() ? 0 :
-                view.mask.constScanLine(y*view.mask.height()/mask.rows)[x*view.mask.width()/mask.cols]!=0 ? 255 : 0;
-            require(mask.at<uchar>(y,x)==want,"Mask binary values, view assignment or nearest resize changed");
+                view.mask.constScanLine(y)[x]!=0 ? 255 : 0;
+            require(mask.at<uchar>(y,x)==want,"Export resampled mask pixels or changed their view assignment");
         }
     }
 }
@@ -72,16 +73,20 @@ int main(int argc,char** argv) {
             view.camera_to_world={0,-1,0,i*.03125,1,0,0,-.0625,0,0,1,.125,0,0,0,1};
             view.rgb=QImage(960,800,QImage::Format_RGB888);
             view.depth=cv::Mat(800,960,CV_32FC1);
+            view.mask_size=i<2 ? QSize(1296,1080) : QSize(2448,2048);
             for (int y=0;y<800;++y) for (int x=0;x<960;++x) {
                 auto* pixel=view.rgb.scanLine(y)+x*3;
                 pixel[0]=(x+i*20)%256; pixel[1]=(y+i*40)%256; pixel[2]=(x+y+i*60)%256;
                 view.depth.at<float>(y,x)=(x+y)%7 ? .125f+(x+960*y+i)/1000000.f : 0.f;
             }
-            if (i<4) {
-                view.mask=QImage(i==3 ? 320 : 2448,i==3 ? 240 : 2048,QImage::Format_Grayscale8);
+            if (i!=1 && i!=4) {
+                view.mask=QImage(view.mask_size,QImage::Format_Grayscale8);
                 view.mask.fill(0);
                 for (int y=0;y<view.mask.height()/2;++y)
                     std::memset(view.mask.scanLine(y),255,view.mask.width()/(i+2));
+                // Single-pixel details must survive export without resampling.
+                view.mask.scanLine(17)[31]=0;
+                view.mask.scanLine(view.mask.height()-1)[view.mask.width()-1]=255;
             }
             views.push_back(std::move(view));
         }
@@ -111,6 +116,12 @@ int main(int argc,char** argv) {
         try { writeScanResults(aborted.path(),mismatched); } catch (const std::exception&) { refused=true; }
         require(refused && QDir(aborted.path()).entryList(QDir::Files|QDir::NoDotAndDotDot).isEmpty(),
                 "Export silently shared incompatible intrinsics between views");
+        auto wrong_mask=views;
+        wrong_mask.front().mask_size=QSize(2448,2048);
+        refused=false;
+        try { writeScanResults(aborted.path(),wrong_mask); } catch (const std::exception&) { refused=true; }
+        require(refused && QDir(aborted.path()).entryList(QDir::Files|QDir::NoDotAndDotDot).isEmpty(),
+                "Export resampled a mismatched mask or wrote partial results");
         auto invalid=views;
         invalid.back().camera_to_world(0,3)=std::numeric_limits<double>::quiet_NaN();
         refused=false;
@@ -121,7 +132,7 @@ int main(int argc,char** argv) {
         views.resize(1); views.front().camera_to_world=cv::Matx44d::eye(); views.front().mask={};
         writeScanResults(single.path(),views); verify(single.path(),views);
         std::cout<<"PASS: one extrinsic field per view, exact MA poses and invalid-pose rejection\n";
-        std::cout<<"PASS: one/five-view flat export, exact RGB and float32 depth, binary full-resolution masks, shared K and camera-to-world poses\n";
+        std::cout<<"PASS: one/five-view flat export, exact RGB and float32 depth, native 1296x1080 / 2448x2048 masks, shared K and camera-to-world poses\n";
         std::cout<<"PASS: zero undrawn masks, identity single view, overwrite guard, staged cancellation and incompatible-intrinsic rejection\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }
