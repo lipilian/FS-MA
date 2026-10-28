@@ -14,6 +14,7 @@ struct GPUMeshFrame {
     fs::MeshGPUStats stats;
     fs::MeshCamera camera;
     bool point_cloud{false}; // One GPU vertex slot per pixel, rendered with GL_POINTS.
+    bool world_space{false}; // Compact TSDF geometry: no camera transform, pixel mask or Z>0 clipping.
     cudaStream_t stream{nullptr};
     int device{0};
     std::shared_ptr<const void> stream_owner;
@@ -23,6 +24,11 @@ using SharedGPUMesh = std::shared_ptr<const GPUMeshFrame>;
 Q_DECLARE_METATYPE(SharedGPUMesh)
 using SharedGPUClouds = std::shared_ptr<const std::vector<SharedGPUMesh>>;
 Q_DECLARE_METATYPE(SharedGPUClouds)
+
+struct TsdfScene {
+    SharedGPUMesh mesh, points;
+};
+using SharedTsdfScene = std::shared_ptr<const TsdfScene>;
 
 // Small, immutable display snapshot in MA's predicted world coordinate frame.
 // Intrinsics define each wireframe's shape; camera_to_world defines its pose.

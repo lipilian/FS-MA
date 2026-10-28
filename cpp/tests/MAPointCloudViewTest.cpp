@@ -175,6 +175,52 @@ int main(int argc, char** argv) {
         view.setMAClouds({}); view.setCapturedClouds({}); view.setPredictedCameras({});
         view.setShowMAClouds(false);
         require(snapshot()==no_points,"Clean retained MA point-cloud geometry");
+        // TSDF is compact world-space geometry, including negative Z. It must
+        // bypass FS masks and camera transforms and retain both extraction modes.
+        const auto world_geometry=[&](bool surface) {
+            const auto source=fsGeometry(1,surface,false);
+            std::vector<fs::MeshGPUVertex> vertices(source->buffer->vertex_slots());
+            checked(cudaMemcpy(vertices.data(),source->buffer->vertices(),vertices.size()*sizeof(vertices[0]),cudaMemcpyDeviceToHost));
+            for (auto& vertex:vertices) vertex.z-=.5f;
+            auto buffer=std::make_shared<fs::MeshGPUBuffer>();
+            fs::upload_geometry_gpu(vertices.data(),vertices.size(),*buffer,source->stream);
+            auto frame=std::make_shared<GPUMeshFrame>(*source);
+            frame->buffer=buffer; frame->world_space=true;
+            frame->stats.low[2]-=.5f; frame->stats.high[2]-=.5f;
+            return frame;
+        };
+        auto tsdf=std::make_shared<TsdfScene>();
+        tsdf->points=world_geometry(false); tsdf->mesh=world_geometry(true);
+        view.setCapturedClouds({fs}); view.setTSDF(tsdf,true); view.setFSMasks({},true);
+        view.setMode(0); view.resetView();
+        const auto tsdf_points=snapshot();
+        require(pixels(tsdf_points,false)>500 && pixels(tsdf_points,true)==0,
+                "TSDF lost negative world Z, inherited FS transparency or mixed FS geometry");
+        auto irrelevant_poses=std::make_shared<std::vector<PredictedCameraFrame>>();
+        auto far_pose=cv::Matx44d::eye(); far_pose(0,3)=100;
+        irrelevant_poses->push_back({{},far_pose,1,{}});
+        view.setPredictedCameras(irrelevant_poses);
+        require(snapshot()==tsdf_points,"TSDF world-space geometry was transformed a second time");
+        const auto tsdf_uploads=uploads;
+        view.setMode(1); const auto tsdf_mesh=snapshot();
+        require(tsdf_mesh!=tsdf_points,"TSDF mesh mode retained the point cloud");
+        const auto area_corner=tsdf_mesh.copy(tsdf_mesh.width()/2,tsdf_mesh.height()*3/4,
+            tsdf_mesh.width()/2,tsdf_mesh.height()/4);
+        int area_pixels=0;
+        for (int y=0;y<area_corner.height();++y) for (int x=0;x<area_corner.width();++x) {
+            const auto color=area_corner.pixelColor(x,y);
+            if (color.red()>220 && color.green()>220 && color.blue()>220) ++area_pixels;
+        }
+        require(area_pixels>50,"TSDF mesh area is missing from the lower-right corner");
+        const auto area_screenshot=qEnvironmentVariable("FS_TSDF_AREA_SCREENSHOT");
+        if (!area_screenshot.isEmpty()) require(tsdf_mesh.save(area_screenshot),"Cannot save TSDF area screenshot");
+        view.setMode(2); const auto tsdf_wire=snapshot();
+        require(tsdf_wire!=tsdf_mesh && tsdf_wire!=tsdf_points,"TSDF wireframe mode did not draw mesh edges");
+        view.setMode(0);
+        require(snapshot()==tsdf_points && uploads==tsdf_uploads,"TSDF mode switches changed framing or reuploaded geometry");
+        view.setTSDF({},false); view.setCapturedClouds({}); view.setPredictedCameras({}); view.setFSMasks({},false);
+        require(snapshot()==no_points,"Invalidating TSDF left stale geometry visible");
+        std::cout<<"PASS: TSDF mesh/points/wireframe, negative world Z, no double pose/masking, cached uploads and invalidation\n";
         // Compare the animation destination against actual textured GL pixels,
         // including the top/bottom orientation, perspective and a resized view.
         view.setCamera(fs::MeshCamera{cv::Matx33d(240,0,120,0,255,85,0,0,1),{320,240}});

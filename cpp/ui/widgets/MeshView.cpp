@@ -78,6 +78,12 @@ class MeshCanvas : public QOpenGLWidget {
         dirty_=true;
         update();
     }
+    void setTSDF(SharedTsdfScene scene, bool visible) {
+        if (tsdf_==scene && show_tsdf_==visible) return;
+        if (tsdf_!=scene) captures_dirty_=true;
+        tsdf_=std::move(scene); show_tsdf_=visible;
+        preserveView(); dirty_=true; failed_=false; update();
+    }
     void setCameraPresentation(quint64 active, quint64 highlighted, quint64 hidden) {
         if (active_camera_id_==active && highlighted_camera_id_==highlighted && hidden_image_id_==hidden) return;
         active_camera_id_=active; highlighted_camera_id_=highlighted; hidden_image_id_=hidden;
@@ -366,17 +372,24 @@ void main() {
         std::vector<DrawItem> items;
         const bool captured_points=useCapturedPoints();
         for (const auto& capture:cloud_resources_) {
+            if (show_tsdf_) {
+                if (!tsdf_ || capture->frame!=(mode_==0 ? tsdf_->points : tsdf_->mesh)) continue;
+                items.push_back({capture->frame,&capture->vao,capture->count});
+                continue;
+            }
+            if (isTSDF(capture->frame)) continue;
             if (show_ma_clouds_ != isMACloud(capture->frame)) continue;
             if (!show_ma_clouds_ && capture->frame==hidden_capture_ && !captured_points) continue;
             items.push_back({capture->frame,&capture->vao,capture->count});
         }
-        if (!show_ma_clouds_ && !captured_points && gpu_mesh_ && count_>0) items.push_back({gpu_mesh_,&vao_,count_});
+        if (!show_tsdf_ && !show_ma_clouds_ && !captured_points && gpu_mesh_ && count_>0) items.push_back({gpu_mesh_,&vao_,count_});
         std::stable_partition(items.begin(),items.end(),[&](const auto& item) { return !isHoveredFSCloud(item.frame); });
         const auto draw_geometry=[&](bool translucent, GLenum depth_function=GL_NONE) {
             program_->setUniformValue("translucentPass",translucent);
             program_->setUniformValue("cameraSpace",true);
             program_->setUniformValue("clipInvalid",true);
             for (const auto& item:items) {
+                program_->setUniformValue("clipInvalid",!item.frame->world_space);
                 const bool selection=bindFSMask(item.frame);
                 if (translucent && !selection) continue;
                 const bool surface=!item.frame->point_cloud && mode_!=0;
@@ -461,7 +474,7 @@ void main() {
             gl_->glDisable(GL_STENCIL_TEST);
         }
         program_->release();
-        drawCameraLabels();
+        drawOverlays();
         if (announce_gpu_ && gpu_mesh_) {
             announce_gpu_=false;
             const auto error=gl_->glGetError();
@@ -581,7 +594,7 @@ void main() {
         int first_vertex{-1};
     };
     bool bindFSMask(const SharedGPUMesh& frame) {
-        const bool selection=fs_mask_display_ && !isMACloud(frame);
+        const bool selection=fs_mask_display_ && !frame->world_space && !isMACloud(frame);
         program_->setUniformValue("fsSelectionEnabled",selection);
         const auto source=fs_masks_.constFind(frame->image_id);
         const bool masked=selection && source!=fs_masks_.cend() && !source->isNull() && validCamera(frame->camera);
@@ -610,11 +623,15 @@ void main() {
         return selection;
     }
     bool hasMesh() const {
+        if (show_tsdf_) return tsdf_ && (tsdf_->mesh || tsdf_->points);
         return show_ma_clouds_ ? ma_clouds_ && !ma_clouds_->empty()
             : !captured_clouds_.empty() || gpu_mesh_;
     }
     bool isMACloud(const SharedGPUMesh& mesh) const {
         return ma_clouds_ && std::find(ma_clouds_->begin(),ma_clouds_->end(),mesh)!=ma_clouds_->end();
+    }
+    bool isTSDF(const SharedGPUMesh& mesh) const {
+        return tsdf_ && mesh && (mesh==tsdf_->mesh || mesh==tsdf_->points);
     }
     bool isHoveredFSCloud(const SharedGPUMesh& mesh) const {
         return !show_ma_clouds_ && hovered_camera_id_ && mesh && mesh->point_cloud &&
@@ -631,7 +648,7 @@ void main() {
     }
     QMatrix4x4 cameraPose(const SharedGPUMesh& mesh) const {
         QMatrix4x4 pose;
-        if (!mesh || !mesh->image_id || !predicted_cameras_) return pose;
+        if (!mesh || mesh->world_space || !mesh->image_id || !predicted_cameras_) return pose;
         const auto found=std::find_if(predicted_cameras_->begin(),predicted_cameras_->end(),
             [&](const auto& frame) { return frame.image_id==mesh->image_id; });
         if (found==predicted_cameras_->end()) return pose;
@@ -721,7 +738,9 @@ void main() {
                 add({p.x(),p.y(),p.z()});
             }
         };
-        if (show_ma_clouds_) {
+        if (show_tsdf_) {
+            if (tsdf_) add_gpu(mode_==0 ? tsdf_->points : tsdf_->mesh);
+        } else if (show_ma_clouds_) {
             if (ma_clouds_) for (const auto& frame:*ma_clouds_) add_gpu(frame);
         } else {
             const bool captured_points=useCapturedPoints();
@@ -749,10 +768,11 @@ void main() {
     }
     void uploadCaptures() {
         for (auto it=cloud_resources_.begin();it!=cloud_resources_.end();) {
-            if (isCaptured((*it)->frame) || isMACloud((*it)->frame)) { ++it; continue; }
+            if (isCaptured((*it)->frame) || isMACloud((*it)->frame) || isTSDF((*it)->frame)) { ++it; continue; }
             destroyCapture(**it); it=cloud_resources_.erase(it);
         }
         auto clouds=captured_clouds_;
+        if (tsdf_) { clouds.push_back(tsdf_->mesh); clouds.push_back(tsdf_->points); }
         if (ma_clouds_) clouds.insert(clouds.end(),ma_clouds_->begin(),ma_clouds_->end());
         for (const auto& frame:clouds) {
             if (!frame || !(frame->stats.point_count || frame->stats.triangle_count)) continue;
@@ -976,9 +996,11 @@ void main() {
         if (id && id==hovered_camera_id_) return cv::Vec3f(.65f,.3f,1.f);
         return id && id==highlighted_camera_id_ ? cv::Vec3f(.1f,1.f,.25f) : cv::Vec3f(.1f,.45f,1.f);
     }
-    void drawCameraLabels() {
+    void drawOverlays() {
         label_targets_.clear();
-        if (camera_labels_.empty()) return;
+        const bool show_area=show_tsdf_ && tsdf_ && tsdf_->mesh && tsdf_->mesh->stats.triangle_count &&
+            std::isfinite(tsdf_->mesh->stats.area_m2);
+        if (camera_labels_.empty() && !show_area) return;
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         QFont label_font=font(); label_font.setPixelSize(15); label_font.setWeight(QFont::DemiBold);
@@ -1003,6 +1025,20 @@ void main() {
             text.addText(QPointF(rect.left()+3,rect.top()+3+metrics.ascent()),label_font,label.text);
             painter.strokePath(text,QPen(QColor(17,28,43),3,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
             painter.fillPath(text,label.color);
+        }
+        if (show_area) {
+            // Surface area comes from the extracted TSDF triangles in metres,
+            // independent of camera framing and the selected display mode.
+            const QString text=QString("Mesh area: %1 cm²").arg(tsdf_->mesh->stats.area_m2*1e4,0,'f',2);
+            const qreal box_width=metrics.horizontalAdvance(text)+24;
+            const qreal box_height=metrics.height()+16;
+            const QRectF box(width()-box_width-12,height()-box_height-12,box_width,box_height);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(17,28,43,220));
+            painter.drawRoundedRect(box,6,6);
+            painter.setFont(label_font);
+            painter.setPen(QColor(245,248,252));
+            painter.drawText(box,Qt::AlignCenter,text);
         }
     }
     void rememberCameraQuad(const std::vector<float>& data, int lines) {
@@ -1108,6 +1144,8 @@ void main() {
     QHash<quint64,QImage> fs_masks_;
     QHash<quint64,CameraTexture> mask_textures_;
     SharedPredictedCameras predicted_cameras_;
+    SharedTsdfScene tsdf_;
+    bool show_tsdf_{false};
     SharedPredictedCameras original_cameras_;
     struct CameraLabel { QVector3D anchor; QString text; QColor color; quint64 image_id; };
     std::vector<CameraLabel> camera_labels_;
@@ -1212,6 +1250,9 @@ void MeshView::setCameraPresentation(quint64 active, quint64 highlighted, quint6
 }
 void MeshView::setShowMAClouds(bool enabled) {
     if (canvas_) canvas_->setShowMAClouds(enabled);
+}
+void MeshView::setTSDF(SharedTsdfScene scene, bool visible) {
+    if (canvas_) canvas_->setTSDF(std::move(scene),visible);
 }
 void MeshView::setMode(int mode) {
     if (canvas_)

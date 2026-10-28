@@ -34,6 +34,7 @@ add_library(fs_calibration_ui STATIC
     ui/PipelineController.cpp ui/PipelineController.hpp
     ui/PipelineWorker.cpp ui/PipelineWorker.hpp
     ui/ScanExport.cpp ui/ScanExport.hpp
+    ui/TsdfSettingsDialog.cpp ui/TsdfSettingsDialog.hpp
     ui/widgets/MeshView.cpp ui/widgets/MeshView.hpp
     ui/widgets/CaptureTransition.cpp ui/widgets/CaptureTransition.hpp
     ui/widgets/MaskEditor.cpp ui/widgets/MaskEditor.hpp
@@ -41,7 +42,7 @@ add_library(fs_calibration_ui STATIC
 set_target_properties(fs_calibration_ui PROPERTIES AUTOMOC ON)
 target_include_directories(fs_calibration_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/ui")
 target_link_libraries(fs_calibration_ui PUBLIC Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets fs_calibration fs_sentech_source fs_zed_source)
-target_link_libraries(fs_calibration_ui PRIVATE fs_icp)
+target_link_libraries(fs_calibration_ui PRIVATE fs_icp fs_tsdf)
 target_compile_options(fs_calibration_ui PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(fs_gui app/desktop_main.cpp)

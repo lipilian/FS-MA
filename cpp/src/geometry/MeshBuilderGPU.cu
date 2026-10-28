@@ -196,6 +196,16 @@ MeshGPUBuffer::~MeshGPUBuffer() = default;
 const MeshGPUVertex* MeshGPUBuffer::vertices() const { return impl_->vertices.data; }
 std::size_t MeshGPUBuffer::vertex_slots() const { return impl_->slots; }
 
+void upload_geometry_gpu(const MeshGPUVertex* vertices, std::size_t count, MeshGPUBuffer& output, cudaStream_t stream) {
+    if (!vertices || !count || !stream || count>std::size_t(std::numeric_limits<int>::max())/sizeof(MeshGPUVertex))
+        throw std::invalid_argument("Invalid compact geometry upload");
+    output.impl_->slots=0;
+    output.impl_->vertices.reserve(count);
+    checked(cudaMemcpyAsync(output.impl_->vertices.data,vertices,count*sizeof(MeshGPUVertex),cudaMemcpyHostToDevice,stream),"upload compact geometry");
+    checked(cudaStreamSynchronize(stream),"complete compact geometry upload");
+    output.impl_->slots=count;
+}
+
 MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs& inputs, MeshGPUBuffer& output) {
     output.impl_->slots=0;
     if (!inputs.xyz || !inputs.rgb || !inputs.stream || inputs.width<1 || inputs.height<1 ||

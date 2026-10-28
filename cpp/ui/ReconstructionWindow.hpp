@@ -83,6 +83,9 @@ private:
     QPushButton *import_, *camera_, *retake_, *restart_, *capture_, *start_draw_, *finish_draw_, *clear_;
     QPushButton* manual_reconstruct_{nullptr}; // Only the calibrated fs_gui workspace uses this control.
     QPushButton *refine_poses_, *undo_icp_;
+    QPushButton *tsdf_settings_, *build_tsdf_;
+    fs::TsdfOptions tsdf_options_;
+    SharedTsdfScene displayed_tsdf_;
     QPushButton *sam_box_, *sam_foreground_, *sam_background_, *sam_remove_, *sam_undo_, *brush_, *eraser_;
     QSpinBox* brush_size_;
     QCheckBox *capture_calibration_, *denoise_;
@@ -105,7 +108,7 @@ private:
     MeshView* mesh_view_;
     StereoImageView *preview_, *right_preview_;
     CaptureTransition* capture_transition_;
-    QRadioButton *fs_cloud_, *ma_cloud_;
+    QRadioButton *fs_cloud_, *ma_cloud_, *tsdf_cloud_;
     QComboBox* mesh_mode_;
     QComboBox* camera_image_mode_;
     QComboBox* camera_mode_;

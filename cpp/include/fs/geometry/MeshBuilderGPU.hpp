@@ -58,7 +58,13 @@ private:
     friend MeshGPUStats build_mesh_gpu(const MeshGPUInputs&, MeshGPUBuffer&, double);
     friend MeshGPUStats build_point_cloud_gpu(const MeshGPUInputs&, MeshGPUBuffer&);
     friend MeshGPUStats build_ma_point_cloud_gpu(const MAPointCloudGPUInputs&, MeshGPUBuffer&);
+    friend void upload_geometry_gpu(const MeshGPUVertex*, std::size_t, MeshGPUBuffer&, cudaStream_t);
 };
+
+// Upload compact, completed world-space geometry (e.g. TSDF extraction).
+// Completes before returning; the caller owns the stream and supplies bounds/counts.
+void upload_geometry_gpu(const MeshGPUVertex* vertices, std::size_t count,
+                         MeshGPUBuffer& output, cudaStream_t stream);
 
 // One 16x16-block thread per pixel cell. Four valid corners produce ABD/ADC;
 // three valid corners produce one triangle. Fewer produce none. Point validity:

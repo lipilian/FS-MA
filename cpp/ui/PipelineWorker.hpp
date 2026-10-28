@@ -1,6 +1,7 @@
 #pragma once
 #include "CalibrationWorker.hpp"
 #include "fs/geometry/ICPPoseRefinement.hpp"
+#include "fs/geometry/TsdfFusion.hpp"
 #include "fs/inference/FS.hpp"
 #include "fs/inference/MA-VGGT.hpp"
 #include "fs/inference/SamSegmenter.hpp"
@@ -47,6 +48,7 @@ struct PipelineState {
     SharedPredictedCameras predicted_cameras;
     SharedPredictedCameras original_ma_cameras; // Comparison overlay after manual ICP completes.
     SharedGPUClouds ma_clouds;
+    SharedTsdfScene tsdf;
 };
 Q_DECLARE_METATYPE(PipelineState)
 
@@ -77,8 +79,11 @@ public:
     void buildMeshGPU(const QImage& selection_mask, double max_edge_m = .01);
     // Current per-view masks in rectified-left coordinates, including historical edits.
     void refineCameraPosesICP(const QHash<quint64,QImage>& masks = {},
-                             double max_translation_m = fs::kDefaultICPTranslationLimitM);
+                             double max_translation_m = fs::kDefaultICPTranslationLimitM,
+                             const fs::TsdfOptions& tsdf_options = {});
     void undoCameraPosesICP();
+    void buildTSDF(const QHash<quint64,QImage>& masks, const fs::TsdfOptions& options);
+    void clearTSDF();
     void saveResults(const QString& directory, ReconstructionSaveOptions options,
                      const QImage& selection, SharedGPUMesh gpu_mesh = {}, bool overwrite = false,
                      SharedGPUClouds ma_geometry = {});

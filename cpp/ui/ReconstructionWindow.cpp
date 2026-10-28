@@ -1,4 +1,5 @@
 #include "ReconstructionWindow.hpp"
+#include "TsdfSettingsDialog.hpp"
 #include "ScanExport.hpp"
 #include "fs/capture/ZedStereoSource.hpp"
 #include "widgets/MaskEditor.hpp"
@@ -193,8 +194,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     auto* cloud_controls=new QHBoxLayout;
     fs_cloud_=new QRadioButton("FS"); fs_cloud_->setObjectName("fsPointCloud");
     ma_cloud_=new QRadioButton("MA"); ma_cloud_->setObjectName("maPointCloud");
+    tsdf_cloud_=new QRadioButton("TSDF"); tsdf_cloud_->setObjectName("tsdfGeometry");
     auto* cloud_source=new QButtonGroup(this); cloud_source->setExclusive(true);
-    cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_);
+    cloud_source->addButton(fs_cloud_); cloud_source->addButton(ma_cloud_); cloud_source->addButton(tsdf_cloud_);
     fs_cloud_->setChecked(true);
     icp_translation_limit_=decimal(fs::kDefaultICPTranslationLimitM*1000,0,1000," mm");
     icp_translation_limit_->setObjectName("icpTranslationLimit");
@@ -203,10 +205,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     icp_translation_limit_->setAccessibleName("ICP translation limit");
     icp_translation_limit_->setToolTip("Maximum camera translation from the original MA pose. Larger corrections are rejected. Applied when you click Refine poses (ICP).");
     refine_poses_=button("Refine poses (ICP)","refineCameraPosesICP");
-    refine_poses_->setToolTip("Refine camera poses using valid FS points inside each view's current region mask. View 1 stays fixed. Runs only when clicked.");
+    refine_poses_->setToolTip("Refine camera poses using valid FS points inside each view's current region mask. View 1 stays fixed. Automatically builds TSDF after ICP.");
     undo_icp_=button("Undo ICP","undoCameraPosesICP");
-    undo_icp_->setToolTip("Restore the original MA camera poses for display.");
-    cloud_controls->addWidget(fs_cloud_); cloud_controls->addWidget(ma_cloud_); cloud_controls->addStretch();
+    undo_icp_->setToolTip("Restore the original MA camera poses and rebuild TSDF.");
+    cloud_controls->addWidget(fs_cloud_); cloud_controls->addWidget(ma_cloud_); cloud_controls->addWidget(tsdf_cloud_); cloud_controls->addStretch();
     auto* translation_label=new QLabel("Translation limit"); translation_label->setBuddy(icp_translation_limit_);
     cloud_controls->addWidget(translation_label); cloud_controls->addWidget(icp_translation_limit_);
     cloud_controls->addWidget(refine_poses_); cloud_controls->addWidget(undo_icp_);
@@ -215,13 +217,37 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         icp_translation_limit_->interpretText();
         const double max_translation_m=icp_translation_limit_->value()/1000;
         const auto masks=captureMasks();
-        controller_.submit([masks,max_translation_m](auto& worker) { worker.refineCameraPosesICP(masks,max_translation_m); });
+        const auto options=tsdf_options_;
+        controller_.submit([masks,max_translation_m,options](auto& worker) { worker.refineCameraPosesICP(masks,max_translation_m,options); });
     });
     connect(undo_icp_,&QPushButton::clicked,this,[this] {
         if (!undo_icp_->isEnabled()) return;
-        controller_.submit([](auto& worker) { worker.undoCameraPosesICP(); });
+        const auto masks=captureMasks(); const auto options=tsdf_options_;
+        controller_.submit([masks,options](auto& worker) { worker.undoCameraPosesICP(); worker.buildTSDF(masks,options); });
     });
     scene_layout->addLayout(cloud_controls);
+    tsdf_settings_=button("⚙","tsdfSettings");
+    tsdf_settings_->setFixedSize(34,34);
+    tsdf_settings_->setStyleSheet("QPushButton { border-radius: 17px; padding: 0; font-size: 20px; }");
+    tsdf_settings_->setToolTip("TSDF settings");
+    tsdf_settings_->setAccessibleName("TSDF settings");
+    build_tsdf_=button("Build TSDF","buildTSDF");
+    build_tsdf_->setToolTip("Fuse captured RGB/depth using current masks and ICP poses, or MA poses before ICP. Undrawn masks retain full depth.");
+    cloud_controls->insertWidget(cloud_controls->indexOf(refine_poses_),tsdf_settings_);
+    cloud_controls->addWidget(build_tsdf_);
+    connect(tsdf_settings_,&QPushButton::clicked,this,[this] {
+        TsdfSettingsDialog dialog(tsdf_options_,this);
+        if (dialog.exec()!=QDialog::Accepted) return;
+        const auto previous=tsdf_options_; tsdf_options_=dialog.options();
+        if (previous.voxel_size_mm!=tsdf_options_.voxel_size_mm || previous.truncation_voxels!=tsdf_options_.truncation_voxels ||
+            previous.block_resolution!=tsdf_options_.block_resolution || previous.block_count!=tsdf_options_.block_count ||
+            previous.mesh_weight_threshold!=tsdf_options_.mesh_weight_threshold || previous.point_weight_threshold!=tsdf_options_.point_weight_threshold)
+            controller_.submit([](auto& worker) { worker.clearTSDF(); });
+    });
+    connect(build_tsdf_,&QPushButton::clicked,this,[this] {
+        const auto masks=captureMasks(); const auto options=tsdf_options_;
+        controller_.submit([masks,options](auto& worker) { worker.buildTSDF(masks,options); });
+    });
     camera_image_mode_ = new QComboBox; camera_image_mode_->setObjectName("cameraImageMode");
     camera_image_mode_->addItems({"Left image", "Depth map"});
     camera_image_mode_->setToolTip("Display the rectified left image or Jet depth map in the preview and captured camera image plane.");
@@ -269,6 +295,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
         ma_upload_pending_=checked && displayed_ma_clouds_ && !ma_cloud_valid_;
         refresh();
     });
+    connect(tsdf_cloud_,&QRadioButton::toggled,this,[this] { refresh(); });
     auto* region = new QWidget; region_=region; auto* region_layout = new QVBoxLayout(region);
     mask_ = new MaskEditor; mask_->setObjectName("maskEditor"); region_layout->addWidget(mask_,1);
     auto* overlay = new QCheckBox("Show selection overlay"); overlay->setChecked(true); region_layout->addWidget(overlay);
@@ -432,12 +459,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
                 setCaptureProcessing(false);
             }
             if (!state_.action_failed && state_.ma_clouds && state_.ma_clouds!=displayed_ma_clouds_) presentMAResult();
-            else if (!state_.action_failed && state_.predicted_cameras &&
+            else if (state_.predicted_cameras &&
                      state_.predicted_cameras!=displayed_cameras_) {
                 // ICP and Undo ICP change poses only. Preserve the selected cloud source,
                 // GPU uploads, view framing and the active image/region.
                 displayed_cameras_=state_.predicted_cameras;
                 displayed_original_cameras_=state_.original_ma_cameras;
+            }
+            if (state_.tsdf && state_.tsdf!=displayed_tsdf_) {
+                displayed_tsdf_=state_.tsdf;
+                tsdf_cloud_->setChecked(true);
+                mesh_mode_->setCurrentIndex(displayed_tsdf_->mesh ? 1 : 0);
             }
         }
         refresh();
@@ -599,7 +631,9 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             "These files already exist in the chosen folder:\n"+existing.join("\n")+"\n\nReplace them?",
             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         const QImage selection=exportMask();
-        const SharedGPUMesh gpu_mesh=mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
+        const SharedGPUMesh gpu_mesh=tsdf_cloud_->isChecked() && displayed_tsdf_
+            ? (mesh_mode_->currentIndex()==0 ? displayed_tsdf_->points : displayed_tsdf_->mesh)
+            : mesh_valid_ ? gpu_mesh_result_ : SharedGPUMesh{};
         const SharedGPUClouds ma_geometry=ma_cloud_->isChecked() && ma_cloud_valid_
             ? displayed_ma_clouds_ : SharedGPUClouds{};
         controller_.submit([=](auto& worker) { worker.saveResults(directory,options,selection,gpu_mesh,overwrite,ma_geometry); });
@@ -685,6 +719,7 @@ void ReconstructionWindow::finishInlineDraw() {
     if (selected==capture_previews_.end()) return;
     selected->drawing=mask_->snapshot(); selected->mask=mask_->mask();
     drawing_mask_=false;
+    if (state_.tsdf) controller_.submit([](auto& worker) { worker.clearTSDF(); });
     mask_request_id_=controller_.requestMask(preview_camera_id_,{});
     refresh();
     status_->setText("Mask saved for this view in the current session.");
@@ -757,9 +792,16 @@ void ReconstructionWindow::refresh() {
         const QSignalBlocker fs_blocker(fs_cloud_), ma_blocker(ma_cloud_);
         fs_cloud_->setChecked(true);
     }
+    if (!state_.tsdf || closing_) {
+        displayed_tsdf_.reset();
+        if (tsdf_cloud_->isChecked()) { const QSignalBlocker blocker(tsdf_cloud_); fs_cloud_->setChecked(true); }
+    }
+    const bool show_tsdf=tsdf_cloud_->isChecked() && bool(displayed_tsdf_);
     const bool show_ma=ma_cloud_->isChecked();
+    mesh_view_->setTSDF(displayed_tsdf_,show_tsdf);
     fs_cloud_->setEnabled(!closing_ && !busy_ && !capture_transition_pending_ && !capture_transition_->isRunning());
     ma_cloud_->setEnabled(fs_cloud_->isEnabled() && ma_available);
+    tsdf_cloud_->setEnabled(fs_cloud_->isEnabled() && bool(displayed_tsdf_));
     ma_cloud_->setToolTip(ma_available ? "Display MapAnything's GPU point clouds at the predicted camera poses."
         : "Available after MapAnything finishes inference on at least two captures.");
     mesh_view_->setShowMAClouds(show_ma);
@@ -778,6 +820,7 @@ void ReconstructionWindow::refresh() {
         state_.capture_count>=2 && state_.predicted_cameras &&
         state_.predicted_cameras->size()==std::size_t(state_.capture_count);
     refine_poses_->setEnabled(poses_ready);
+    build_tsdf_->setEnabled(poses_ready); tsdf_settings_->setEnabled(idle);
     icp_translation_limit_->setEnabled(idle);
     undo_icp_->setEnabled(poses_ready && state_.original_ma_cameras &&
         state_.original_ma_cameras->size()==std::size_t(state_.capture_count));
@@ -867,12 +910,19 @@ void ReconstructionWindow::refresh() {
         gpu_mesh_result_.reset(); mesh_view_->setGPUMesh({});
     }
     const bool point_cloud=(mesh_valid_ || gpu_upload_pending_) && gpu_mesh_result_ && gpu_mesh_result_->point_cloud;
-    save_mesh_->setText(show_ma ? "MA point cloud (mesh.ply)"
+    save_mesh_->setText(show_tsdf ? (mesh_mode_->currentIndex()==0 ? "TSDF point cloud (mesh.ply)" : "TSDF mesh (mesh.ply)")
+                              : show_ma ? "MA point cloud (mesh.ply)"
                               : point_cloud ? "FS point cloud (mesh.ply)" : "FS mesh (mesh.ply)");
-    save_mesh_->setToolTip(show_ma ? "Save the displayed MA geometry in its predicted world frame." : "Save the displayed FS geometry as PLY.");
-    mesh_mode_->setEnabled(!show_ma && mesh_valid_ && !transferring);
-    for (int mode : {1,2}) static_cast<QStandardItemModel*>(mesh_mode_->model())->item(mode)->setEnabled(!show_ma && !point_cloud);
-    if ((show_ma || point_cloud) && mesh_mode_->currentIndex()!=0) mesh_mode_->setCurrentIndex(0);
+    save_mesh_->setToolTip(show_tsdf ? "Save the displayed TSDF geometry in world coordinates."
+        : show_ma ? "Save the displayed MA geometry in its predicted world frame." : "Save the displayed FS geometry as PLY.");
+    mesh_mode_->setEnabled(idle && !show_ma && (show_tsdf || mesh_valid_));
+    auto* modes=static_cast<QStandardItemModel*>(mesh_mode_->model());
+    modes->item(0)->setEnabled(!show_tsdf || bool(displayed_tsdf_->points));
+    for (int mode : {1,2}) modes->item(mode)->setEnabled(show_tsdf ? bool(displayed_tsdf_->mesh) : !show_ma && !point_cloud);
+    if (!show_tsdf && (show_ma || point_cloud) && mesh_mode_->currentIndex()!=0) mesh_mode_->setCurrentIndex(0);
+    if (show_tsdf && mesh_mode_->currentIndex()==0 && !displayed_tsdf_->points && displayed_tsdf_->mesh) mesh_mode_->setCurrentIndex(1);
+    if (show_tsdf && mesh_mode_->currentIndex()!=0 && !displayed_tsdf_->mesh && displayed_tsdf_->points) mesh_mode_->setCurrentIndex(0);
+    mesh_view_->setMode(mesh_mode_->currentIndex());
     browse_save_->setEnabled(idle);
     if (open_save_) open_save_->setEnabled(idle && frozen && result_current && state_.capture_count>0);
     for (auto* option:{save_images_,save_calibration_,save_mask_,save_mesh_,save_depth_}) option->setEnabled(idle);
@@ -886,7 +936,8 @@ void ReconstructionWindow::refresh() {
                                           : "Full-resolution confirmed mask in rectified-left image coordinates.");
     save_calibration_name_->setText(state_.calibration_filename);
     const bool any_save=save_images_->isChecked() || save_calibration_->isChecked() || save_mask_->isChecked() || save_mesh_->isChecked() || save_depth_->isChecked();
-    const bool geometry_valid=show_ma ? ma_cloud_valid_ : mesh_valid_ && bool(gpu_mesh_result_);
+    const bool geometry_valid=show_tsdf ? bool(mesh_mode_->currentIndex()==0 ? displayed_tsdf_->points : displayed_tsdf_->mesh)
+        : show_ma ? ma_cloud_valid_ : mesh_valid_ && bool(gpu_mesh_result_);
     const bool can_save=any_save && frozen && (!save_mask_->isChecked() || has_export_mask) &&
         (!save_depth_->isChecked() || result_current) &&
         (!save_mesh_->isChecked() || geometry_valid);
@@ -907,7 +958,11 @@ void ReconstructionWindow::refresh() {
         : importing ? QString("Import folder ready · %1 / %2 pairs imported · Press Import pair.")
             .arg(state_.import_index).arg(state_.import_total)
         : "Connect cameras to preview on the left, or choose an import folder.");
-    if (show_ma && !transferring && !capture_processing_) {
+    if (show_tsdf) {
+        scene_status_->setText(QString("TSDF · %1 triangles · %2 points")
+            .arg(displayed_tsdf_->mesh ? displayed_tsdf_->mesh->stats.triangle_count : 0)
+            .arg(displayed_tsdf_->points ? displayed_tsdf_->points->stats.point_count : 0));
+    } else if (show_ma && !transferring && !capture_processing_) {
         unsigned long long count=0;
         const auto& frames=displayed_ma_clouds_;
         if (frames) for (const auto& frame:*frames) count+=frame->stats.point_count;

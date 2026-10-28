@@ -751,6 +751,14 @@ void checkInlineMaskDrawing(bool importing) {
             "ICP translation limit must be editable in millimetres and default to 35 mm");
     require(translation_limit->mapTo(&window,QPoint()).x()+translation_limit->width()<=icp->mapTo(&window,QPoint()).x(),
             "Translation limit must appear immediately before the ICP button");
+    auto* undo_icp=window.findChild<QPushButton*>("undoCameraPosesICP");
+    auto* tsdf_settings=window.findChild<QPushButton*>("tsdfSettings");
+    auto* build_tsdf=window.findChild<QPushButton*>("buildTSDF");
+    require(undo_icp && tsdf_settings && build_tsdf &&
+            tsdf_settings->mapTo(&window,QPoint()).y()==icp->mapTo(&window,QPoint()).y() &&
+            tsdf_settings->mapTo(&window,QPoint()).x()+tsdf_settings->width()<=icp->mapTo(&window,QPoint()).x() &&
+            undo_icp->mapTo(&window,QPoint()).x()+undo_icp->width()<=build_tsdf->mapTo(&window,QPoint()).x(),
+            "TSDF settings must precede ICP; Build TSDF must follow Undo ICP on the same row");
     translation_limit->setValue(35.5);
     require(submitted==0,"Editing the translation limit started ICP automatically");
     auto cameras=std::make_shared<std::vector<PredictedCameraFrame>>(3);
@@ -955,12 +963,25 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             state.image_id==ids.back() && state.import_index==2 && state.capture_count==2,
             "Saving recomputed geometry/poses or changed the import cursor");
     require(state.icp_ready,"Completed MA did not enable manual ICP");
+    run([&](auto& w) { w.buildTSDF(icp_masks,{}); });
+    require(state.tsdf && state.tsdf->mesh && state.tsdf->points && state.tsdf->mesh->world_space &&
+            state.status.contains("MA poses") && state.predicted_cameras==poses_before && geometry==geometry_before,
+            "Manual TSDF did not use MA poses or modified FS geometry");
+    run([](auto& w) { w.clearTSDF(); });
+    require(!state.tsdf && state.icp_ready,"Mask/settings invalidation retained TSDF or discarded MA poses");
     logs.clear();
     run([&](auto& w) { w.refineCameraPosesICP(icp_masks); });
     for (int i=0;i<2;++i)
         require(logs.contains(QString("ICP input view %1 · %2 valid FS points inside mask")
             .arg(i+1).arg(selected_point_counts[i])),
             "ICP did not receive exactly the valid FS points inside the capture mask");
+    require(state.tsdf && state.tsdf->mesh && state.tsdf->points && state.status.contains("ICP poses"),
+            "ICP did not automatically extract TSDF using its completed pose snapshot");
+    for (const auto& output:{state.tsdf->mesh,state.tsdf->points}) {
+        QTemporaryDir tsdf_output;
+        run([&](auto& w) { w.saveResults(tsdf_output.path(),{false,false,false,true,false},{},output); });
+        require(QFileInfo(tsdf_output.filePath("mesh.ply")).size()>100,"TSDF geometry export failed");
+    }
     const auto refined=state.predicted_cameras;
     require(refined && refined!=poses_before && refined->front().camera_to_world==poses_before->front().camera_to_world &&
             geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
@@ -984,7 +1005,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
                 "Repeated manual ICP compounded the camera correction");
     run([](auto& w) { w.undoCameraPosesICP(); });
-    require(state.predicted_cameras==poses_before && !state.original_ma_cameras && state.icp_ready &&
+    require(!state.tsdf && state.predicted_cameras==poses_before && !state.original_ma_cameras && state.icp_ready &&
             geometry==geometry_before && state.ma_clouds==clouds_before && state.import_index==2,
             "Undo ICP did not restore the MA snapshot or changed the retained geometry");
     QTemporaryDir undone_output;
@@ -996,6 +1017,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     for (int i=0;i<2;++i)
         require(cv::norm((*state.predicted_cameras)[i].camera_to_world-(*refined)[i].camera_to_world)<2e-4,
                 "ICP could not be reapplied consistently after undo");
+    std::cout<<"PASS: TSDF MA fallback, automatic ICP fusion, mask/settings/pose invalidation and world-space PLY export\n";
     std::cout<<"PASS: real-scan ICP with mask-filtered valid FS points, unmasked fallback, immutable geometry, anchored poses, undo/export and reapply\n";
     // Editing a historical view and clearing the current view must affect the
     // next ICP request without reconstructing or reusing an old selection.
@@ -1385,6 +1407,42 @@ int checkLiveScan(QApplication& app) {
             if (phase==14 && retake->isEnabled()) {
                 require(window->findChild<QLabel*>("status")->text().startsWith("Saved "), "Multi-view scan export failed");
                 checkScanFiles(ma_export.path(),5,{1296,1080});
+                require(window->findChild<QPushButton*>("tsdfSettings")->isEnabled() &&
+                        window->findChild<QPushButton*>("buildTSDF")->isEnabled(),"Completed MA did not enable TSDF controls");
+                phase=18; window->findChild<QPushButton*>("buildTSDF")->click(); return;
+            }
+            if (phase==18 && retake->isEnabled()) {
+                require(window->findChild<QLabel*>("status")->text().contains("MA poses") &&
+                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"Manual TSDF did not select the MA-pose fusion result");
+                auto* mode=window->findChild<QComboBox*>("meshMode");
+                require(mode->isEnabled() && mode->currentIndex()==1 && hasSceneContent(window->findChild<QOpenGLWidget*>()),
+                        "TSDF mesh was not displayed");
+                screenshot("tsdf-ma-mesh"); mode->setCurrentIndex(0); phase=19; return;
+            }
+            if (phase==19 && retake->isEnabled()) {
+                require(hasSceneContent(window->findChild<QOpenGLWidget*>()),"TSDF point cloud is empty");
+                screenshot("tsdf-ma-points");
+                window->findChild<QComboBox*>("meshMode")->setCurrentIndex(2);
+                phase=20; window->findChild<QPushButton*>("refineCameraPosesICP")->click(); return;
+            }
+            if (phase==20 && retake->isEnabled()) {
+                require(window->findChild<QLabel*>("status")->text().contains("ICP poses") &&
+                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"ICP did not automatically rebuild and display TSDF");
+                screenshot("tsdf-icp-mesh"); phase=21;
+                window->findChild<QPushButton*>("undoCameraPosesICP")->click(); return;
+            }
+            if (phase==21 && retake->isEnabled()) {
+                require(window->findChild<QLabel*>("status")->text().contains("MA poses") &&
+                        window->findChild<QRadioButton*>("tsdfGeometry")->isChecked(),"Undo ICP did not rebuild TSDF from MA poses");
+                window->findChild<MeshView*>()->cameraClicked(preview_ids.back());
+                window->findChild<QPushButton*>("startDraw")->click();
+                require(window->findChild<QPushButton*>("finishDraw")->isEnabled(),"TSDF view prevented mask editing");
+                window->findChild<QPushButton*>("finishDraw")->click(); phase=22; return;
+            }
+            if (phase==22 && retake->isEnabled()) {
+                require(!window->findChild<QRadioButton*>("tsdfGeometry")->isEnabled() &&
+                        window->findChild<QRadioButton*>("fsPointCloud")->isChecked(),"Mask confirmation retained stale TSDF");
+                std::cout<<"PASS: live TSDF controls, MA fallback, automatic ICP fusion, mesh/points, undo rebuild and mask invalidation\n";
                 phase=11; window->findChild<QPushButton*>("restartCaptures")->click(); return;
             }
             if (phase==11 && capture->isEnabled()) {

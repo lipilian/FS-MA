@@ -25,6 +25,7 @@ class MeshView : public QWidget {
     void setFSMasks(QHash<quint64,QImage> masks, bool enabled = true);
     void setMAClouds(SharedGPUClouds clouds);
     void setShowMAClouds(bool enabled);
+    void setTSDF(SharedTsdfScene scene, bool visible);
     void setPredictedCameras(SharedPredictedCameras cameras);
     // Original MA poses: yellow wireframes without labels, textures or picking.
     void setOriginalCameras(SharedPredictedCameras cameras);
