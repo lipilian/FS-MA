@@ -1575,7 +1575,14 @@
             <a href="#windows-cuda12-trt10-heading" style="color: var(--muted);"><s>Try CUDA 12.9 + TensorRT 10.14 · Archived</s></a>
           </div>
         </details>
-        <a href="#vit-fiew-views-photogrammetry-heading" style="color: #854d0e;">Vit fiew views photogrammetry</a>
+        <details class="toc-group">
+          <summary style="color: #854d0e;">Vit fiew views photogrammetry</summary>
+          <div class="toc-links">
+            <a href="#vit-fiew-views-photogrammetry-heading">Overview</a>
+            <a href="#mapanything-engine-build-heading">MapAnything TensorRT Engine Build</a>
+            <a href="#mapanything-inference-optimization-heading">MapAnything TensorRT Inference Optimization Plan</a>
+          </div>
+        </details>
       </div>
     </nav>
 
@@ -2880,6 +2887,55 @@ cmake --build cpp/build --target fs_gui --parallel
   --noTF32 \
   --skipInference</code></pre>
         <p><code>--noTF32</code> disables TF32; BF16 operations are already encoded in the ONNX graph. <code>--skipInference</code> builds and saves the engine without running the inference benchmark.</p>
+      </article>
+
+      <article class="engine-build-step" aria-labelledby="mapanything-inference-optimization-heading">
+        <h3 id="mapanything-inference-optimization-heading">MapAnything (MA) TensorRT Inference Optimization Plan</h3>
+        <p><strong>Proposed optimizations:</strong> the following changes target MA inference and the surrounding FoundationStereo (FS) pipeline. Implementation and performance validation are pending.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="mapanything-inference-optimization-heading">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Optimization</th>
+                <th scope="col">Planned change</th>
+                <th scope="col">Expected benefit / validation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Output pose + scale only</th>
+                <td>The current GUI uses FS point clouds and consumes only MA camera poses and scale. Remove the DPT dense prediction branch from a pose-only engine.</td>
+                <td>Removes unused computation. Measure the latency reduction and verify the retained pose and scale outputs.</td>
+              </tr>
+              <tr>
+                <th scope="row">Restore attention fusion across the model</th>
+                <td>Address the exported attention implementation in both the 24-layer image encoder and the 16-layer multi-view Transformer; both are affected by the same export path.</td>
+                <td>High priority, especially as the view count increases. Verify fused kernels, latency and numerical differences.</td>
+              </tr>
+              <tr>
+                <th scope="row">Optimize engines by view count</th>
+                <td>Use fixed-shape optimization profiles for 2, 3, 4 and 5 views, and compare builder search settings.</td>
+                <td>May enable faster kernel choices. Benchmark each view count; a speedup is not guaranteed.</td>
+              </tr>
+              <tr>
+                <th scope="row">Pass FS depth to MA directly on the GPU</th>
+                <td>Clean and resize FS depth on the GPU, then convert Z-depth to distance along the camera rays for MA input.</td>
+                <td>Reduces GPU-to-CPU-to-GPU transfers and CPU waiting in the MA input path. Validate preprocessing against the current implementation.</td>
+              </tr>
+              <tr>
+                <th scope="row">Run the new-frame RGB encoder early</th>
+                <td>Start RGB encoding while FS depth is being computed. The image encoder does not depend on depth; geometry fusion waits for the depth result.</td>
+                <td>May shorten end-to-end latency. Measure the complete pipeline because both workloads compete for the same GPU.</td>
+              </tr>
+              <tr>
+                <th scope="row">Allocate workspace and warm up at startup</th>
+                <td>Move initial workspace allocation, runtime initialization and shape preparation into model loading, then warm up the supported view counts.</td>
+                <td>Reduces first-inference latency by moving work to startup; it does not improve steady-state inference speed.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">Keep model weights and input resolution unchanged. Rebuilding engines or changing fused kernels can alter floating-point rounding, so validate pose and scale outputs alongside timing before adopting a change.</p>
       </article>
     </section>
 
