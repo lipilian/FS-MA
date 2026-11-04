@@ -802,7 +802,7 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     state_.icp_ready=false; state_.tsdf.reset();
     CapturedStereoPair capture{state_.image_id,
         meshCamera(*frame_,frame_->rectified_left().size()),
-        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),depth_};
+        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),image(fs_->model_right()),depth_};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
@@ -909,7 +909,7 @@ void PipelineWorker::buildTSDF(const QHash<quint64,QImage>& masks, const fs::Tsd
         const auto& pose=(*state_.predicted_cameras)[i];
         if (pose.image_id!=capture.image_id || !capture.point_cloud || capture.point_cloud->device!=0)
             throw std::runtime_error("TSDF requires matching captured views and poses on CUDA:0.");
-        const auto rgb=capture.fs_rgb.convertToFormat(QImage::Format_RGB888);
+        const auto rgb=capture.fs_left.convertToFormat(QImage::Format_RGB888);
         const auto mask=masks.value(capture.image_id).convertToFormat(QImage::Format_Grayscale8);
         fs::TsdfView view;
         view.rgb=cv::Mat(rgb.height(),rgb.width(),CV_8UC3,const_cast<uchar*>(rgb.constBits()),rgb.bytesPerLine()).clone();
@@ -1024,7 +1024,8 @@ void PipelineWorker::saveScanResults(const QString& directory, const QHash<quint
         const QSize mask_size(capture.image_camera.image_size.width,capture.image_camera.image_size.height);
         if (!mask.isNull() && mask.size()!=mask_size)
             throw std::runtime_error("A mask does not match its view's rectified left image.");
-        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_rgb,mask,capture.fs_depth,mask_size});
+        views.push_back({capture.point_cloud->camera.intrinsics,pose,capture.fs_left,capture.fs_right,
+                         mask,capture.fs_depth,mask_size});
     }
     state_.status="Saving all scan views…"; publish();
     QElapsedTimer elapsed; elapsed.start();

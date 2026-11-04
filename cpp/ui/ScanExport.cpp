@@ -33,7 +33,8 @@ QImage exportMask(const QImage& source, const QSize& size) {
     const cv::Mat input(gray.height(),gray.width(),CV_8UC1,
                         const_cast<uchar*>(gray.constBits()),gray.bytesPerLine());
     cv::Mat target(size.height(),size.width(),CV_8UC1,output.bits(),output.bytesPerLine());
-    cv::threshold(input,target,0,255,cv::THRESH_BINARY);
+    cv::resize(input,target,target.size(),0,0,cv::INTER_NEAREST);
+    cv::threshold(target,target,0,255,cv::THRESH_BINARY);
     return output;
 }
 }
@@ -42,7 +43,8 @@ QStringList scanResultFileNames(int views) {
     QStringList names{"cameras.json"};
     for (int i=0;i<views;++i) {
         const auto number=suffix(i);
-        names << "rgb"+number+".png" << "mask"+number+".png" << "depth"+number+".tiff";
+        names << "left"+number+".png" << "right"+number+".png"
+              << "mask"+number+".png" << "depth"+number+".tiff";
     }
     return names;
 }
@@ -72,10 +74,11 @@ QStringList writeScanResults(const QString& directory, const std::vector<ScanExp
             throw std::runtime_error("Invalid camera-to-world pose in scan results.");
         if (view.mask_size.isEmpty() || (!view.mask.isNull() && view.mask.size()!=view.mask_size))
             throw std::runtime_error("Each mask must match its view's rectified left image dimensions.");
-        if (view.rgb.size()!=QSize(960,800) || view.rgb.format()!=QImage::Format_RGB888 ||
+        if (view.left.size()!=QSize(960,800) || view.left.format()!=QImage::Format_RGB888 ||
+            view.right.size()!=QSize(960,800) || view.right.format()!=QImage::Format_RGB888 ||
             view.depth.type()!=CV_32FC1 || view.depth.size()!=cv::Size(960,800) ||
             !cv::checkRange(view.depth,true,nullptr,0,std::numeric_limits<float>::max()))
-            throw std::runtime_error("Each view requires its completed 960 x 800 RGB and float32 Z depth.");
+            throw std::runtime_error("Each view requires its completed 960 x 800 left/right RGB and float32 Z depth.");
         cameras.append(QJsonObject{{"view",i+1},{"extrinsic",matrix(view.camera_to_world)}});
     }
     const auto json=QJsonDocument(QJsonObject{
@@ -97,11 +100,14 @@ QStringList writeScanResults(const QString& directory, const std::vector<ScanExp
     for (int i=0;i<int(views.size());++i) {
         const auto& view=views[i];
         const auto number=suffix(i);
-        queue("rgb"+number+".png",[&](auto& file) {
-            if (!view.rgb.save(&file,"PNG")) throw std::runtime_error("Cannot encode scan RGB PNG");
+        queue("left"+number+".png",[&](auto& file) {
+            if (!view.left.save(&file,"PNG")) throw std::runtime_error("Cannot encode scan left PNG");
+        });
+        queue("right"+number+".png",[&](auto& file) {
+            if (!view.right.save(&file,"PNG")) throw std::runtime_error("Cannot encode scan right PNG");
         });
         queue("mask"+number+".png",[&](auto& file) {
-            if (!exportMask(view.mask,view.mask_size).save(&file,"PNG")) throw std::runtime_error("Cannot encode scan mask PNG");
+            if (!exportMask(view.mask,view.left.size()).save(&file,"PNG")) throw std::runtime_error("Cannot encode scan mask PNG");
         });
         queue("depth"+number+".tiff",[&](auto& file) {
             std::vector<uchar> encoded;

@@ -27,9 +27,9 @@ void verify(const QString& directory,const std::vector<ScanExportView>& expected
     require(k.size()==3 && views.size()==int(expected.size()),"Wrong intrinsic/view count in JSON");
     for (int r=0;r<3;++r) for (int c=0;c<3;++c)
         require(k[r].toArray()[c].toDouble()==expected.front().intrinsic(r,c),"Export changed FS intrinsics");
-    require(QDir(directory).entryList(QDir::Files|QDir::NoDotAndDotDot).size()==1+3*int(expected.size()) &&
+    require(QDir(directory).entryList(QDir::Files|QDir::NoDotAndDotDot).size()==1+4*int(expected.size()) &&
             QDir(directory).entryList(QDir::Dirs|QDir::NoDotAndDotDot).isEmpty(),
-            "Export did not save exactly one JSON and RGB/mask/depth per view in a flat folder");
+            "Export did not save exactly one JSON and left/right/mask/depth per view in a flat folder");
     for (int i=0;i<int(expected.size());++i) {
         const auto number=QString::number(i+1).rightJustified(2,'0');
         const auto& view=expected[i];
@@ -41,22 +41,29 @@ void verify(const QString& directory,const std::vector<ScanExportView>& expected
             require(pose[r].toArray()[c].toDouble()==view.camera_to_world(r,c),
                     "Export transposed/inverted/rebased an MA pose");
         }
-        const auto rgb=cv::imread((directory+"/rgb"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
-        require(rgb.size()==cv::Size(960,800) && rgb.type()==CV_8UC3,"RGB PNG has incorrect dimensions/type");
-        cv::Mat decoded; cv::cvtColor(rgb,decoded,cv::COLOR_BGR2RGB);
-        for (int y=0;y<800;++y)
-            require(std::memcmp(decoded.ptr(y),view.rgb.constScanLine(y),960*3)==0,"Export changed RGB values or channel order");
+        const auto verify_rgb=[&](const QString& side,const QImage& input) {
+            const auto rgb=cv::imread((directory+"/"+side+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
+            require(rgb.size()==cv::Size(960,800) && rgb.type()==CV_8UC3,"Stereo PNG has incorrect dimensions/type");
+            cv::Mat decoded; cv::cvtColor(rgb,decoded,cv::COLOR_BGR2RGB);
+            for (int y=0;y<800;++y)
+                require(std::memcmp(decoded.ptr(y),input.constScanLine(y),960*3)==0,
+                        "Export changed stereo RGB values, channel order or eye assignment");
+        };
+        verify_rgb("left",view.left);
+        verify_rgb("right",view.right);
         const auto depth=cv::imread((directory+"/depth"+number+".tiff").toStdString(),cv::IMREAD_UNCHANGED);
         require(depth.size()==cv::Size(960,800) && depth.type()==CV_32FC1,"Depth TIFF is not 800 x 960 float32");
         for (int y=0;y<800;++y)
             require(std::memcmp(depth.ptr(y),view.depth.ptr(y),960*sizeof(float))==0,"Export changed metric Z-depth bits");
         const auto mask=cv::imread((directory+"/mask"+number+".png").toStdString(),cv::IMREAD_UNCHANGED);
-        require(mask.size()==cv::Size(view.mask_size.width(),view.mask_size.height()) && mask.type()==CV_8UC1,
-                "Mask did not preserve its rectified-left image dimensions");
+        require(mask.size()==cv::Size(960,800) && mask.type()==CV_8UC1,
+                "Mask is not aligned with the 960 x 800 FS image/depth grid");
         for (int y=0;y<mask.rows;++y) for (int x=0;x<mask.cols;++x) {
+            const int source_y=y*view.mask_size.height()/mask.rows;
+            const int source_x=x*view.mask_size.width()/mask.cols;
             const int want=view.mask.isNull() ? 0 :
-                view.mask.constScanLine(y)[x]!=0 ? 255 : 0;
-            require(mask.at<uchar>(y,x)==want,"Export resampled mask pixels or changed their view assignment");
+                view.mask.constScanLine(source_y)[source_x]!=0 ? 255 : 0;
+            require(mask.at<uchar>(y,x)==want,"Export changed nearest-neighbour mask samples or their view assignment");
         }
     }
 }
@@ -71,12 +78,16 @@ int main(int argc,char** argv) {
             view.intrinsic={602.25,0,481.125,0,603.5,398.625,0,0,1};
             // First camera deliberately has a nonidentity rotation/translation.
             view.camera_to_world={0,-1,0,i*.03125,1,0,0,-.0625,0,0,1,.125,0,0,0,1};
-            view.rgb=QImage(960,800,QImage::Format_RGB888);
+            view.left=QImage(960,800,QImage::Format_RGB888);
+            view.right=QImage(960,800,QImage::Format_RGB888);
             view.depth=cv::Mat(800,960,CV_32FC1);
             view.mask_size=i<2 ? QSize(1296,1080) : QSize(2448,2048);
             for (int y=0;y<800;++y) for (int x=0;x<960;++x) {
-                auto* pixel=view.rgb.scanLine(y)+x*3;
+                auto* pixel=view.left.scanLine(y)+x*3;
                 pixel[0]=(x+i*20)%256; pixel[1]=(y+i*40)%256; pixel[2]=(x+y+i*60)%256;
+                auto* right_pixel=view.right.scanLine(y)+x*3;
+                right_pixel[0]=(y+i*30+17)%256; right_pixel[1]=(x+i*50+31)%256;
+                right_pixel[2]=(x+2*y+i*70+47)%256;
                 view.depth.at<float>(y,x)=(x+y)%7 ? .125f+(x+960*y+i)/1000000.f : 0.f;
             }
             if (i!=1 && i!=4) {
@@ -84,7 +95,7 @@ int main(int argc,char** argv) {
                 view.mask.fill(0);
                 for (int y=0;y<view.mask.height()/2;++y)
                     std::memset(view.mask.scanLine(y),255,view.mask.width()/(i+2));
-                // Single-pixel details must survive export without resampling.
+                // Include isolated pixels to check nearest-neighbour sampling.
                 view.mask.scanLine(17)[31]=0;
                 view.mask.scanLine(view.mask.height()-1)[view.mask.width()-1]=255;
             }
@@ -132,7 +143,7 @@ int main(int argc,char** argv) {
         views.resize(1); views.front().camera_to_world=cv::Matx44d::eye(); views.front().mask={};
         writeScanResults(single.path(),views); verify(single.path(),views);
         std::cout<<"PASS: one extrinsic field per view, exact MA poses and invalid-pose rejection\n";
-        std::cout<<"PASS: one/five-view flat export, exact RGB and float32 depth, native 1296x1080 / 2448x2048 masks, shared K and camera-to-world poses\n";
+        std::cout<<"PASS: one/five-view flat export, exact left/right RGB and float32 depth, 960x800 binary masks resized from 1296x1080 / 2448x2048, shared K and camera-to-world poses\n";
         std::cout<<"PASS: zero undrawn masks, identity single view, overwrite guard, staged cancellation and incompatible-intrinsic rejection\n";
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

@@ -24,7 +24,7 @@ struct CapturedStereoPair {
     fs::MeshCamera image_camera;
     SharedGPUMesh point_cloud; // Retained FS points; current per-view masks are applied when ICP runs.
     QImage ma_image;
-    QImage fs_rgb; // Exact resized FS input, owned independently of its reusable buffers.
+    QImage fs_left, fs_right; // Exact resized FS inputs, owned independently of its reusable buffers.
     cv::Mat fs_depth; // Final float32 Z; shares the immutable CPU result allocation.
 };
 

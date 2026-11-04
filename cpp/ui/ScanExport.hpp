@@ -10,9 +10,9 @@
 struct ScanExportView {
     cv::Matx33d intrinsic;
     cv::Matx44d camera_to_world; // Original MA pose before ICP, exported as "extrinsic"; identity for a single view.
-    QImage rgb, mask;
+    QImage left, right, mask;
     cv::Mat depth;
-    QSize mask_size; // Rectified-left image grid, including when no mask was drawn.
+    QSize mask_size; // Source rectified-left grid; export resizes masks to the FS input grid.
 };
 
 QStringList scanResultFileNames(int views);

@@ -37,10 +37,13 @@ cleared FS geometry uses 30% opacity; selected regions are opaque. Mask edits re
 the existing FS/MA results and do not trigger reconstruction. Use **Save results…**
 in the bottom-right corner to export.
 
-Scan export preserves each mask's rectified-left image dimensions without resizing:
-1296 × 1080 for ZED captures, or 2448 × 2048 for imports at that resolution.
-Undrawn masks are all-zero images on the same grid. Exported RGB and float32 Z depth
-use the 960 × 800 FoundationStereo input grid.
+Scan export resizes each rectified-left mask to 960 × 800 (width × height) using
+nearest-neighbour sampling and saves binary 0/255 pixels aligned with the FS images
+and depth. Undrawn masks are all-zero images on the same grid. Each view exports `left01.png`,
+`right01.png`, `mask01.png` and `depth01.tiff` (then `02`, `03`, etc.). Left and right
+RGB images are the exact rectified, resized FoundationStereo inputs at 960 × 800;
+float32 Z depth uses the same grid. A shared `cameras.json` contains the FS intrinsics
+and original MA camera-to-world poses in metres (identity for a single view).
 
 The existing `fs_gui` entry still starts with calibration. Imported captures in
 `scan_gui` must include `left.png`, `right.png` and their own `calibration.json`

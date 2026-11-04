@@ -53,8 +53,9 @@ public:
      */
     void prepare_stereo_images(const cv::Mat& left, const cv::Mat& right);
 
-    /** Borrow the exact RGB input and projection parameters; copy RGB before the next preparation. */
+    /** Borrow the exact RGB inputs and projection parameters; copy RGB before the next preparation. */
     const cv::Mat& model_left() const noexcept { return model_left_; }
+    const cv::Mat& model_right() const noexcept { return model_right_; }
     const StereoCameraParameters& model_camera_parameters() const noexcept { return model_camera_parameters_; }
 
     /**
