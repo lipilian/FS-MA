@@ -91,6 +91,7 @@ __device__ bool plane_normal(float covariance[3][3], float normal[3]) {
     return true;
 }
 
+template<bool FilterNormals>
 __global__ void denoise_xyz_map_kernel(const float* xyz, float* output,
     const unsigned char* selected, int width, int height,
     float max_distance, int min_neighbors, float min_normal_cosine) {
@@ -121,25 +122,29 @@ __global__ void denoise_xyz_map_kernel(const float* xyz, float* output,
             const float ax=nx-x, ay=ny-y, az=nz-z;
             if (ax*ax+ay*ay+az*az>=distance_squared) continue;
             ++good_neighbors;
-            const float delta[3]={ax,ay,az};
-            for (int r=0;r<3;++r) {
-                sum[r]+=delta[r];
-                for (int c=r;c<3;++c) products[r][c]+=delta[r]*delta[c];
+            if constexpr (FilterNormals) {
+                const float delta[3]={ax,ay,az};
+                for (int r=0;r<3;++r) {
+                    sum[r]+=delta[r];
+                    for (int c=r;c<3;++c) products[r][c]+=delta[r]*delta[c];
+                }
             }
         }
         keep=good_neighbors>=min_neighbors;
-        if (keep) {
-            float covariance[3][3], normal[3];
-            for (int r=0;r<3;++r) for (int c=r;c<3;++c)
-                covariance[r][c]=covariance[c][r]=products[r][c]-sum[r]*sum[c]/good_neighbors;
-            keep=plane_normal(covariance,normal);
+        if constexpr (FilterNormals) {
             if (keep) {
-                // XYZ is in the left-camera frame: the viewing ray is -P.
-                // A PCA normal has arbitrary sign, so orient it toward the camera
-                // by taking the absolute dot product. No acos is needed.
-                const float normal_squared=normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2];
-                const float cosine=fabsf(normal[0]*x+normal[1]*y+normal[2]*z)*rsqrtf(normal_squared)*rsqrtf(x*x+y*y+z*z);
-                keep=isfinite(cosine) && cosine>min_normal_cosine;
+                float covariance[3][3], normal[3];
+                for (int r=0;r<3;++r) for (int c=r;c<3;++c)
+                    covariance[r][c]=covariance[c][r]=products[r][c]-sum[r]*sum[c]/good_neighbors;
+                keep=plane_normal(covariance,normal);
+                if (keep) {
+                    // XYZ is in the left-camera frame: the viewing ray is -P.
+                    // A PCA normal has arbitrary sign, so orient it toward the camera
+                    // by taking the absolute dot product. No acos is needed.
+                    const float normal_squared=normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2];
+                    const float cosine=fabsf(normal[0]*x+normal[1]*y+normal[2]*z)*rsqrtf(normal_squared)*rsqrtf(x*x+y*y+z*z);
+                    keep=isfinite(cosine) && cosine>min_normal_cosine;
+                }
             }
         }
     }
@@ -177,15 +182,20 @@ cudaError_t compute_xyz_map(
 
 cudaError_t denoise_xyz_map(const float* xyz, float* output, const unsigned char* selection_mask,
                            int width, int height, float max_neighbor_distance_m,
-                           int min_neighbors, float max_normal_angle_degrees, cudaStream_t stream) noexcept {
+                           int min_neighbors, float max_normal_angle_degrees, cudaStream_t stream,
+                           bool filter_normals) noexcept {
     if (!xyz || !output || xyz==output || width<=0 || height<=0 || width>INT_MAX/height ||
         !std::isfinite(max_neighbor_distance_m) || max_neighbor_distance_m<=0 || min_neighbors<3 || min_neighbors>24 ||
         !std::isfinite(max_normal_angle_degrees) || max_normal_angle_degrees<=0 || max_normal_angle_degrees>=90)
         return cudaErrorInvalidValue;
     const float min_normal_cosine=static_cast<float>(std::cos(max_normal_angle_degrees*3.14159265358979323846/180.0));
     constexpr int threads=256;
-    denoise_xyz_map_kernel<<<1+(width*height-1)/threads,threads,0,stream>>>(
-        xyz,output,selection_mask,width,height,max_neighbor_distance_m,min_neighbors,min_normal_cosine);
+    if (filter_normals)
+        denoise_xyz_map_kernel<true><<<1+(width*height-1)/threads,threads,0,stream>>>(
+            xyz,output,selection_mask,width,height,max_neighbor_distance_m,min_neighbors,min_normal_cosine);
+    else
+        denoise_xyz_map_kernel<false><<<1+(width*height-1)/threads,threads,0,stream>>>(
+            xyz,output,selection_mask,width,height,max_neighbor_distance_m,min_neighbors,min_normal_cosine);
     return cudaGetLastError();
 }
 

@@ -89,10 +89,18 @@ public:
      * within the Euclidean distance limit, also at image/mask boundaries. Fit their
      * plane normal and require its unsigned angle to the point-to-left-camera ray
      * strictly below max_normal_angle_degrees. Undefined normals are rejected.
+     * When filter_normals is false, only neighbour support/distance is checked.
      * Uses a separate preallocated output so removed points do not affect neighbours.
      */
     void denoise_xyz_map(float max_neighbor_distance_m = 0.003F,
-                         int min_neighbors = 7, float max_normal_angle_degrees = 60.0F);
+                         int min_neighbors = 7, float max_normal_angle_degrees = 60.0F,
+                         bool filter_normals = true);
+
+    /** Restore a cached pre-denoising CV_32FC3 XYZ map on the FS input grid.
+     * Prepare the matching RGB/mask first. Completes the upload before returning;
+     * enables denoising/geometry without rerunning inference or changing disparity.
+     */
+    void upload_xyz_map(const cv::Mat& xyz);
 
     /** Download the last computed XYZ map as an owned CV_32FC3 matrix (800 rows × 960 columns, metres).
      * Call compute_xyz_map first. Completes the transfer before returning.

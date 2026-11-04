@@ -29,6 +29,12 @@ MapAnything predicts camera poses and displays each view as a point cloud; MA
 triangle meshes are not computed. MA results export as a world-space point-cloud
 PLY without faces. FS point clouds remain available through the source selector.
 
+With geometry filtering enabled, a single view uses only the 5 × 5 neighbour
+support/distance filter. Before MA runs with 2–5 views, every view also receives
+the normal/view-angle check (< 60°). The first view is updated from its cached
+pre-denoising XYZ without rerunning FS; its depth, point cloud and MA input are
+updated together. Completed views are not filtered repeatedly as more are added.
+
 The scan workspace uses fixed depth and geometry defaults and a full-width view.
 Captures and imported pairs reconstruct automatically. In both camera and import
 mode, click a captured camera or view label, then **Start draw** to edit its mask

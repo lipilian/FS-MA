@@ -13,6 +13,7 @@ PipelineController::PipelineController(ConfirmedCalibration calibration, QString
     connect(worker_, &PipelineWorker::preview, this, &PipelineController::preview);
     connect(worker_, &PipelineWorker::depthImage, this, &PipelineController::depthImage);
     connect(worker_, &PipelineWorker::gpuMeshReady, this, &PipelineController::gpuMeshReady);
+    connect(worker_, &PipelineWorker::captureRefiltered, this, &PipelineController::captureRefiltered);
     connect(worker_, &PipelineWorker::maskReady, this, &PipelineController::maskReady);
     connect(worker_, &PipelineWorker::log, this, &PipelineController::log);
     connect(worker_, &PipelineWorker::actionFinished, this, [this] {

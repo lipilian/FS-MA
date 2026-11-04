@@ -58,6 +58,15 @@ QString findImportMask(const QDir& directory,const QString& left_name) {
 QImage image(const cv::Mat& rgb) {
     return QImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888).copy();
 }
+QImage depthPreview(const cv::Mat& depth, float minimum, float maximum) {
+    cv::Mat indices, rgb;
+    depth.convertTo(indices,CV_8U,255.0/(maximum-minimum),-255.0*minimum/(maximum-minimum));
+    cv::applyColorMap(indices,rgb,cv::COLORMAP_JET);
+    const cv::Mat valid=(depth>0.0F)&(depth>=minimum)&(depth<=maximum);
+    rgb.setTo(cv::Scalar::all(0),~valid);
+    cv::cvtColor(rgb,rgb,cv::COLOR_BGR2RGB);
+    return image(rgb);
+}
 StereoCameraParameters rectifiedCamera(const StereoCalibration& calibration) {
     cv::Mat k, right, rotation, translation;
     calibration.left_camera_matrix.convertTo(k,CV_64F);
@@ -674,6 +683,8 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         throw std::runtime_error("Neighbour distance must be positive and finite.");
     state_.icp_ready=false; state_.tsdf.reset();
     state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release(); publish();
+    const bool filter_normals=std::max(int(captures_.size()),capture_slot_+1)>=fs::MA_VGGT::kMinViews;
+    if (filter_normals) completePendingNormalFiltering();
     reportProgress(10, "Preparing stereo images…");
     QElapsedTimer elapsed; elapsed.start();
     fs_->set_model_camera_parameters(frame_->rectified_camera_parameters(), frame_->rectified_left().size());
@@ -700,31 +711,30 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     emit log(QString("FS inference + overlapping MA RGB preparation: %1 ms").arg(inference_ms,0,'f',3));
     reportProgress(65, "Computing valid XYZ on GPU…"); elapsed.restart();
     fs_->compute_xyz_map(minimum, maximum); checkpoint();
+    cv::Mat pending_normal_xyz;
     if (denoise) {
-        reportProgress(75, "Filtering 5 × 5 XYZ neighbours and normals on GPU…");
-        fs_->denoise_xyz_map(max_neighbor_distance_m,7,60.0F); checkpoint();
+        if (!filter_normals) pending_normal_xyz=fs_->download_xyz_map();
+        reportProgress(75, filter_normals ? "Filtering 5 × 5 XYZ neighbours and normals on GPU…"
+                                         : "Filtering 5 × 5 XYZ neighbours on GPU…");
+        fs_->denoise_xyz_map(max_neighbor_distance_m,7,60.0F,filter_normals); checkpoint();
     }
     // Both XYZ and denoising APIs synchronize before returning.
     const double xyz_ms=elapsed.nsecsElapsed()/1e6;
     state_.gpu_ready = true;
-    emit log(denoise ? QString("Full-image XYZ + selected-region 5 × 5 denoising · at least 7 neighbours < %1 m · normal/view angle < 60°").arg(max_neighbor_distance_m)
+    emit log(denoise ? QString("Full-image XYZ + selected-region 5 × 5 denoising · at least 7 neighbours < %1 m").arg(max_neighbor_distance_m)
+                        +(filter_normals ? " · normal/view angle < 60°" : " · single view: normal filtering skipped")
                     : "Full-image XYZ · neighbourhood denoising disabled.");
     reportProgress(85, "Preparing depth display…"); elapsed.restart();
     const cv::Mat xyz = fs_->download_xyz_map(); checkpoint();
-    cv::Mat depth, indices, depth_rgb;
+    cv::Mat depth;
     cv::extractChannel(xyz, depth, 2);
     ma_->uploadDepth(capture_slot_, depth);
     emit log(QString("MA metric ray distance queued · view %1 · 518 × 434 · FP32 channel 6 · Lanczos4 depth resize")
         .arg(capture_slot_ + 1));
     // Fixed metric range from this run, never per-image min/max normalization.
-    depth.convertTo(indices, CV_8U, 255.0 / (maximum - minimum), -255.0 * minimum / (maximum - minimum));
-    cv::applyColorMap(indices, depth_rgb, cv::COLORMAP_JET);
-    const cv::Mat valid = (depth > 0.0F) & (depth >= minimum) & (depth <= maximum);
-    depth_rgb.setTo(cv::Scalar::all(0), ~valid);
-    cv::cvtColor(depth_rgb, depth_rgb, cv::COLOR_BGR2RGB);
     checkpoint();
     depth_ = depth; // Keep only Z for export, without another copy.
-    const QImage depth_image=image(depth_rgb);
+    const QImage depth_image=depthPreview(depth,minimum,maximum);
     const double display_ms=elapsed.nsecsElapsed()/1e6;
     emit log(QString("Post processing: %1 ms (XYZ + denoising: %2 ms; XYZ download + depth display: %3 ms)")
         .arg(xyz_ms+display_ms,0,'f',3).arg(xyz_ms,0,'f',3).arg(display_ms,0,'f',3));
@@ -734,6 +744,9 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     emit depthImage(depth_image, minimum, maximum);
     emit log(QString("Jet depth range: %1–%2 m").arg(minimum).arg(maximum));
     buildPointCloud();
+    if (!pending_normal_xyz.empty())
+        captures_[capture_slot_].pending_normal_filter=CapturedStereoPair::PendingNormalFilter{
+            std::move(pending_normal_xyz),grayscale,minimum,maximum,max_neighbor_distance_m};
     // A successful cloud build retains this capture (or replaces its retake
     // slot), so use the committed view count rather than capture_slot_ + 1.
     const int views = int(captures_.size());
@@ -802,10 +815,48 @@ void PipelineWorker::retainCapture(SharedGPUMesh point_cloud) {
     state_.icp_ready=false; state_.tsdf.reset();
     CapturedStereoPair capture{state_.image_id,
         meshCamera(*frame_,frame_->rectified_left().size()),
-        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),image(fs_->model_right()),depth_};
+        std::move(point_cloud),image(ma_->resizedColor()),image(fs_->model_left()),image(fs_->model_right()),depth_,{}};
     if (capture_slot_==int(captures_.size())) captures_.push_back(std::move(capture));
     else captures_[capture_slot_]=std::move(capture);
     state_.capture_count=int(captures_.size());
+}
+void PipelineWorker::completePendingNormalFiltering() {
+    for (int i=0;i<int(captures_.size());++i) {
+        auto& capture=captures_[i];
+        if (!capture.pending_normal_filter) continue;
+        checkpoint();
+        reportProgress(5,QString("Applying normal filtering to view %1 before MA…").arg(i+1));
+        const auto& pending=*capture.pending_normal_filter;
+        const auto rgb=[](const QImage& value) {
+            return cv::Mat(value.height(),value.width(),CV_8UC3,
+                           const_cast<uchar*>(value.constBits()),value.bytesPerLine());
+        };
+        // Restore the pre-denoising XYZ, never the already filtered single-view
+        // cloud. This is the same one-pass filter used for new MA views.
+        fs_->prepare_stereo_images(rgb(capture.fs_left),rgb(capture.fs_right));
+        const auto& gray=pending.mask;
+        fs_->set_selection_mask(cv::Mat(gray.height(),gray.width(),CV_8UC1,
+                                       const_cast<uchar*>(gray.constBits()),gray.bytesPerLine()));
+        fs_->upload_xyz_map(pending.xyz);
+        fs_->denoise_xyz_map(pending.neighbor_distance,7,60.0F,true);
+        const auto xyz=fs_->download_xyz_map();
+        cv::Mat depth; cv::extractChannel(xyz,depth,2);
+        const auto preview=depthPreview(depth,pending.minimum,pending.maximum);
+        auto buffer=std::make_shared<fs::MeshGPUBuffer>();
+        const auto stats=fs::build_point_cloud_gpu(fs_->prepare_gpu_mesh_inputs(),*buffer);
+        if (!stats.point_count)
+            throw std::runtime_error("Normal filtering removed every point from an earlier view. Retake that view before continuing.");
+        auto cloud=std::make_shared<GPUMeshFrame>(*capture.point_cloud);
+        cloud->buffer=std::move(buffer); cloud->stats=stats;
+        checkpoint();
+        ma_->uploadDepth(i,depth);
+        capture.point_cloud=cloud; capture.fs_depth=std::move(depth);
+        const float minimum=pending.minimum, maximum=pending.maximum;
+        capture.pending_normal_filter.reset();
+        emit captureRefiltered(cloud,preview,minimum,maximum);
+        emit log(QString("View %1 normal filtering complete · normal/view angle < 60° · %2 valid points · cached XYZ reused; MA depth updated")
+            .arg(i+1).arg(stats.point_count));
+    }
 }
 void PipelineWorker::refineCameraPosesICP(const QHash<quint64,QImage>& masks, double max_translation_m) {
     if (state_.live || !state_.depth_ready || !state_.icp_ready || captures_.size()<2 ||

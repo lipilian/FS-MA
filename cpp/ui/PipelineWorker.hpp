@@ -26,6 +26,12 @@ struct CapturedStereoPair {
     QImage ma_image;
     QImage fs_left, fs_right; // Exact resized FS inputs, owned independently of its reusable buffers.
     cv::Mat fs_depth; // Final float32 Z; shares the immutable CPU result allocation.
+    struct PendingNormalFilter {
+        cv::Mat xyz; // Depth-clipped XYZ before any denoising, retained only for the single view.
+        QImage mask;
+        float minimum, maximum, neighbor_distance;
+    };
+    std::optional<PendingNormalFilter> pending_normal_filter;
 };
 
 struct PipelineState {
@@ -93,6 +99,7 @@ signals:
     void preview(QImage rectified_left, QImage rectified_right);
     void depthImage(QImage depth_rgb, float minimum, float maximum);
     void gpuMeshReady(SharedGPUMesh mesh);
+    void captureRefiltered(SharedGPUMesh cloud, QImage depth_rgb, float minimum, float maximum);
     void maskReady(quint64 image_id, quint64 request_id, QImage mask, QString message);
     void log(QString message);
     void actionFinished();
@@ -106,6 +113,7 @@ private:
     void reportProgress(int percent, const QString& stage);
     void buildPointCloud();
     void retainCapture(SharedGPUMesh point_cloud);
+    void completePendingNormalFiltering();
     void loadCapture(const QString& directory, const QString& left_name, const QString& right_name,
                      bool use_capture_calibration, bool append);
     void prepare(std::unique_ptr<StereoFrame> frame, QString input, QString calibration,

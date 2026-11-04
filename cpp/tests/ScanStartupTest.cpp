@@ -40,6 +40,19 @@
 namespace {
 void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 
+cv::Mat pointCloudDepth(const SharedGPUMesh& cloud) {
+    require(cloud && cloud->point_cloud,"Expected a cached point cloud");
+    const auto size=cloud->camera.image_size;
+    std::vector<fs::MeshGPUVertex> vertices(cloud->buffer->vertex_slots());
+    require(vertices.size()==size_t(size.area()),"Point cloud is not on its image grid");
+    require(cudaMemcpyAsync(vertices.data(),cloud->buffer->vertices(),vertices.size()*sizeof(vertices[0]),
+                            cudaMemcpyDeviceToHost,cloud->stream)==cudaSuccess &&
+            cudaStreamSynchronize(cloud->stream)==cudaSuccess,"Cannot inspect cached point-cloud depth");
+    cv::Mat depth(size,CV_32FC1);
+    for (int i=0;i<size.area();++i) depth.ptr<float>()[i]=vertices[i].z;
+    return depth;
+}
+
 void selectSaveFolder(QPushButton* save,const QString& directory,bool accept=true) {
     bool handled=false;
     QTimer::singleShot(0,[&] {
@@ -715,6 +728,14 @@ void checkInlineMaskDrawing(bool importing) {
     require(!tools->isVisible() && start->isEnabled(),"Finish draw did not return to idle drawing controls");
     require(capture->isEnabled(),"Finish draw did not restore the next capture action");
     seed(2);
+    auto updated_first=std::make_shared<GPUMeshFrame>();
+    updated_first->image_id=1; updated_first->point_cloud=true; updated_first->stats.point_count=80;
+    QImage updated_depth(960,800,QImage::Format_RGB888); updated_depth.fill(QColor(20,180,70));
+    controller.captureRefiltered(updated_first,updated_depth,0,1);
+    view->cameraClicked(1); image_mode->setCurrentIndex(1);
+    require(preview->image()==updated_depth,"Historical normal filtering did not update the cached depth preview");
+    image_mode->setCurrentIndex(0);
+    require(editor->mask()==first,"Historical normal filtering changed the drawn mask");
     view->cameraClicked(2); start->click(); finish->click();
     require(editor->mask().isNull(),"A new camera inherited another view's mask");
     view->cameraClicked(1);
@@ -866,8 +887,24 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     std::vector<quint64> ids;
     std::vector<QImage> images,right_images;
     std::vector<cv::Mat> depths;
-    cv::Matx33d fs_intrinsic;
     std::vector<int> selected_point_counts;
+    int refiltered_count=0;
+    SharedGPUMesh refiltered_cloud;
+    QObject::connect(&worker,&PipelineWorker::captureRefiltered,
+        [&](SharedGPUMesh cloud,QImage preview,float minimum,float maximum) {
+            require(ids.size()>=2 && cloud->image_id==ids.front() && refiltered_count==0,
+                    "Normal filtering did not update exactly the historical first view");
+            require(preview.size()==QSize(960,800) && minimum==0 && maximum==1,
+                    "Historical depth preview was not refreshed on the FS grid");
+            const auto updated=pointCloudDepth(cloud);
+            require(cv::countNonZero(updated)>0 && cv::countNonZero(updated)<cv::countNonZero(depths.front()),
+                    "Real-scan normal filtering did not remove points from the first view");
+            require(cv::norm(updated,depths.front(),cv::NORM_INF,updated>0)==0,
+                    "Normal filtering changed retained coordinates instead of only rejecting points");
+            depths.front()=updated; selected_point_counts.front()=cv::countNonZero(updated);
+            refiltered_cloud=std::move(cloud); ++refiltered_count;
+        });
+    cv::Matx33d fs_intrinsic;
     QHash<quint64,QImage> icp_masks;
     for (int i=0;i<2;++i) {
         run([](auto& w) { w.importNextPair(true); });
@@ -889,6 +926,9 @@ int checkImportedScan(const QString& directory, const QString& engine) {
                 std::fill_n(selection.scanLine(y),selection.width()/2,255);
         }
         run([&](auto& w) { w.reconstruct(0,1,{},true,.003F); });
+        require(logs.filter("Full-image XYZ + selected-region").last().contains(
+                    i==0 ? "single view: normal filtering skipped" : "normal/view angle < 60°"),
+                "Capture selected the wrong normal-filtering mode");
         if (!selection.isNull()) icp_masks.insert(state.image_id,selection);
         require(state.capture_count==i+1 && geometry && geometry->point_cloud && geometry->stats.point_count>0,
                 "Imported FS reconstruction did not retain a valid point cloud");
@@ -936,6 +976,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
     }
     require(state.predicted_cameras && state.predicted_cameras->size()==2 &&
             state.ma_cameras==state.predicted_cameras,"Two imported views did not produce MA poses");
+    require(refiltered_count==1 && refiltered_cloud,"Entering MA did not update the first view");
     for (int i=0;i<2;++i) {
         const auto& predicted=(*state.predicted_cameras)[i];
         require(predicted.image_id==ids[i] && predicted.camera.image_size==cameras[i].image_size &&
@@ -1104,6 +1145,18 @@ int checkImportedScan(const QString& directory, const QString& engine) {
                     "Scan export did not use the fresh MA camera poses");
     }
     std::cout<<"PASS: JSON exports only original MA extrinsics before/after ICP and undo, and uses fresh poses after new MA inference\n";
+    require(refiltered_count==1,"Repeated MA reconstruction filtered the historical first view again");
+    const auto stable_first_depth=depths.front().clone();
+    while (state.capture_count<std::min(5,state.import_total)) {
+        run([](auto& w) { w.importNextPair(true); w.reconstruct(0,1,{},true,.003F); });
+        QTemporaryDir additional_output;
+        run([&](auto& w) { w.saveScanResults(additional_output.path(),{}); });
+        checkScanFiles(additional_output.path(),state.capture_count);
+        const auto first=cv::imread(additional_output.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
+        require(refiltered_count==1 && cv::norm(first,stable_first_depth,cv::NORM_INF)==0,
+                "Adding MA views repeatedly filtered or changed the historical first depth");
+    }
+    std::cout<<"PASS: single-view neighbour-only filtering, first-view normal filtering before MA, updated depth/points and stable history through later MA views\n";
     worker.shutdown();
     std::cout<<"PASS: imported FS points/mesh, depth export, two-view MA and historical camera snapshots\n";
     std::cout<<"PASS: historical/current SAM feature switching and independent geometry/import state\n";

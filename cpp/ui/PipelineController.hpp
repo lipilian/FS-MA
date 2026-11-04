@@ -21,6 +21,7 @@ signals:
     void preview(QImage rectified_left, QImage rectified_right);
     void depthImage(QImage depth_rgb, float minimum, float maximum);
     void gpuMeshReady(SharedGPUMesh mesh);
+    void captureRefiltered(SharedGPUMesh cloud, QImage depth_rgb, float minimum, float maximum);
     void maskReady(quint64 image_id, quint64 request_id, QImage mask, QString message);
     void log(QString message);
     void busyChanged(bool busy);

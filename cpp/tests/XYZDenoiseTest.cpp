@@ -31,12 +31,12 @@ struct Device {
     }
     ~Device() { cudaFree(input); cudaFree(output); cudaFree(mask); cudaStreamDestroy(stream); }
     std::vector<cv::Vec3f> run(const std::vector<cv::Vec3f>& points, int width, int height,
-                             const std::vector<unsigned char>& selection={}) {
+                             const std::vector<unsigned char>& selection={}, bool filter_normals=true) {
         const auto bytes=points.size()*sizeof(points[0]);
         checked(cudaMemcpyAsync(input,points.data(),bytes,cudaMemcpyHostToDevice,stream));
         if (!selection.empty()) checked(cudaMemcpyAsync(mask,selection.data(),selection.size(),cudaMemcpyHostToDevice,stream));
         checked(fs::postprocessing::denoise_xyz_map(input,output,selection.empty()?nullptr:mask,
-                                                   width,height,distance_limit,7,60.0F,stream));
+                                                   width,height,distance_limit,7,60.0F,stream,filter_normals));
         std::vector<cv::Vec3f> result(points.size()), original(points.size());
         checked(cudaMemcpyAsync(result.data(),output,bytes,cudaMemcpyDeviceToHost,stream));
         checked(cudaMemcpyAsync(original.data(),input,bytes,cudaMemcpyDeviceToHost,stream));
@@ -53,7 +53,7 @@ bool retained(const std::vector<cv::Vec3f>& points, int i) { return points[i][2]
 // Independent double-precision CPU oracle using OpenCV's eigensolver. All
 // neighbours come from the original input, including ones that will be removed.
 std::vector<cv::Vec3f> reference(const std::vector<cv::Vec3f>& points, int width, int height,
-                               const std::vector<unsigned char>& mask) {
+                               const std::vector<unsigned char>& mask, bool filter_normals=true) {
     auto result=points;
     for (int v=0;v<height;++v) for (int u=0;u<width;++u) {
         const int i=v*width+u;
@@ -70,7 +70,7 @@ std::vector<cv::Vec3f> reference(const std::vector<cv::Vec3f>& points, int width
                 }
         }
         bool keep=neighbors.size()>=7;
-        if (keep) {
+        if (keep && filter_normals) {
             cv::Vec3d mean{};
             for (const auto& n : neighbors) mean+=n;
             mean/=double(neighbors.size());
@@ -217,6 +217,7 @@ void checkMasksAndReference() {
             mask[i]=random()%5 ? 255 : 0;
         }
         compare(device.run(points,w,h,mask),reference(points,w,h,mask));
+        compare(device.run(points,w,h,mask,false),reference(points,w,h,mask,false));
     }
     // A two-row strip cannot supply seven neighbours at its image corners.
     points=plane(w,2,0);
@@ -224,6 +225,31 @@ void checkMasksAndReference() {
     require(!retained(result,0) && !retained(result,2*w-1),"Image edges must not relax the support requirement");
     compare(result,reference(points,w,2,{}));
     std::cout<<"PASS: masks, image edges, partial blocks, 40 cm spacing and 40 noisy CPU-reference cases\n";
+}
+
+void checkNormalsDisabled() {
+    constexpr int w=9,h=9,center=4*w+4;
+    Device device(w*h);
+    for (double tilt:{60.0,75.0,90.0}) {
+        const auto points=plane(w,h,tilt);
+        const auto result=device.run(points,w,h,{},false);
+        require(retained(result,center),"Single-view filtering rejected a supported steep surface");
+        compare(result,reference(points,w,h,{},false));
+    }
+    auto points=plane(w,h,0);
+    for (auto& p:points) p[1]=0;
+    require(retained(device.run(points,w,h,{},false),center),"Single-view filtering still fitted collinear normals");
+    std::fill(points.begin(),points.end(),cv::Vec3f(0,0,.4F));
+    require(retained(device.run(points,w,h,{},false),center),"Single-view filtering still rejected undefined normals");
+    std::vector<unsigned char> mask(w*h,0);
+    for (int i:{center,center-1,center+1,center-w,center+w,center-w-1,center+w+1}) mask[i]=255;
+    require(!retained(device.run(points,w,h,mask,false),center),"Skipping normals disabled the seven-neighbour rule");
+    mask[center-w+1]=255;
+    require(retained(device.run(points,w,h,mask,false),center),"Seven supported neighbours failed without normal checks");
+    points[center-w+1]={distance_limit,0,.4F};
+    require(!retained(device.run(points,w,h,mask,false),center),"Skipping normals disabled the strict distance check");
+    compare(device.run(points,w,h,mask,false),reference(points,w,h,mask,false));
+    std::cout<<"PASS: single-view steep/degenerate surfaces skip normals while neighbour support, distance and masks remain enforced\n";
 }
 
 void checkValidationAndFullImage() {
@@ -256,6 +282,7 @@ int main() {
     try {
         checkCountsAndDistance();
         checkNormals();
+        checkNormalsDisabled();
         checkMasksAndReference();
         checkValidationAndFullImage();
         return 0;

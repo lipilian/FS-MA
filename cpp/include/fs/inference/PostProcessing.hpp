@@ -32,7 +32,7 @@ cudaError_t compute_xyz_map(
 
 /** Single 5x5 pass. Input/output must be distinct; the centre is not a neighbour.
  * Require min_neighbors selected, valid neighbours strictly closer than the 3D
- * distance limit, including at image/mask boundaries. Fit a least-squares plane
+ * distance limit, including at image/mask boundaries. With filter_normals, fit a least-squares plane
  * to those neighbours (smallest covariance eigenvector); reject undefined normals.
  * The unsigned angle between its normal and the point-to-left-camera ray must be
  * strictly below max_normal_angle_degrees. XYZ must be in the left-camera frame.
@@ -40,10 +40,12 @@ cudaError_t compute_xyz_map(
  * Valid input points have finite XYZ and positive Z. Invalid/unsupported outputs
  * within the selection are zero; unselected XYZ is copied unchanged.
  * No allocations or synchronization. Distance must be finite/positive, neighbour
- * count in [3,24], angle finite and in (0,90). All input buffers remain unchanged.
+ * count in [3,24], angle finite and in (0,90). Disabling filter_normals skips plane
+ * fitting and the angle check entirely. All input buffers remain unchanged.
  */
 cudaError_t denoise_xyz_map(const float* xyz, float* output, const unsigned char* selection_mask,
                            int width, int height, float max_neighbor_distance_m,
-                           int min_neighbors, float max_normal_angle_degrees, cudaStream_t stream) noexcept;
+                           int min_neighbors, float max_normal_angle_degrees, cudaStream_t stream,
+                           bool filter_normals = true) noexcept;
 
 } // namespace fs::postprocessing

@@ -176,8 +176,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
     layout->addWidget(label("Applied to full-image XYZ.")); settings_layout->addWidget(depth);
     auto* filters = group("Geometry", layout);
     geometry_panel_ = filters;
-    denoise_ = new QCheckBox("5 × 5 neighbour + normal filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
-    denoise_->setToolTip("Keep points with at least 7 neighbours strictly within the distance limit and a fitted normal less than 60° from the viewing ray. The same rules apply at boundaries.");
+    denoise_ = new QCheckBox("5 × 5 neighbour filtering"); denoise_->setObjectName("xyzDenoise"); denoise_->setChecked(true); layout->addWidget(denoise_);
+    denoise_->setToolTip("Keep points with at least 7 neighbours strictly within the distance limit. With 2–5 views, also require a fitted normal less than 60° from the viewing ray for every view, including the first. The same rules apply at boundaries.");
     neighbor_distance_ = decimal(0.003,0.001,1," m"); neighbor_distance_->setObjectName("neighborDistance"); neighbor_distance_->setSingleStep(0.001);
     auto* neighbor_form=new QFormLayout; neighbor_form->addRow("Neighbour distance",neighbor_distance_); layout->addLayout(neighbor_form);
     mesh_edge_=decimal(.01,.001,1," m");
@@ -506,6 +506,17 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             return;
         }
         presentGeometry(std::move(mesh));
+    });
+    connect(&controller_,&PipelineController::captureRefiltered,this,[this](SharedGPUMesh cloud,QImage depth,float minimum,float maximum) {
+        if (closing_) return;
+        for (auto& cached:captured_clouds_)
+            if (cached && cached->image_id==cloud->image_id) cached=cloud;
+        auto preview=capture_previews_.find(cloud->image_id);
+        if (preview!=capture_previews_.end()) {
+            preview->depth=std::move(depth);
+            preview->depth_description=QString("Jet: %1 m (blue) → %2 m (red) · Black: invalid, out of range or filtered")
+                .arg(minimum,0,'f',3).arg(maximum,0,'f',3);
+        }
     });
     connect(mesh_view_,&MeshView::cameraClicked,this,[this](quint64 image_id) {
         if (busy_ || closing_ || drawing_mask_ || state_.live || capture_processing_ || capture_transition_pending_ ||
