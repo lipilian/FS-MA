@@ -656,7 +656,11 @@ void checkInlineMaskDrawing(bool importing) {
     // presentation below; the offscreen renderer cannot present it itself.
     QObject::disconnect(view,&MeshView::renderFailed,&window,nullptr);
     int submitted=0;
-    QObject::connect(&controller,&PipelineController::busyChanged,[&](bool busy) { if (busy) ++submitted; });
+    bool worker_busy=false;
+    QObject::connect(&controller,&PipelineController::busyChanged,[&](bool busy) {
+        worker_busy=busy;
+        if (busy) ++submitted;
+    });
     PipelineState state;
     state.engine_ready=state.sam_ready=state.ma_ready=state.has_rectified=state.depth_ready=state.gpu_ready=true;
     state.camera_mode=CameraMode::Zed; state.connected=!importing;
@@ -721,12 +725,55 @@ void checkInlineMaskDrawing(bool importing) {
         require(window.grab().save(screenshot_directory+(importing ? "/inline-mask.png" : "/inline-camera-mask.png")),"Cannot save inline mask screenshot");
     }
     finish->click();
-    QCoreApplication::processEvents();
     require(stack->size()==preview_size,"Finishing drawing resized the left preview");
     const auto first=editor->mask();
     require(!first.isNull(),"Finish draw did not retain the mask");
-    require(!tools->isVisible() && start->isEnabled(),"Finish draw did not return to idle drawing controls");
-    require(capture->isEnabled(),"Finish draw did not restore the next capture action");
+    require(submitted==1 && worker_busy && !capture->isEnabled() && !tools->isVisible(),
+            "Single-view Finish draw must dispatch exactly one mesh job and leave drawing mode");
+    const auto wait_mesh_guard=[&] {
+        timeout.restart();
+        while (worker_busy && timeout.elapsed()<5000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+        // This fixture has no engine/depth in its worker; GPU integration below
+        // verifies the mesh itself. The guard identifies the dispatched action.
+        require(!worker_busy && controller.state().action_failed &&
+                controller.state().status.contains("Reconstruct depth before preparing a GPU mesh"),
+                "Finish draw did not dispatch the guarded mesh action");
+    };
+    wait_mesh_guard();
+    seed(1,first); view->cameraClicked(1);
+    auto* mode=window.findChild<QComboBox*>("meshMode");
+    auto* mesh_status=window.findChild<QLabel*>("meshStatus");
+    const auto present_surface=[&] {
+        auto surface=std::make_shared<GPUMeshFrame>(); surface->image_id=1;
+        surface->stats.triangle_count=100; surface->stats.area_m2=.001;
+        controller.gpuMeshReady(surface); view->gpuMeshPresented(surface);
+        QCoreApplication::processEvents();
+        require(mode->currentIndex()==1 && mesh_status->text().contains("10.00 cm²"),
+                "Confirmed single-view mesh did not automatically display its surface and area");
+    };
+    present_surface();
+    start->click(); window.findChild<QPushButton*>("clearMask")->click(); finish->click();
+    view->gpuMeshPresented(latest_geometry); QCoreApplication::processEvents();
+    window.buildMeshGPU();
+    require(submitted==1 && mode->currentIndex()==0 && !mesh_status->text().contains("cm²") &&
+            editor->mask().isNull() && capture->isEnabled(),
+            "Clearing a single-view mask kept its old mesh/area or rebuilt the full image");
+    // Erasing every pixel also produces an empty region, even when QImage is non-null.
+    QImage empty(image_size,QImage::Format_Grayscale8); empty.fill(0);
+    seed(1,empty); view->cameraClicked(1); present_surface();
+    start->click(); finish->click();
+    view->gpuMeshPresented(latest_geometry); QCoreApplication::processEvents();
+    require(submitted==1 && mode->currentIndex()==0 && !mesh_status->text().contains("cm²"),
+            "An all-zero mask retained a stale area or started meshing");
+    seed(1,first); view->cameraClicked(1); present_surface();
+    start->click(); paint(); finish->click();
+    require(submitted==2 && !mesh_status->text().contains("cm²"),
+            "Reconfirming a mask must rebuild once and discard the previous mesh area");
+    wait_mesh_guard();
+    seed(1,first); view->cameraClicked(1);
+    const int mesh_submissions=submitted;
+    require(start->isEnabled() && capture->isEnabled(),"Completed mesh action did not restore idle controls");
     seed(2);
     auto updated_first=std::make_shared<GPUMeshFrame>();
     updated_first->image_id=1; updated_first->point_cloud=true; updated_first->stats.point_count=80;
@@ -767,7 +814,7 @@ void checkInlineMaskDrawing(bool importing) {
     view->cameraClicked(2); view->cameraClicked(3);
     require(editor->mask()==edited,"Edited imported mask did not persist independently");
     QCoreApplication::processEvents();
-    require(submitted==0,"Drawing or clearing a mask triggered FS/MA reconstruction");
+    require(submitted==mesh_submissions,"Multi-view drawing or clearing triggered a mesh/FS/MA job");
     auto* icp=window.findChild<QPushButton*>("refineCameraPosesICP");
     auto* translation_limit=window.findChild<QDoubleSpinBox*>("icpTranslationLimit");
     require(icp && !icp->isEnabled(),"ICP must be disabled before matching MA poses are ready");
@@ -785,12 +832,12 @@ void checkInlineMaskDrawing(bool importing) {
             undo_icp->mapTo(&window,QPoint()).x()+undo_icp->width()<=build_tsdf->mapTo(&window,QPoint()).x(),
             "TSDF settings must precede ICP; Build TSDF must follow Undo ICP on the same row");
     translation_limit->setValue(35.5);
-    require(submitted==0,"Editing the translation limit started ICP automatically");
+    require(submitted==mesh_submissions,"Editing the translation limit started ICP automatically");
     auto cameras=std::make_shared<std::vector<PredictedCameraFrame>>(3);
     for (int i=0;i<3;++i) { (*cameras)[i].image_id=i+1; (*cameras)[i].camera_to_world=cv::Matx44d::eye(); }
     state.predicted_cameras=cameras; state.icp_ready=true;
     controller.stateChanged(state);
-    require(icp->isEnabled() && submitted==0,"Completing MA must enable manual ICP without running it");
+    require(icp->isEnabled() && submitted==mesh_submissions,"Completing MA must enable manual ICP without running it");
     start->click();
     require(!icp->isEnabled() && !translation_limit->isEnabled(),"ICP controls must be disabled while a region is being edited");
     finish->click();
@@ -843,7 +890,7 @@ void checkInlineMaskDrawing(bool importing) {
     icp->click();
     require(translation_limit->value()==42.5,"ICP click did not commit the manually typed translation limit");
     timeout.restart();
-    while (!controller.state().action_failed && timeout.elapsed()<5000)
+    while (worker_busy && timeout.elapsed()<5000)
         QCoreApplication::processEvents(QEventLoop::AllEvents,20);
     require(submitted==before_icp+1 && controller.state().action_failed &&
             controller.state().status.contains("before running ICP"),
@@ -916,8 +963,8 @@ int checkImportedScan(const QString& directory, const QString& engine) {
                     "Real imported mask pixels changed during stereo rectification");
         cameras.push_back(*state.image_camera); ids.push_back(state.image_id); images.push_back(latest_left);
         right_images.push_back(latest_right);
-        // Match scan_gui imports: reconstruct full points, then select a region
-        // without rebuilding geometry. Only the ICP request receives this mask.
+        // Match scan_gui imports: reconstruct full points, then select regions
+        // for single-view meshing or multi-view ICP without rerunning FS.
         QImage selection;
         if (i==1) {
             selection=QImage(latest_left.size(),QImage::Format_Grayscale8);
@@ -972,6 +1019,30 @@ int checkImportedScan(const QString& directory, const QString& engine) {
             run([](auto& w) { w.buildMeshGPU({}); });
             require(geometry && !geometry->point_cloud && geometry->stats.triangle_count>0,
                     "Imported first view did not produce a triangle mesh");
+            const auto full_stats=geometry->stats;
+            QImage mesh_mask(latest_left.size(),QImage::Format_Grayscale8); mesh_mask.fill(0);
+            for (int y=0;y<mesh_mask.height();++y)
+                std::fill_n(mesh_mask.scanLine(y),mesh_mask.width()/2,255);
+            run([&](auto& w) { w.buildMeshGPU(mesh_mask); });
+            require(geometry->stats.triangle_count>0 && geometry->stats.triangle_count<full_stats.triangle_count &&
+                    geometry->stats.area_m2>0 && geometry->stats.area_m2<full_stats.area_m2,
+                    "Single-view mask did not restrict triangles and area");
+            cv::Mat model_mask;
+            cv::resize(cv::Mat(mesh_mask.height(),mesh_mask.width(),CV_8UC1,mesh_mask.bits(),mesh_mask.bytesPerLine()),
+                       model_mask,{960,800},0,0,cv::INTER_NEAREST);
+            std::vector<fs::MeshGPUVertex> vertices(geometry->buffer->vertex_slots());
+            require(cudaMemcpy(vertices.data(),geometry->buffer->vertices(),vertices.size()*sizeof(vertices[0]),
+                               cudaMemcpyDeviceToHost)==cudaSuccess,"Cannot inspect masked mesh vertices");
+            for (const auto& v:vertices) if (v.z>0) {
+                const int x=std::lround(fs_intrinsic(0,0)*v.x/v.z+fs_intrinsic(0,2));
+                const int y=std::lround(fs_intrinsic(1,1)*v.y/v.z+fs_intrinsic(1,2));
+                require(x>=0 && x<960 && y>=0 && y<800 && model_mask.at<uchar>(y,x),
+                        "GPU mesh includes a vertex outside the nearest-neighbour resized mask");
+            }
+            QTemporaryDir masked_output;
+            run([&](auto& w) { w.saveResults(masked_output.path(),{false,false,false,false,true},{}); });
+            require(cv::norm(depths.front(),cv::imread(masked_output.filePath("depth.tiff").toStdString(),cv::IMREAD_UNCHANGED),
+                             cv::NORM_INF)==0,"Mask meshing changed cached FS depth");
         }
     }
     require(state.predicted_cameras && state.predicted_cameras->size()==2 &&
@@ -1281,6 +1352,7 @@ int checkLiveScan(QApplication& app) {
                             if (preview_ids.back() && preview_ids.back()!=mesh->image_id) replaced_view_id=preview_ids.back();
                             preview_ids.back()=mesh->image_id;
                         }
+                        if (phase==61 && mesh->point_cloud) return; // Clearing the single-view mask restores cached points.
                         if (phase>=7) {
                             try {
                                 require((phase==8 || phase==10 || phase==13) && mesh->point_cloud && mesh->stats.point_count,
@@ -1307,13 +1379,13 @@ int checkLiveScan(QApplication& app) {
                             finish("ZED reconstruction produced empty geometry"); return;
                         }
                         ++presented;
-                        if (presented==1 && mesh->point_cloud) { finish("First capture displayed intermediate points instead of the automatic GPU mesh"); return; }
+                        if (presented==1 && !mesh->point_cloud) { finish("First capture built a mesh before Finish draw"); return; }
                         std::cout<<"ZED geometry displayed: "<<mesh->stats.point_count<<" points, "<<mesh->stats.triangle_count<<" triangles\n";
                         if (presented==1) QTimer::singleShot(350,&app,[&] {
                             if (finished || !window) return;
                             try {
                                 auto* transfer=window->findChild<CaptureTransition*>();
-                                require(transfer->isRunning() && transfer->isVisible(), "Camera transfer did not run after GPU mesh presentation");
+                                require(transfer->isRunning() && transfer->isVisible(), "Camera transfer did not run after GPU point presentation");
                                 require(!window->findChild<StereoImageView*>("capturePreview")->isProcessing(), "Transfer started before calculation finished");
                                 require(window->findChild<QComboBox*>("meshMode")->currentIndex()==0 && hasSceneContent(window->findChild<QOpenGLWidget*>()),
                                         "First capture did not default to FS points during the image transfer");
@@ -1355,29 +1427,13 @@ int checkLiveScan(QApplication& app) {
                                     window->findChild<MeshView*>()->cameraClicked(mesh->image_id);
                                     auto* start=window->findChild<QPushButton*>("startDraw");
                                     require(start->isEnabled(),"Captured camera cannot start inline mask drawing");
-                                    start->click();
-                                    auto* editor=window->findChild<MaskEditor*>();
-                                    require(tabs->currentIndex()==0 && editor->isVisible() && editor->imageSize()==QSize(1296,1080),
-                                            "ZED mask drawing did not stay on the original-resolution scene preview");
-                                    window->findChild<QPushButton*>("maskBrush")->click();
-                                    const QPointF center=editor->rect().center();
-                                    const QPointF global=editor->mapToGlobal(center.toPoint());
-                                    QMouseEvent press(QEvent::MouseButtonPress,center,global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
-                                    QMouseEvent release(QEvent::MouseButtonRelease,center,global,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
-                                    QApplication::sendEvent(editor,&press); QApplication::sendEvent(editor,&release);
-                                    auto* confirm=window->findChild<QPushButton*>("finishDraw");
-                                    require(confirm->isEnabled(), "Region cannot be confirmed after brush input");
-                                    confirm->click();
-                                    require(editor->hasSelection() && presented==1 && capture->isEnabled() &&
-                                            window->findChild<QPushButton*>("startDraw")->isEnabled(),
-                                            "Confirming a ZED mask rebuilt geometry or did not return to idle");
-                                    screenshot("inline-camera-mask");
                                     selectSaveFolder(window->findChild<QPushButton*>("openSaveResults"),point_export.path());
                                     phase=4;
                                 } else {
                                     if (!mesh->point_cloud) {
                                         auto* mode=window->findChild<QComboBox*>("meshMode");
-                                        mode->setCurrentIndex(1);
+                                        require(mode->currentIndex()==1 && mesh->stats.area_m2>0,
+                                                "Finish draw did not automatically display the masked surface and area");
                                         const auto surface=canvas->grabFramebuffer();
                                         mode->setCurrentIndex(2);
                                         const auto wireframe=canvas->grabFramebuffer();
@@ -1402,26 +1458,43 @@ int checkLiveScan(QApplication& app) {
                 if (!status.startsWith("Saved ")) throw std::runtime_error(status.toStdString());
                 checkScanFiles(phase==4 ? point_export.path() : mesh_export.path(),1);
                 if (phase==4) {
-                    require(cv::countNonZero(cv::imread(point_export.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED))>0,
-                            "Inline ZED mask was not exported with its captured view");
+                    require(cv::countNonZero(cv::imread(point_export.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED))==0,
+                            "Undrawn capture exported a selected region");
                     window->findChild<QPushButton*>("startDraw")->click();
-                    window->findChild<QPushButton*>("clearMask")->click();
-                    window->findChild<QPushButton*>("finishDraw")->click();
-                    require(presented==1 && !window->findChild<MaskEditor*>()->hasSelection() &&
-                            window->findChild<QPushButton*>("capturePair")->isEnabled(),
-                            "Clearing a ZED mask rebuilt geometry or did not return to idle");
-                    phase=5; window->buildMeshGPU(); // Function remains available without a button.
+                    auto* editor=window->findChild<MaskEditor*>();
+                    require(editor->isVisible() && editor->imageSize()==QSize(1296,1080),
+                            "ZED mask drawing did not stay on the original-resolution scene preview");
+                    window->findChild<QPushButton*>("maskBrush")->click();
+                    const QPointF center=editor->rect().center(), global=editor->mapToGlobal(center.toPoint());
+                    QMouseEvent press(QEvent::MouseButtonPress,center,global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                    QMouseEvent release(QEvent::MouseButtonRelease,center,global,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                    QApplication::sendEvent(editor,&press); QApplication::sendEvent(editor,&release);
+                    auto* confirm=window->findChild<QPushButton*>("finishDraw");
+                    require(confirm->isEnabled(),"Region cannot be confirmed after brush input");
+                    phase=5; confirm->click();
+                    require(editor->hasSelection() && presented==1 &&
+                            !window->findChild<QPushButton*>("capturePair")->isEnabled(),
+                            "Finish draw did not start automatic masked meshing");
+                    screenshot("inline-camera-mask");
                 } else {
                     const auto points_depth=cv::imread(point_export.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     const auto mesh_depth=cv::imread(mesh_export.filePath("depth01.tiff").toStdString(),cv::IMREAD_UNCHANGED);
                     require(cv::norm(points_depth,mesh_depth,cv::NORM_INF)==0, "GPU mesh build changed the saved depth");
-                    require(cv::countNonZero(cv::imread(mesh_export.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED))==0,
-                            "Cleared ZED mask was not retained for export");
+                    require(cv::countNonZero(cv::imread(mesh_export.filePath("mask01.png").toStdString(),cv::IMREAD_UNCHANGED))>0,
+                            "The mask used for meshing was not exported");
                     require(captured_views()==1, "Mesh export changed the captured view count");
-                    auto* capture=window->findChild<QPushButton*>("capturePair");
-                    require(capture->isEnabled() && capture->text()=="Capture more", "Cannot start the next capture");
-                    phase=7; ready_ticks=0; capture->click();
+                    window->findChild<QPushButton*>("startDraw")->click();
+                    window->findChild<QPushButton*>("clearMask")->click();
+                    phase=61; window->findChild<QPushButton*>("finishDraw")->click();
                 }
+                return;
+            }
+            if (phase==61 && window->findChild<QPushButton*>("capturePair")->isEnabled()) {
+                require(!window->findChild<MaskEditor*>()->hasSelection() &&
+                        window->findChild<QComboBox*>("meshMode")->currentIndex()==0 &&
+                        !window->findChild<QLabel*>("meshStatus")->text().contains("cm²"),
+                        "Clearing the single-view mask retained a mesh or its area");
+                phase=7; ready_ticks=0; window->findChild<QPushButton*>("capturePair")->click();
                 return;
             }
             auto* camera=window->findChild<QPushButton*>("connectCameras");

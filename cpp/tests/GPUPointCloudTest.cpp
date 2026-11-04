@@ -79,10 +79,34 @@ void checkMeshEdgeFilter() {
     require(fs::build_mesh_gpu(inputs,output).triangle_count==0,"Edge filtering ignored the Z component of 3D distance");
     std::cout<<"PASS: 10 mm mesh edge boundary, diagonal/3D edges, zero area, nonfinite vertices and no depth-jump filter\n";
 }
+void checkMaskedMeshArea() {
+    Inputs device(4);
+    fs::MeshGPUInputs inputs{device.xyz,device.rgb,device.mask,2,2,device.stream};
+    fs::MeshGPUBuffer output;
+    // A 4 mm square: full selection has 16 mm², three corners have 8 mm².
+    const std::vector<float> xyz{0,0,1, .004f,0,1, 0,.004f,1, .004f,.004f,1};
+    const std::vector<float> rgb(12,128);
+    device.upload(xyz,rgb,{255,255,255,255});
+    auto stats=fs::build_mesh_gpu(inputs,output);
+    require(stats.triangle_count==2 && std::abs(stats.area_m2-16e-6)<1e-10,
+            "Full square has the wrong GPU surface area");
+    device.upload(xyz,rgb,{255,255,255,0});
+    stats=fs::build_mesh_gpu(inputs,output);
+    require(stats.triangle_count==1 && std::abs(stats.area_m2-8e-6)<1e-10,
+            "Masked mesh area includes triangles outside the selection");
+    for (const auto& v:download(output))
+        require(v.z==0 || v.x!=.004f || v.y!=.004f,"Mesh retained an unselected vertex");
+    device.upload(xyz,rgb,{0,0,0,0});
+    stats=fs::build_mesh_gpu(inputs,output);
+    require(!stats.triangle_count && stats.area_m2==0,"Cleared mask retained the old mesh area");
+    for (const auto& v:download(output)) require(v.z==0,"Cleared mask retained old triangles");
+    std::cout<<"PASS: masked GPU vertices, selected-triangle area and clearing a previous mesh\n";
+}
 }
 int main() {
     try {
         checkMeshEdgeFilter();
+        checkMaskedMeshArea();
         // Non-multiples of 16 exercise partial CUDA blocks and the last pixel.
         constexpr int width=17, height=19, count=width*height;
         Inputs device(count);

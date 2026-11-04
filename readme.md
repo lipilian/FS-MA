@@ -24,7 +24,11 @@ to reconstruct, then **Capture more** for up to five views. If the camera is not
 connected at startup, attach it and click **Connect cameras**. A model load failure
 keeps the loading window open so engine paths can be corrected and retried.
 
-The first capture displays an FS triangle mesh. From the second capture onward,
+The first scan capture displays FS points. Confirm a mask with **Finish draw** to
+automatically build a GPU triangle mesh using only valid points inside that mask
+and calculate its surface area. The mask is sampled on the 960 × 800 FS grid with
+nearest-neighbour resizing. Editing and confirming the mask rebuilds this mesh;
+clearing the mask removes the mesh and its area. From the second capture onward,
 MapAnything predicts camera poses and displays each view as a point cloud; MA
 triangle meshes are not computed. MA results export as a world-space point-cloud
 PLY without faces. FS point clouds remain available through the source selector.
@@ -40,7 +44,8 @@ Captures and imported pairs reconstruct automatically. In both camera and import
 mode, click a captured camera or view label, then **Start draw** to edit its mask
 directly in the scene's left preview and **Finish draw** to confirm it. Undrawn or
 cleared FS geometry uses 30% opacity; selected regions are opaque. Mask edits retain
-the existing FS/MA results and do not trigger reconstruction. Use **Save results…**
+the existing FS depth and MA results without rerunning inference. Only single-view
+mask confirmation triggers GPU meshing and area calculation. Use **Save results…**
 in the bottom-right corner to export.
 
 Scan export resizes each rectified-left mask to 960 × 800 (width × height) using

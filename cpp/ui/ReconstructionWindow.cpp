@@ -430,8 +430,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             if (capture_mesh_requested_) {
                 capture_mesh_requested_=false;
                 setCaptureProcessing(false);
-                // Wait for FS meshing on the first capture, or for the current
-                // MA camera poses before presenting multi-view FS points.
+                // Present completed FS points after capture; scan meshing waits
+                // for Finish draw. Multi-view points wait for current MA poses.
                 if (!state_.action_failed && state_.capture_count>=2 && state_.ma_cameras &&
                     state_.ma_cameras!=displayed_ma_cameras_) {
                     capture_transition_pending_=true;
@@ -443,8 +443,10 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
                     transition_camera_id_=state_.image_id; highlighted_camera_id_=0;
                     presentGeometry(std::move(pending_capture_mesh_));
                 } else if (pending_capture_cloud_ && state_.capture_count<2) {
-                    // Meshing may reject every triangle; retain usable points
-                    // and the worker's failure message without a success animation.
+                    if (!state_.action_failed) {
+                        capture_transition_pending_=true;
+                        transition_camera_id_=state_.image_id; highlighted_camera_id_=0;
+                    }
                     presentGeometry(pending_capture_cloud_);
                 }
                 pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
@@ -595,7 +597,8 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
             return;
         }
         if (!captured_clouds_.empty()) mesh_view_->preserveView();
-        const bool single_capture=state_.capture_count==0 || (importing && !state_.import_sequence_started);
+        const bool mesh_after_capture=!inlineMaskMode() &&
+            (state_.capture_count==0 || (importing && !state_.import_sequence_started));
         const bool own_calibration=capture_calibration_->isChecked();
         capture_mesh_requested_=true;
         pending_capture_cloud_.reset(); pending_capture_mesh_.reset();
@@ -609,7 +612,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
                 w.importNextPair(own_calibration);
                 w.reconstruct(low,high,{},denoise,distance);
             } else w.captureAndReconstruct(low,high,denoise,distance);
-            if (single_capture) w.buildMeshGPU({},edge);
+            if (mesh_after_capture) w.buildMeshGPU({},edge);
         });
     });
     connect(browse_save_,&QPushButton::clicked,this,[this] {
@@ -721,10 +724,11 @@ void ReconstructionWindow::finishInlineDraw() {
     if (selected==capture_previews_.end()) return;
     selected->drawing=mask_->snapshot(); selected->mask=mask_->mask();
     drawing_mask_=false;
-    if (state_.tsdf) controller_.submit([](auto& worker) { worker.clearTSDF(); });
     mask_request_id_=controller_.requestMask(preview_camera_id_,{});
+    state_.status="Mask saved for this view in the current session.";
     refresh();
-    status_->setText("Mask saved for this view in the current session.");
+    if (state_.tsdf) controller_.submit([](auto& worker) { worker.clearTSDF(); });
+    else if (state_.capture_count==1) buildMeshGPU();
 }
 QImage ReconstructionWindow::exportMask() const {
     // The existing export saves the latest pair, even while reviewing an older camera.
@@ -757,10 +761,22 @@ void ReconstructionWindow::saveScanResults() {
     controller_.submit([=](auto& worker) { worker.saveScanResults(directory,masks,overwrite); });
 }
 void ReconstructionWindow::buildMeshGPU() {
-    if (busy_ || closing_ || gpu_upload_pending_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !reconstruction_valid_ ||
+    if (busy_ || closing_ || drawing_mask_ || gpu_upload_pending_ || capture_transition_pending_ || capture_transition_->isRunning() || state_.live || !reconstruction_valid_ ||
         !state_.depth_ready || !state_.gpu_ready || !state_.engine_ready || state_.capture_count>=2) return;
-    mesh_valid_=false; refresh();
-    const QImage selected=inlineMaskMode() ? QImage{} : mask_->mask();
+    const QImage selected=exportMask();
+    if (inlineMaskMode()) {
+        // Discard the previous region's mesh and area, even when the new mask
+        // is empty or cannot produce triangles. Keep the cached FS points.
+        if (gpu_mesh_result_ && !gpu_mesh_result_->point_cloud && !captured_clouds_.empty())
+            presentGeometry(captured_clouds_.front());
+        if (selected.isNull()) return;
+        const auto gray=selected.convertToFormat(QImage::Format_Grayscale8);
+        const cv::Mat pixels(gray.height(),gray.width(),CV_8UC1,
+                             const_cast<uchar*>(gray.constBits()),gray.bytesPerLine());
+        if (!cv::countNonZero(pixels)) return;
+    } else {
+        mesh_valid_=false; refresh();
+    }
     const double edge=mesh_edge_->value();
     controller_.submit([=](auto& worker) { worker.buildMeshGPU(selected,edge); });
 }
@@ -843,7 +859,9 @@ void ReconstructionWindow::refresh() {
             : state_.import_index>=state_.import_total ? "All pairs have been imported. Restart or choose another folder."
                                                        : "Five views are complete. Restart or choose another folder.")
         : state_.live
-        ? (state_.capture_count==0 ? "Capture this stereo pair and automatically display the FS GPU mesh."
+        ? (state_.capture_count==0 ? (inlineMaskMode()
+                ? "Capture this stereo pair and display FS points. Finish drawing a mask to generate its mesh and area."
+                : "Capture this stereo pair and automatically display the FS GPU mesh.")
                                    : "Capture this stereo pair and display FS point clouds at the updated MA camera poses.")
         : state_.capture_count>=PipelineState::kMaxCaptures
             ? "Five captures are complete. Retake the latest view or restart."
@@ -1044,7 +1062,7 @@ void ReconstructionWindow::presentGeometry(SharedGPUMesh mesh) {
             [&](const auto& cloud) { return cloud && cloud->image_id==it.key(); })) it=capture_previews_.erase(it);
         else ++it;
     }
-    mesh_mode_->setCurrentIndex(0);
+    mesh_mode_->setCurrentIndex(inlineMaskMode() && !gpu_mesh_result_->point_cloud ? 1 : 0);
     tabs_->setCurrentIndex(SceneTab);
     mesh_view_->setGPUMesh(gpu_mesh_result_);
     if (capture_transition_pending_) mesh_view_->resetCaptureView();

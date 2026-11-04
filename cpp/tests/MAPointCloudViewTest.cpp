@@ -483,7 +483,7 @@ int main(int argc, char** argv) {
         require(check_blend(multi_solid,rotated,true)==std::pair(0,713) &&
                 check_blend(multi_solid,rotated,false)==std::pair(192,521) && uploads==multi_uploads,
                 "Mask coordinates changed with MA pose or caused a geometry upload");
-        // The first imported view defaults to an FS triangle mesh.
+        // A single-view FS triangle mesh supports the same mask projection.
         const auto surface=fsGeometry(503,true);
         view.setCameraPresentation(503,0);
         view.setCapturedClouds({}); view.setGPUMesh(surface); view.setPredictedCameras({});
@@ -497,7 +497,7 @@ int main(int argc, char** argv) {
                 "First-view FS mesh failed to project its mask in local rectified coordinates");
         view.setFSMasks({},false);
         require(snapshot()==solid_surface,"Leaving mask display did not restore the original FS mesh");
-        // Match the first import: retain FS points while the mesh replaces them.
+        // Retain FS points while a confirmed single-view mesh replaces them.
         // Point mode must use those original points, not repeated triangle vertices.
         const auto surface_points=fsGeometry(503,false);
         view.setCapturedClouds({surface_points},surface_points); snapshot();
