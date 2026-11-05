@@ -1581,6 +1581,7 @@
             <a href="#vit-fiew-views-photogrammetry-heading">Overview</a>
             <a href="#mapanything-engine-build-heading">MapAnything TensorRT Engine Build</a>
             <a href="#mapanything-inference-optimization-heading">MapAnything TensorRT Inference Optimization Plan</a>
+            <a href="#mapanything-fused-encoder-benchmark-heading">MapAnything F_fused + CLS Benchmark</a>
           </div>
         </details>
       </div>
@@ -2936,6 +2937,25 @@ cmake --build cpp/build --target fs_gui --parallel
           </table>
         </div>
         <p class="note">Keep model weights and input resolution unchanged. Rebuilding engines or changing fused kernels can alter floating-point rounding, so validate pose and scale outputs alongside timing before adopting a change.</p>
+      </article>
+
+      <article class="engine-build-step" aria-labelledby="mapanything-fused-encoder-benchmark-heading">
+        <h3 id="mapanything-fused-encoder-benchmark-heading">MapAnything (MA) F_fused + CLS Benchmark · 2026-11-04</h3>
+        <p><strong>Measured: processing 5 images as one batch takes approximately 265 ms in total to generate all <code>F_fused + CLS</code> outputs.</strong></p>
+        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="mapanything-fused-encoder-benchmark-heading">
+          <table>
+            <thead>
+              <tr><th scope="col">Views in batch</th><th scope="col">Total latency (median)</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">1 image</th><td><strong>52.63 ms</strong></td></tr>
+              <tr><th scope="row">5 images</th><td><strong>265.01 ms</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The measured work includes the DINO RGB encoder, ray/depth/scale encoders and geometry fusion, producing FP32 <code>F_fused</code> and <code>CLS</code>. Each view uses a 434 × 518 input (height × width).</p>
+        <p class="note">NVIDIA RTX PRO 4000 Blackwell · TensorRT 11.2.1.2 · separate fixed-view encoder engines for 1 and 5 views. Timings use CUDA events after warm-up, with inputs and outputs on the GPU and CUDA Graph disabled. They exclude FS inference, input preprocessing, CPU/GPU transfers, loading, initial allocation, the multi-view Transformer and prediction heads; they are not timings of the complete MA engine.</p>
+        <p>Recorded results: <a href="../result/ma_fused_encoder_20261104/summary.json">1-view benchmark</a> · <a href="../result/ma_fused_encoder_v5_20261104/summary.json">5-view benchmark</a>.</p>
       </article>
     </section>
 
