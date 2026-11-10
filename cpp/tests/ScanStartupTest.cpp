@@ -1,4 +1,5 @@
 #include "DesktopController.hpp"
+#include "CalibrationWindow.hpp"
 #include "ScanExport.hpp"
 #include "fs/capture/ZedStereoSource.hpp"
 #include <QProgressBar>
@@ -39,6 +40,29 @@
 
 namespace {
 void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+
+void checkMaEngineSelection() {
+    InferenceSplashWindow splash(false);
+    auto* encoder=splash.findChild<QLineEdit*>("splashMaEncoder");
+    auto* pose_scale=splash.findChild<QLineEdit*>("splashMaPoseScale");
+    require(encoder && pose_scale,"Missing separate MA engine selectors");
+    require(encoder->text().endsWith("mapanything_fix_encoder_fmha.engine") &&
+            pose_scale->text().endsWith("mapanything_dynamic_pose_scale_fmha.engine"),
+            "MA startup defaults are not the two FMHA engines");
+    encoder->setText(" /tmp/custom_encoder.engine ");
+    pose_scale->setText(" /tmp/custom_pose_scale.engine ");
+    splash.startLoading();
+    require(!encoder->isEnabled() && !pose_scale->isEnabled(),"MA paths can change while loading");
+    splash.showFailure("test failure");
+    require(encoder->isEnabled() && pose_scale->isEnabled(),"MA paths cannot be corrected after a failure");
+    bool received=false;
+    QObject::connect(&splash,&InferenceSplashWindow::retryRequested,&splash,
+        [&](const QString&,const QString&,const QString&,const QString& enc,const QString& pose) {
+            received=enc=="/tmp/custom_encoder.engine" && pose=="/tmp/custom_pose_scale.engine";
+        });
+    splash.findChild<QPushButton*>("retryInitialization")->click();
+    require(received,"Retry did not forward both selected MA engine paths");
+}
 
 cv::Mat pointCloudDepth(const SharedGPUMesh& cloud) {
     require(cloud && cloud->point_cloud,"Expected a cached point cloud");
@@ -135,12 +159,6 @@ void checkCapturePresentation() {
     require(!transition.isRunning() && !transition.isVisible() && finished==2, "Transfer did not cancel cleanly");
     require(!transition.start(input,[&] { return source; },[] { return QPolygonF{}; }),
             "Transfer started without a projected camera plane");
-    MeshView unavailable;
-    int render_errors=0;
-    QObject::connect(&unavailable,&MeshView::renderFailed,[&](const QString&) { ++render_errors; });
-    auto geometry=std::make_shared<std::vector<SharedGPUMesh>>(); geometry->push_back(std::make_shared<GPUMeshFrame>());
-    unavailable.setMAClouds(geometry); unavailable.setMAClouds(geometry); unavailable.setMAClouds({});
-    require(render_errors==1,"Unavailable MA renderer repeated its error on every UI refresh");
     std::cout<<"PASS: static calculation preview, shrinking camera transfer, moving target, completion and cancellation\n";
 }
 
@@ -1237,7 +1255,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
 
 // Explicit opt-in: needs the actual engines, ZED and an NVIDIA OpenGL display.
 int checkLiveScan(QApplication& app) {
-    DesktopController desktop(DesktopController::StartupMode::ZedScan);
+    DesktopController desktop;
     QPointer<ReconstructionWindow> window;
     bool finished=false, passed=false;
     QString failure;
@@ -1252,7 +1270,7 @@ int checkLiveScan(QApplication& app) {
         auto* left=window->findChild<StereoImageView*>("capturePreview");
         auto* right=window->findChild<StereoImageView*>("rightCapturePreview");
         auto* mode=window->findChild<QComboBox*>("cameraImageMode");
-        // Renderer picking is exercised in MAPointCloudViewTest. Here verify
+        // Renderer picking is exercised in CapturePointCloudViewTest. Here verify
         // the receiver against the full-resolution images seen at capture time.
         for (const auto id:preview_ids) {
             view->cameraClicked(id);
@@ -1340,9 +1358,6 @@ int checkLiveScan(QApplication& app) {
                     });
                     QObject::connect(view,&MeshView::renderFailed,&app,[&](QString error) { finish(error); });
                     require(!window->findChild<QRadioButton*>("maPointCloud"),"MA point-cloud option must be removed");
-                    QObject::connect(view,&MeshView::maCloudsPresented,&app,[&](SharedGPUClouds) {
-                        finish("Scan workspace unexpectedly displayed MA point clouds");
-                    });
                     QObject::connect(view,&MeshView::gpuMeshPresented,&app,[&](SharedGPUMesh mesh) {
                         if (finished || !mesh) return;
                         captured_left.insert(mesh->image_id,window->findChild<StereoImageView*>("capturePreview")->image());
@@ -1665,6 +1680,7 @@ int main(int argc, char** argv) {
         if (live) return checkLiveScan(app);
         if (zed_capture) return checkZedCapture(app);
         if (imported) return checkImportedScan(QString::fromLocal8Bit(argv[2]),QString::fromLocal8Bit(argv[3]));
+        checkMaEngineSelection();
         checkCapturePresentation();
         checkUncalibratedPipeline();
         checkRectifiedImport();

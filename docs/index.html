@@ -2613,15 +2613,16 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
     <section class="card" aria-labelledby="urgent-lens-e-heading" style="border-left: 5px solid #15803d; background: linear-gradient(135deg, #ffffff, #f0fdf4);">
       <p class="bottleneck-kicker" style="color: #15803d; font-weight: 900; letter-spacing: 0.12em;">LENS E · COMPLETED</p>
       <h2 id="urgent-lens-e-heading" style="color: #15803d; font-size: clamp(1.8rem, 3.5vw, 3rem);">Urgent Task with Lens E · 2026/09/09 · Completed</h2>
+      <p><strong>Historical workflow:</strong> the calibration-first <code>fs_gui</code> application was removed on 2026-11-10. The notes below record its earlier behavior. Use <code>scan_gui</code> for current ZED scanning and capture imports; it starts directly at model loading.</p>
       <p><strong>Implementation update · 2026-09-11:</strong> the desktop now covers interactive masks, GPU depth/denoising, CPU mesh inspection, result export and strict capture-folder validation. Sections 6–10 document these additions. Hardware accuracy and long-session acceptance remain open; see the <a href="code_structure.html">updated code structure guide</a>.</p>
 
       <article class="engine-build-step" aria-labelledby="sentech-lens-e-sdk-heading">
         <h3 id="sentech-lens-e-sdk-heading">1. Integrate the Sentech Lens E SDK</h3>
-        <p>The Sentech SDK source connects the left and right cameras for the Lens E setup and supplies owned RGB frames to the Qt calibration window. Use <code>fs_gui</code> → <strong>Connect cameras</strong>; the standalone OpenCV preview/capture CLI has been removed.</p>
+        <p>The Sentech SDK source connects the left and right cameras for the Lens E setup and supplies owned RGB frames to the Qt calibration window. The former calibration application exposed <strong>Connect cameras</strong>; the standalone OpenCV preview/capture CLI has been removed.</p>
       </article>
       <article class="engine-build-step" aria-labelledby="qt-calibration-window-heading">
         <h3 id="qt-calibration-window-heading">2. Qt 6 Calibration Window</h3>
-        <p><strong>Implemented · First-window workflow.</strong> The new <code>fs_gui</code> application opens a dedicated Qt 6 Widgets calibration window. Camera acquisition, ChArUco detection and calibration run on a background worker; the window remains responsive during computation.</p>
+        <p><strong>Historical · First-window workflow.</strong> The former <code>fs_gui</code> application opened a dedicated Qt 6 Widgets calibration window. Camera acquisition, ChArUco detection and calibration run on a background worker; the window remains responsive during computation.</p>
 
         <h4>Window layout and implemented controls</h4>
         <p>Calibration and reconstruction open maximized. On GNOME/X11, the request is issued once after the native window is exposed so the initial size negotiation does not discard it. The loading splash remains compact.</p>
@@ -2645,11 +2646,12 @@ fs.compute_xyz_map(0.1F, 0.8F);    // Recompute with 0.1 ≤ Z ≤ 0.8 m, reusin
         <h4>Automatic loading and skipping calibration</h4>
         <p>Successful save/load remembers the absolute file path in <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code> (this user: <code>/tmp/FS_Engine-1000/fs_gui.conf</code>). This history follows the system’s <code>/tmp</code> cleanup policy; the calibration JSON remains at the chosen save location. At startup, the window first tries that file, then <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code> in the working directory and executable directory. The first valid file matching the applied board and configured camera identities is loaded. The Save dialog also remembers the path.</p>
         <p>A matching saved result displays its path and <strong>Skip calibration · Continue</strong>. Clicking it explicitly reuses the result without requiring new samples or a fresh check; cameras need not be connected. If connected, their image grid must match before continuing. Reuse does not claim a new quality check was performed. Invalid or incompatible files display a reason, and the normal calibration controls remain available. You can also choose to check or recalibrate. Applying different board parameters, adding/deleting samples, or starting a new check invalidates the applicable saved-result shortcut. New checks require saving the updated result again.</p>
-        <h4>Build and launch</h4>
+        <h4>Current desktop entry</h4>
+        <p>The calibration application is no longer built. To open the scanning workspace:</p>
         <pre><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
-cmake --build cpp/build --target fs_gui --parallel
-./cpp/build/fs_gui</code></pre>
-        <p>Alternatively, select <strong>Run FS GUI</strong> in VS Code Run and Debug. Its <code>Build FS GUI</code> task configures and builds the executable. The desktop target is enabled by default (disable with <code>-DFS_BUILD_DESKTOP=OFF</code>) and requires Qt 6 Widgets, OpenCV aruco and the Sentech SDK; it does not link OpenCV highgui/Qt 5. See <a href="code_structure.html#build-setup">C++ build setup</a> for fresh-build CUDA settings.</p>
+cmake --build cpp/build --target scan_gui --parallel
+./cpp/build/scan_gui</code></pre>
+        <p>VS Code provides <strong>Run Scan GUI</strong> and <strong>Build Scan GUI</strong>. See <a href="code_structure.html#build-setup">C++ build setup</a> for dependencies and CUDA settings.</p>
 
         <h4>Closing and the next window</h4>
         <p><strong>Closing the window also releases both cameras before exiting.</strong> It stops preview, cancels capture, releases SDK resources and ends the worker thread. An active OpenCV calibration calculation is allowed to finish before shutdown. Ordinary close cancels the session and does not automatically save unsaved calibration or open the second window.</p>
@@ -2659,7 +2661,7 @@ cmake --build cpp/build --target fs_gui --parallel
         <p><strong>Capture preview fix:</strong> disabling the focused Capture button could move Qt focus into the history list, select its first row and briefly display an old sample. Control refresh now blocks history-list signals and preserves its selection. A temporary synthetic-board Qt replay reproduced three historical previews across three repeated captures before the fix and zero afterward; explicit history clicks, keyboard navigation and Return to live still pass.</p>
         <p><strong>Passed:</strong> Release build; Qt 6 runtime dependency check; real-camera 2448×2048 stereo preview with correct left/right binding; capture cancellation, disconnect/reconnect and window shutdown. Synthetic checks covered 63-corner detection, calibration and independent reprojection, baseline scale/direction, JSON compatibility and independent matrix ownership. An eight-sample replay completed capture → solve → check → save → finish; premature completion was rejected and a save failure kept the window open.</p>
         <p><strong>Still to validate:</strong> calibration accuracy with the physical board and physical camera-unplug behaviour. The camera preview used during verification did not detect the board. Sample images currently remain in session memory; matrix-only legacy calibration files are supported by the CLI but require recalibration or complete matching metadata for this window.</p>
-        <p><code>cpp/app/desktop_main.cpp</code> is the entry point; <code>cpp/cmake/Desktop.cmake</code> defines the desktop targets; <code>cpp/ui/</code> contains the window, controllers, worker and image widget; <code>cpp/include/fs/calibration/</code> and <code>cpp/src/calibration/</code> contain the OpenCV algorithms.</p>
+        <p>The former desktop entry was removed; <code>cpp/app/scan_main.cpp</code> is the current scanning entry; <code>cpp/cmake/Desktop.cmake</code> defines the desktop targets; <code>cpp/ui/</code> contains the window, controllers, worker and image widget; <code>cpp/include/fs/calibration/</code> and <code>cpp/src/calibration/</code> contain the OpenCV algorithms.</p>
         <p><a href="code_structure.html#qt-calibration">Qt code structure and module responsibilities →</a></p>
       </article>
       <article class="engine-build-step" aria-labelledby="qt-splash-window-heading">
@@ -2673,7 +2675,7 @@ cmake --build cpp/build --target fs_gui --parallel
       </article>
       <article class="engine-build-step" aria-labelledby="qt-reconstruction-window-heading">
         <h3 id="qt-reconstruction-window-heading">4. Qt 6 Reconstruction Window · 2026-09-11</h3>
-        <p><strong>Implemented.</strong> The workspace follows calibration and the FS/SAM splash in the same fs_gui application. Import a capture folder or use the transferred live camera source, freeze a pair, draw a region, reconstruct depth, then generate and inspect the CPU mesh. There is no reconstruction-only startup shortcut.</p>
+        <p><strong>Historical workflow.</strong> The workspace originally followed calibration and the FS/SAM splash in the former calibration application. Import a capture folder or use the transferred live camera source, freeze a pair, draw a region, reconstruct depth, then generate and inspect the CPU mesh. The current <code>scan_gui</code> entry starts directly at model loading and reconstruction.</p>
         <p>Rectified switches frozen images and live preview between raw and rectified RGB. Epipolar guides are unchecked by default and available for rectified views. Live remapping and preview downscaling run on PipelineWorker with cached maps; old-mode queued previews are discarded. Capture pair retains full-resolution raw images and rectifies them for reconstruction.</p>
         <p>The GUI owns controls and rendering. PipelineController serializes work on a dedicated QThread; PipelineWorker owns the frozen pair, model instances and cached results. FS and SAM have separate CUDA streams, while their CPU calls share that worker. Closing waits for safe cleanup of models and cameras.</p>
         <ul>
@@ -2874,25 +2876,16 @@ cmake --build cpp/build --target fs_gui --parallel
     <section class="card" aria-labelledby="vit-fiew-views-photogrammetry-heading" style="border-left: 5px solid #eab308; background: linear-gradient(135deg, #ffffff, #fef9c3);">
       <h2 id="vit-fiew-views-photogrammetry-heading" style="color: #a16207; font-size: clamp(1.8rem, 3.5vw, 3rem);">Vit fiew views photogrammetry</h2>
       <article class="engine-build-step" aria-labelledby="mapanything-engine-build-heading">
-        <h3 id="mapanything-engine-build-heading">MapAnything (MA) TensorRT Engine Build</h3>
-        <p>Build the dynamic-view engine from the existing BF16 ONNX export. Keep <code>mapanything_dynamic_raw_bf16.onnx.data</code> beside the ONNX file. The external input is FP32 <code>inputs: [V, 7, 434, 518]</code>, with 2–5 views and an optimization shape of 3 views.</p>
-        <p>Run from the project root on the GPU that will run inference. The command saves the engine at the path used by <code>scan_gui</code> and replaces an existing file with the same name.</p>
-        <pre><code>cd /home/liu4000/Desktop/research/FS_Engine
-
-/usr/bin/trtexec \
-  --onnx=onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.onnx \
-  --saveEngine=onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.engine \
-  --minShapes=inputs:2x7x434x518 \
-  --optShapes=inputs:3x7x434x518 \
-  --maxShapes=inputs:5x7x434x518 \
-  --noTF32 \
-  --skipInference</code></pre>
-        <p><code>--noTF32</code> disables TF32; BF16 operations are already encoded in the ONNX graph. <code>--skipInference</code> builds and saves the engine without running the inference benchmark.</p>
+        <h3 id="mapanything-engine-build-heading">MapAnything (MA) FMHA Engines</h3>
+        <p><code>scan_gui</code> loads two engines from <code>onnx/MapAnything/updated_onnx/</code>: <code>mapanything_fix_encoder_fmha.engine</code> and <code>mapanything_dynamic_pose_scale_fmha.engine</code>. Both paths can be selected in the loading window.</p>
+        <p>The encoder processes each changed view as FP32 <code>inputs: [1,7,434,518]</code> and writes its fixed <code>F_fused[1536,31,37]</code> / <code>CLS[1536,1]</code> slots. The pose/scale engine reads the first 2–5 slots directly and produces raw <code>poses[V,7]</code> and scene <code>scale[1,1,1]</code>.</p>
+        <p><code>fs::MA</code> allocates the five-view input and feature banks, outputs, one context per engine and one shared activation workspace during construction. The workspace is sized to the larger of the two engines’ maximum device-memory requirements and is released after both contexts on destruction. One encoder context processes changed views serially by rebinding each view's fixed input and output addresses. RGB/depth changes invalidate the affected view's encoder cache. The GUI displays FS point clouds positioned by MA camera poses; the old single-engine loading path and dense MA point-cloud decoder are removed.</p>
+        <p>For model interfaces and pose/scale engine build instructions, see <a href="../onnx/MapAnything/updated_onnx/README.md">MapAnything split models</a>.</p>
       </article>
 
       <article class="engine-build-step" aria-labelledby="mapanything-inference-optimization-heading">
         <h3 id="mapanything-inference-optimization-heading">MapAnything (MA) TensorRT Inference Optimization Plan</h3>
-        <p><strong>Proposed optimizations:</strong> the following changes target MA inference and the surrounding FoundationStereo (FS) pipeline. Implementation and performance validation are pending.</p>
+        <p><strong>Earlier optimization proposal:</strong> the table below records the original plan. The current GUI now uses separate FMHA encoder and pose/scale engines with constructor-time allocation and cached per-view features, as described above. Other proposals still require implementation and validation.</p>
         <div class="table-wrap" tabindex="0" role="region" aria-labelledby="mapanything-inference-optimization-heading">
           <table>
             <thead>

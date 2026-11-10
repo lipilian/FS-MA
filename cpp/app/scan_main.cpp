@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     parser.addHelpOption(); parser.addVersionOption(); parser.process(app);
     try {
         cv::setNumThreads(4);
-        DesktopController desktop(DesktopController::StartupMode::ZedScan);
+        DesktopController desktop;
         desktop.show();
         return app.exec();
     } catch (const std::exception& e) {

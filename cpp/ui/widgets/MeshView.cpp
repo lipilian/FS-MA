@@ -48,7 +48,7 @@ class MeshCanvas : public QOpenGLWidget {
         update();
     }
     void setMode(int mode) {
-        mode_ = show_ma_clouds_ ? 0 : mode;
+        mode_ = mode;
         // Both FS representations are already cached. Switching their draw
         // mode must not reupload vertices or change the fitted viewpoint.
         update();
@@ -60,22 +60,6 @@ class MeshCanvas : public QOpenGLWidget {
         if (same) return;
         fs_mask_display_=enabled;
         fs_masks_=std::move(masks);
-        update();
-    }
-    void setMAClouds(SharedGPUClouds clouds) {
-        if (ma_clouds_==clouds) return;
-        ma_clouds_=std::move(clouds);
-        captures_dirty_=true; dirty_=true; failed_=false;
-        announce_ma_=ma_clouds_ && !ma_clouds_->empty();
-        update();
-    }
-    void setShowMAClouds(bool enabled) {
-        if (show_ma_clouds_==enabled) return;
-        show_ma_clouds_=enabled;
-        if (enabled) mode_=0;
-        // Keep identical framing when comparing both reconstructions.
-        preserveView();
-        dirty_=true;
         update();
     }
     void setTSDF(SharedTsdfScene scene, bool visible) {
@@ -296,7 +280,6 @@ void main() {
         camera_dirty_ = true; image_dirty_.fill(true);
         captures_dirty_=true;
         dirty_ = true; failed_=false; announce_gpu_=bool(gpu_mesh_);
-        announce_ma_=ma_clouds_ && !ma_clouds_->empty();
         emit owner_->log(QString("3D renderer: OpenGL %1 (Core), %2")
                              .arg(QString::fromLatin1(reinterpret_cast<const char *>(gl_->glGetString(GL_VERSION))))
                              .arg(QString::fromLatin1(reinterpret_cast<const char *>(gl_->glGetString(GL_RENDERER)))));
@@ -378,11 +361,10 @@ void main() {
                 continue;
             }
             if (isTSDF(capture->frame)) continue;
-            if (show_ma_clouds_ != isMACloud(capture->frame)) continue;
-            if (!show_ma_clouds_ && capture->frame==hidden_capture_ && !captured_points) continue;
+            if (capture->frame==hidden_capture_ && !captured_points) continue;
             items.push_back({capture->frame,&capture->vao,capture->count});
         }
-        if (!show_tsdf_ && !show_ma_clouds_ && !captured_points && gpu_mesh_ && count_>0) items.push_back({gpu_mesh_,&vao_,count_});
+        if (!show_tsdf_ && !captured_points && gpu_mesh_ && count_>0) items.push_back({gpu_mesh_,&vao_,count_});
         std::stable_partition(items.begin(),items.end(),[&](const auto& item) { return !isHoveredFSCloud(item.frame); });
         const auto draw_geometry=[&](bool translucent, GLenum depth_function=GL_NONE) {
             program_->setUniformValue("translucentPass",translucent);
@@ -449,7 +431,7 @@ void main() {
             }
             camera_vao_.release();
         }
-        if (!show_ma_clouds_ && fs_mask_display_) {
+        if (fs_mask_display_) {
             // First find the nearest unselected sample at each screen pixel.
             // Mark only pixels in front of the existing opaque geometry.
             gl_->glEnable(GL_STENCIL_TEST);
@@ -482,14 +464,6 @@ void main() {
                 failed_=true;
                 emit owner_->renderFailed(QString("OpenGL mesh draw failed (error %1).").arg(error));
             } else emit owner_->gpuMeshPresented(gpu_mesh_);
-        }
-        if (announce_ma_ && show_ma_clouds_ && ma_clouds_) {
-            announce_ma_=false;
-            const auto error=gl_->glGetError();
-            if (error!=GL_NO_ERROR) {
-                failed_=true;
-                emit owner_->renderFailed(QString("OpenGL MA point-cloud draw failed (error %1).").arg(error));
-            } else emit owner_->maCloudsPresented(ma_clouds_);
         }
     }
     void mousePressEvent(QMouseEvent *e) override {
@@ -594,7 +568,7 @@ void main() {
         int first_vertex{-1};
     };
     bool bindFSMask(const SharedGPUMesh& frame) {
-        const bool selection=fs_mask_display_ && !frame->world_space && !isMACloud(frame);
+        const bool selection=fs_mask_display_ && !frame->world_space;
         program_->setUniformValue("fsSelectionEnabled",selection);
         const auto source=fs_masks_.constFind(frame->image_id);
         const bool masked=selection && source!=fs_masks_.cend() && !source->isNull() && validCamera(frame->camera);
@@ -624,24 +598,20 @@ void main() {
     }
     bool hasMesh() const {
         if (show_tsdf_) return tsdf_ && (tsdf_->mesh || tsdf_->points);
-        return show_ma_clouds_ ? ma_clouds_ && !ma_clouds_->empty()
-            : !captured_clouds_.empty() || gpu_mesh_;
-    }
-    bool isMACloud(const SharedGPUMesh& mesh) const {
-        return ma_clouds_ && std::find(ma_clouds_->begin(),ma_clouds_->end(),mesh)!=ma_clouds_->end();
+        return !captured_clouds_.empty() || gpu_mesh_;
     }
     bool isTSDF(const SharedGPUMesh& mesh) const {
         return tsdf_ && mesh && (mesh==tsdf_->mesh || mesh==tsdf_->points);
     }
     bool isHoveredFSCloud(const SharedGPUMesh& mesh) const {
-        return !show_ma_clouds_ && hovered_camera_id_ && mesh && mesh->point_cloud &&
-            mesh->image_id==hovered_camera_id_ && !isMACloud(mesh);
+        return hovered_camera_id_ && mesh && mesh->point_cloud &&
+            mesh->image_id==hovered_camera_id_;
     }
     bool isCaptured(const SharedGPUMesh& mesh) const {
         return std::find(captured_clouds_.begin(),captured_clouds_.end(),mesh)!=captured_clouds_.end();
     }
     bool useCapturedPoints() const {
-        return !show_ma_clouds_ && mode_==0 && gpu_mesh_ && !gpu_mesh_->point_cloud && gpu_mesh_->image_id &&
+        return mode_==0 && gpu_mesh_ && !gpu_mesh_->point_cloud && gpu_mesh_->image_id &&
             std::any_of(captured_clouds_.begin(),captured_clouds_.end(),[&](const auto& frame) {
                 return frame && frame->point_cloud && frame->image_id==gpu_mesh_->image_id;
             });
@@ -740,8 +710,6 @@ void main() {
         };
         if (show_tsdf_) {
             if (tsdf_) add_gpu(mode_==0 ? tsdf_->points : tsdf_->mesh);
-        } else if (show_ma_clouds_) {
-            if (ma_clouds_) for (const auto& frame:*ma_clouds_) add_gpu(frame);
         } else {
             const bool captured_points=useCapturedPoints();
             for (const auto& cloud:captured_clouds_) if (cloud!=hidden_capture_ || captured_points) add_gpu(cloud);
@@ -768,12 +736,11 @@ void main() {
     }
     void uploadCaptures() {
         for (auto it=cloud_resources_.begin();it!=cloud_resources_.end();) {
-            if (isCaptured((*it)->frame) || isMACloud((*it)->frame) || isTSDF((*it)->frame)) { ++it; continue; }
+            if (isCaptured((*it)->frame) || isTSDF((*it)->frame)) { ++it; continue; }
             destroyCapture(**it); it=cloud_resources_.erase(it);
         }
         auto clouds=captured_clouds_;
         if (tsdf_) { clouds.push_back(tsdf_->mesh); clouds.push_back(tsdf_->points); }
-        if (ma_clouds_) clouds.insert(clouds.end(),ma_clouds_->begin(),ma_clouds_->end());
         for (const auto& frame:clouds) {
             if (!frame || !(frame->stats.point_count || frame->stats.triangle_count)) continue;
             const auto existing=std::find_if(cloud_resources_.begin(),cloud_resources_.end(),
@@ -1136,10 +1103,7 @@ void main() {
     MeshView* owner_;
     SharedGPUMesh gpu_mesh_;
     std::vector<SharedGPUMesh> captured_clouds_;
-    SharedGPUClouds ma_clouds_;
-    bool announce_ma_{false};
     quint64 active_camera_id_{0}, highlighted_camera_id_{0}, hidden_image_id_{0};
-    bool show_ma_clouds_{false};
     bool fs_mask_display_{false};
     QHash<quint64,QImage> fs_masks_;
     QHash<quint64,CameraTexture> mask_textures_;
@@ -1237,19 +1201,8 @@ void MeshView::setOriginalCameras(SharedPredictedCameras cameras) {
 void MeshView::setCameraInteractionEnabled(bool enabled) {
     if (canvas_) canvas_->setCameraInteractionEnabled(enabled);
 }
-void MeshView::setMAClouds(SharedGPUClouds clouds) {
-    if (canvas_) canvas_->setMAClouds(std::move(clouds));
-    else if (offscreen_ma_clouds_!=clouds) {
-        offscreen_ma_clouds_=std::move(clouds);
-        if (offscreen_ma_clouds_ && !offscreen_ma_clouds_->empty())
-            emit renderFailed("MA point-cloud rendering requires a hardware OpenGL display session.");
-    }
-}
 void MeshView::setCameraPresentation(quint64 active, quint64 highlighted, quint64 hidden) {
     if (canvas_) canvas_->setCameraPresentation(active,highlighted,hidden);
-}
-void MeshView::setShowMAClouds(bool enabled) {
-    if (canvas_) canvas_->setShowMAClouds(enabled);
 }
 void MeshView::setTSDF(SharedTsdfScene scene, bool visible) {
     if (canvas_) canvas_->setTSDF(std::move(scene),visible);

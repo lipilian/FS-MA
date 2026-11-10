@@ -35,10 +35,10 @@ void PipelineController::submit(std::function<void(PipelineWorker&)> action) {
     QMetaObject::invokeMethod(worker, [worker, action = std::move(action)] { worker->execute(action); }, Qt::QueuedConnection);
 }
 void PipelineController::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder,
-                                    const QString& ma_engine) {
+                                    const QString& ma_encoder, const QString& ma_pose_scale) {
     if (busy_ || stopping_) return;
     initializing_ = true;
-    submit([engine_path,sam_encoder,sam_decoder,ma_engine](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder,ma_engine); });
+    submit([engine_path,sam_encoder,sam_decoder,ma_encoder,ma_pose_scale](auto& worker) { worker.initialize(engine_path,sam_encoder,sam_decoder,ma_encoder,ma_pose_scale); });
 }
 quint64 PipelineController::requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts, QImage image) {
     const quint64 revision = mask_request_->fetch_add(1)+1;

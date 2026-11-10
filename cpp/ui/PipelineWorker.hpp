@@ -66,7 +66,7 @@ public:
                    std::shared_ptr<std::atomic_bool> cancel, double exposure_us = SentechStereoOptions{}.exposure_us);
     void execute(const std::function<void(PipelineWorker&)>& action);
     void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {},
-                    const QString& ma_engine = {});
+                    const QString& ma_encoder = {}, const QString& ma_pose_scale = {});
     void setImportDirectory(const QString& directory);
     void importNextPair(bool use_capture_calibration);
     void connectCameras(CameraMode mode = CameraMode::Sentech);

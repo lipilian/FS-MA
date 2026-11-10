@@ -26,7 +26,7 @@ QLabel* label(const QString& text) {
 }
 InferenceSplashWindow::InferenceSplashWindow(bool calibration_completed) : QWidget(nullptr, Qt::Dialog) {
     setObjectName("inferenceSplashWindow"); setWindowTitle("FoundationStereo · Preparing reconstruction");
-    resize(820, 650); setMinimumSize(700, 600);
+    resize(820, 730); setMinimumSize(700, 680);
     setStyleSheet(R"(
         QWidget#inferenceSplashWindow { background: #f3f6fa; }
         QWidget { color: #20314a; font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -62,7 +62,8 @@ InferenceSplashWindow::InferenceSplashWindow(bool calibration_completed) : QWidg
     };
     engineRow("SAM 2.1 encoder","onnx/sam2.1_hiera_large.encoder.engine","splashSamEncoder",sam_encoder_,browse_sam_encoder_);
     engineRow("SAM 2.1 decoder","onnx/sam2.1_hiera_large.decoder.engine","splashSamDecoder",sam_decoder_,browse_sam_decoder_);
-    engineRow("MapAnything","onnx/MapAnything/onnx/mapanything_dynamic_raw_bf16.engine","splashMaEngine",ma_engine_,browse_ma_engine_);
+    engineRow("MapAnything encoder","onnx/MapAnything/updated_onnx/mapanything_fix_encoder_fmha.engine","splashMaEncoder",ma_encoder_,browse_ma_encoder_);
+    engineRow("MapAnything pose/scale","onnx/MapAnything/updated_onnx/mapanything_dynamic_pose_scale_fmha.engine","splashMaPoseScale",ma_pose_scale_,browse_ma_pose_scale_);
     status_ = label("Waiting to initialize…"); status_->setObjectName("loadingStatus"); status_->setMinimumHeight(72); layout->addWidget(status_,1);
     progress_ = new QProgressBar; progress_->setTextVisible(false); layout->addWidget(progress_);
     auto* footer = new QHBoxLayout;
@@ -70,7 +71,7 @@ InferenceSplashWindow::InferenceSplashWindow(bool calibration_completed) : QWidg
     retry_ = new QPushButton("Retry initialization"); retry_->setObjectName("retryInitialization"); retry_->hide(); footer->addWidget(retry_);
     cancel_ = new QPushButton("Cancel and exit"); cancel_->setObjectName("cancelInitialization"); footer->addWidget(cancel_); layout->addLayout(footer);
     connect(cancel_, &QPushButton::clicked, this, &QWidget::close);
-    connect(retry_, &QPushButton::clicked, this, [this] { emit retryRequested(enginePath(),samEncoderPath(),samDecoderPath(),maEnginePath()); });
+    connect(retry_, &QPushButton::clicked, this, [this] { emit retryRequested(enginePath(),samEncoderPath(),samDecoderPath(),maEncoderPath(),maPoseScalePath()); });
     connect(browse_, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this,"Choose TensorRT engine",enginePath(),"TensorRT engine (*.engine *.plan);;All files (*)");
         if (!path.isEmpty()) engine_->setText(path);
@@ -83,9 +84,10 @@ InferenceSplashWindow::InferenceSplashWindow(bool calibration_completed) : QWidg
 QString InferenceSplashWindow::enginePath() const { return engine_->text().trimmed(); }
 QString InferenceSplashWindow::samEncoderPath() const { return sam_encoder_->text().trimmed(); }
 QString InferenceSplashWindow::samDecoderPath() const { return sam_decoder_->text().trimmed(); }
-QString InferenceSplashWindow::maEnginePath() const { return ma_engine_->text().trimmed(); }
+QString InferenceSplashWindow::maEncoderPath() const { return ma_encoder_->text().trimmed(); }
+QString InferenceSplashWindow::maPoseScalePath() const { return ma_pose_scale_->text().trimmed(); }
 void InferenceSplashWindow::startLoading() {
-    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_engine_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_engine_}) w->setEnabled(false);
+    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_encoder_,ma_pose_scale_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_encoder_,browse_ma_pose_scale_}) w->setEnabled(false);
     loading_ = true; elapsed_.start(); engine_->setEnabled(false); browse_->setEnabled(false); retry_->hide();
     progress_->setRange(0,0); status_->setText("Creating FS and preparing the inference engine…"); elapsed_label_->setText("Starting…");
 }
@@ -96,12 +98,12 @@ void InferenceSplashWindow::showFailure(const QString& message) {
     status_->setText("Initialization failed\n" + message);
     elapsed_label_->setText("Choose a compatible engine and retry, or exit.");
     engine_->setEnabled(true); browse_->setEnabled(true); retry_->show();
-    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_engine_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_engine_}) w->setEnabled(true);
+    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_encoder_,ma_pose_scale_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_encoder_,browse_ma_pose_scale_}) w->setEnabled(true);
 }
 void InferenceSplashWindow::closeEvent(QCloseEvent* event) {
     if (allow_close_) { event->accept(); return; }
     event->ignore(); if (closing_) return;
-    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_engine_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_engine_}) w->setEnabled(false);
+    for (QWidget* w : std::initializer_list<QWidget*>{sam_encoder_,sam_decoder_,ma_encoder_,ma_pose_scale_,browse_sam_encoder_,browse_sam_decoder_,browse_ma_encoder_,browse_ma_pose_scale_}) w->setEnabled(false);
     closing_ = true; engine_->setEnabled(false); browse_->setEnabled(false); retry_->setEnabled(false); cancel_->setEnabled(false);
     status_->setText("Closing · waiting for initialization to finish safely and releasing GPU / cameras…"); emit closeRequested();
 }

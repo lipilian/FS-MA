@@ -7,7 +7,7 @@
 #include <vector>
 
 // Immutable, completed device output. Never includes borrowed model input pointers.
-// Keeps the FS or MA stream owner alive through queued delivery, upload and GL context
+// Keeps the geometry stream owner alive through queued delivery, upload and GL context
 // recreation. The worker must not rebuild into a buffer referenced by a frame.
 struct GPUMeshFrame {
     std::shared_ptr<const fs::MeshGPUBuffer> buffer;
@@ -22,8 +22,6 @@ struct GPUMeshFrame {
 };
 using SharedGPUMesh = std::shared_ptr<const GPUMeshFrame>;
 Q_DECLARE_METATYPE(SharedGPUMesh)
-using SharedGPUClouds = std::shared_ptr<const std::vector<SharedGPUMesh>>;
-Q_DECLARE_METATYPE(SharedGPUClouds)
 
 struct TsdfScene {
     SharedGPUMesh mesh, points;

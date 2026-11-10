@@ -23,8 +23,6 @@ class MeshView : public QWidget {
     // Full-resolution rectified-left masks, keyed by capture. Display only:
     // selected FS samples are opaque; unselected/unmasked views have alpha 0.3.
     void setFSMasks(QHash<quint64,QImage> masks, bool enabled = true);
-    void setMAClouds(SharedGPUClouds clouds);
-    void setShowMAClouds(bool enabled);
     void setTSDF(SharedTsdfScene scene, bool visible);
     void setPredictedCameras(SharedPredictedCameras cameras);
     // Original MA poses: yellow wireframes without labels, textures or picking.
@@ -47,11 +45,9 @@ class MeshView : public QWidget {
   signals:
     void cameraClicked(quint64 image_id);
     void gpuMeshPresented(SharedGPUMesh mesh);
-    void maCloudsPresented(SharedGPUClouds clouds);
     void renderFailed(QString message);
     void log(QString message);
 
   private:
     MeshCanvas *canvas_{};
-    SharedGPUClouds offscreen_ma_clouds_;
 };

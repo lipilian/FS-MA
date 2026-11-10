@@ -241,7 +241,7 @@ void PipelineWorker::execute(const std::function<void(PipelineWorker&)>& action)
     publish(); emit actionFinished();
 }
 void PipelineWorker::initialize(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder,
-                                const QString& ma_engine) {
+                                const QString& ma_encoder, const QString& ma_pose_scale) {
     // The same worker retains this instance for every subsequent reconstruction.
     captures_.clear(); capture_slot_=0; state_.capture_count=0;
     state_.predicted_cameras.reset(); state_.ma_cameras.reset();
@@ -274,19 +274,21 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     };
     const auto encoder = modelPath(sam_encoder,{"sam2.1_hiera_large.encoder.engine"},"SAM encoder");
     const auto decoder = modelPath(sam_decoder,{"sam2.1_hiera_large.decoder.engine"},"SAM decoder");
-    const auto ma_engine_file = modelPath(ma_engine,{"MapAnything/onnx/mapanything_dynamic_raw_bf16.engine",
-                                                    "mapanything_dynamic_raw_bf16.engine"},"MapAnything");
+    const auto ma_encoder_file = modelPath(ma_encoder,{"MapAnything/updated_onnx/mapanything_fix_encoder_fmha.engine",
+                                                       "mapanything_fix_encoder_fmha.engine"},"MapAnything encoder");
+    const auto ma_pose_scale_file = modelPath(ma_pose_scale,{"MapAnything/updated_onnx/mapanything_dynamic_pose_scale_fmha.engine",
+                                                           "mapanything_dynamic_pose_scale_fmha.engine"},"MapAnything pose/scale");
     state_.status = "Loading SAM 2.1 Hiera Large encoder / decoder and allocating contexts, GPU features and prompt buffers…";
     publish(); checkpoint();
     auto sam = std::make_unique<fs::SamSegmenter>(); sam->loadEngines(encoder.toStdString(),decoder.toStdString());
     checkpoint();
     emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
-    state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
-    auto ma = std::make_shared<fs::MA>();
-    ma->loadEngine(ma_engine_file.toStdString());
+    state_.status = "Loading MapAnything encoder and pose/scale engines…"; publish(); checkpoint();
+    auto ma = std::make_shared<fs::MA>(ma_encoder_file.toStdString(),ma_pose_scale_file.toStdString());
     checkpoint();
-    emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
-             "Owns an independent non-blocking CUDA stream; GPU I/O allocated for V=5 and bound to the context; activation workspace allocated on first inference.\n"+ma_engine_file);
+    emit log("MapAnything FMHA encoder + pose/scale loaded · five fixed F_fused[1536,31,37] / CLS[1536,1] slots; poses[V,7], scale[1,1,1]; V=2–5.\n"
+             "Independent CUDA stream; all I/O, feature banks and one shared encoder/pose-scale activation workspace allocated during construction.\n"
+             +ma_encoder_file+"\n"+ma_pose_scale_file);
     sam_ = std::move(sam); ma_ = std::move(ma);
     state_.sam_ready = true; state_.ma_ready = true;
     fs_ = std::move(next);
@@ -491,7 +493,7 @@ void PipelineWorker::connectCameras(CameraMode mode) {
     state_.import_sequence_started=false; import_pairs_.clear();
     import_calibration_.reset();
     if (mode == CameraMode::Sentech && !confirmed_)
-        throw std::runtime_error("Sentech cameras require confirmed calibration. Use fs_gui to calibrate them, or connect a Stereolabs ZED camera.");
+        throw std::runtime_error("Sentech cameras require confirmed calibration. Connect a Stereolabs ZED camera or import captures with calibration JSON.");
     if (state_.connected && state_.camera_mode == mode) { setLive(true); return; }
     disconnectCameras();
     state_.status = mode == CameraMode::Zed ? "Connecting Stereolabs ZED…" : "Connecting Sentech stereo cameras…";
@@ -756,7 +758,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         ma_->inference(views);
         ma_->synchronize();
         checkpoint();
-        emit log(QString("MA inference complete · %1 views · %2 ms · raw depths/poses/scale on GPU · independent stream")
+        emit log(QString("MA inference complete · %1 views · %2 ms · cached encoder features + raw poses/scale on GPU · independent stream")
             .arg(views).arg(elapsed.nsecsElapsed()/1e6,0,'f',3));
         reportProgress(99, "Positioning cameras from MA poses…");
         const auto poses = ma_->downloadCameraPoses();

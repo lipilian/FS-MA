@@ -10,7 +10,7 @@ public:
     ~PipelineController() override;
     void submit(std::function<void(PipelineWorker&)> action);
     void initialize(const QString& engine_path, const QString& sam_encoder = {}, const QString& sam_decoder = {},
-                    const QString& ma_engine = {});
+                    const QString& ma_encoder = {}, const QString& ma_pose_scale = {});
     const PipelineState& state() const { return state_; }
     quint64 requestMask(quint64 image_id, std::vector<fs::SamPrompt> prompts, QImage image = {});
     void cancel();

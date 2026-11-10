@@ -46,16 +46,16 @@
       "preLaunchTask": "Build TSFS"
     },
     {
-      "name": "Run FS GUI",
+      "name": "Run Scan GUI",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/cpp/build/fs_gui",
+      "program": "${workspaceFolder}/cpp/build/scan_gui",
       "args": [],
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "externalConsole": false,
       "MIMode": "gdb",
-      "preLaunchTask": "Build FS GUI"
+      "preLaunchTask": "Build Scan GUI"
     }
   ]
 }

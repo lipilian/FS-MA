@@ -103,7 +103,7 @@
 ├── cpp/
 │   ├── CMakeLists.txt
 │   ├── <a href="#entrypoints">app/</a>
-│   │   ├── desktop_main.cpp
+│   │   ├── scan_main.cpp
 │   │   ├── TSFS.cpp
 │   │   └── build_single_engine.cpp
 │   ├── cmake/Sentech.cmake
@@ -169,7 +169,7 @@
           <p class="label">Application entry points</p>
           <h3>app/</h3>
           <p><code>TSFS.cpp</code> parses a capture directory and optional <code>--measure</code>, loads the engine, and calls rectification, inference, and fused full-image XYZ reconstruction in sequence. The reconstruction method waits for GPU completion before returning. It also reports failures and returns the process exit status.</p>
-          <p><code>desktop_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>, which starts calibration and opens an inference-loading splash after successful completion or explicit saved-calibration reuse; reconstruction opens only after both FS and SAM initialization succeed. Ordinary calibration close exits.</p>
+          <p><code>scan_main.cpp</code> creates the Qt application and starts <code>DesktopController</code>. It opens the inference-loading splash directly, loads FS, SAM and the MA encoder/pose-scale engines, then opens reconstruction and connects a ZED camera. There is no calibration startup branch.</p>
           <p><code>build_single_engine.cpp</code> is a separate tool: it registers the GWC plugin, parses ONNX, and builds a serialized TensorRT engine.</p>
         </article>
         <article class="card" id="core">
@@ -260,7 +260,7 @@ fs_build_single_engine  [executable]
 └── GWCVolumePlugin  [shared library: libGWCVolumePlugin.so]
     └── TensorRT + CUDA runtime
 
-fs_gui  [executable: FS_BUILD_DESKTOP=ON by default]
+scan_gui  [executable: FS_BUILD_DESKTOP=ON by default]
 └── fs_calibration_ui  [static library]
     ├── Qt 6 Widgets + OpenGLWidgets
     ├── fs_calibration → fs_core + OpenCV aruco
@@ -281,13 +281,13 @@ fs_gui  [executable: FS_BUILD_DESKTOP=ON by default]
             <tr><td><code>fs_sentech_source</code> (FS_BUILD_DESKTOP)</td><td><code>src/capture/SentechStereoSource.cpp</code></td></tr>
             <tr><td><code>fs_calibration</code> (FS_BUILD_DESKTOP)</td><td><code>src/calibration/CharucoCalibration.cpp</code></td></tr>
             <tr><td><code>fs_calibration_ui</code> (FS_BUILD_DESKTOP)</td><td><code>ui/CalibrationWorker.cpp</code><br><code>ui/CalibrationController.cpp</code><br><code>ui/CalibrationWindow.cpp</code><br><code>ui/DesktopController.cpp</code><br><code>ui/InferenceSplashWindow.cpp</code><br><code>ui/ReconstructionWindow.cpp</code><br><code>ui/PipelineController.cpp</code><br><code>ui/PipelineWorker.cpp</code><br><code>ui/widgets/MaskEditor.cpp</code><br><code>ui/widgets/MeshView.cpp</code><br><code>ui/widgets/StereoImageView.cpp</code><br>Matching headers are listed for Qt AUTOMOC.</td></tr>
-            <tr><td><code>fs_gui</code> (FS_BUILD_DESKTOP)</td><td><code>app/desktop_main.cpp</code></td></tr>
+            <tr><td><code>scan_gui</code> (FS_BUILD_DESKTOP)</td><td><code>app/scan_main.cpp</code></td></tr>
           </tbody>
         </table>
       </div>
       <h3 id="build-setup">C++ build setup</h3>
       <p>Install OpenCV 4 development files, including aruco (<code>libopencv-contrib-dev</code> on Ubuntu), Qt 6 Widgets (<code>qt6-base-dev</code>), CUDA and TensorRT development files. The recorded development environment uses CUDA 13.3 and TensorRT 11.2; CMake defaults to GPU architecture 120 and enables C, C++17 and CUDA17. The Sentech SDK defaults to <code>/opt/sentech</code>; override it with <code>-DFS_SENTECH_ROOT=/path/to/sdk</code>.</p>
-      <p><code>FS_BUILD_DESKTOP</code> defaults to <code>ON</code>. Use <code>-DFS_BUILD_DESKTOP=OFF</code> for file-only builds without Qt or Sentech SDK dependencies. Existing CMake build directories retain their cached option values. Mesh display requires Qt OpenGL/OpenGLWidgets and an OpenGL 4.6 Core context. <code>desktop_main.cpp</code> installs <code>MeshView::surfaceFormat()</code> before QApplication; the viewer checks the actual context, uses GLSL 4.60 shaders and a VAO, and logs the driver version and renderer. Qt's <code>QOpenGLFunctions_4_5_Core</code> wrapper supplies the shared core API subset; it does not lower the required context version. The VAO, VBO and shader program are recreated with the context, along with CUDA registration on the next GPU upload. Triangle 1.6 is built from the bundled C source; neither VTK nor a Python runtime is required.</p>
+      <p><code>FS_BUILD_DESKTOP</code> defaults to <code>ON</code>. Use <code>-DFS_BUILD_DESKTOP=OFF</code> for file-only builds without Qt or Sentech SDK dependencies. Existing CMake build directories retain their cached option values. Mesh display requires Qt OpenGL/OpenGLWidgets and an OpenGL 4.6 Core context. <code>scan_main.cpp</code> installs <code>MeshView::surfaceFormat()</code> before QApplication; the viewer checks the actual context, uses GLSL 4.60 shaders and a VAO, and logs the driver version and renderer. Qt's <code>QOpenGLFunctions_4_5_Core</code> wrapper supplies the shared core API subset; it does not lower the required context version. The VAO, VBO and shader program are recreated with the context, along with CUDA registration on the next GPU upload. Triangle 1.6 is built from the bundled C source; neither VTK nor a Python runtime is required.</p>
       <p>For a fresh build directory on this workstation when CUDA is not on <code>PATH</code>, supply its location explicitly. Pass the compiler location when configuring a fresh directory; existing directories retain their own cached settings:</p>
       <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.3/bin/nvcc \
@@ -388,14 +388,14 @@ frame.rectify();
       </div>
     </section>
     <section id="camera-usage" aria-labelledby="camera-usage-heading">
-      <h2 id="camera-usage-heading">07 · Connect the Sentech pair</h2>
+      <h2 id="camera-usage-heading">07 · ZED scanning and capture imports</h2>
       <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_DESKTOP=ON
-cmake --build cpp/build --target fs_gui --parallel
-./cpp/build/fs_gui</code></pre>
-      <p class="note">Click <strong>Connect cameras</strong> in the Qt calibration window. The SDK defaults to <code>/opt/sentech</code>. The desktop target enables the camera source by default; set <code>-DFS_BUILD_DESKTOP=OFF</code> for file-only builds without Qt or the SDK. The standalone OpenCV preview/capture CLI has been removed.</p>
-      <p><code>scan_gui</code> automatically connects a <strong>Stereolabs ZED</strong> after model initialization. The calibration-based <code>fs_gui</code> also offers <strong>Sentech stereo</strong>; disconnect before changing cameras. ZED retrieves synchronized rectified RGB at 1920×1080, 30 fps, then center-crops both views to 1296×1080 (312 pixels removed from each side). The crop subtracts 312 from each principal-point x coordinate. FoundationStereo uses the same OpenCV <code>INTER_LINEAR</code> resize to 960×800 as imported captures, scaling fx, fy, cx and cy by 20/27 while preserving the baseline in metres. SDK depth is disabled; FoundationStereo computes depth.</p>
+cmake --build cpp/build --target scan_gui --parallel
+./cpp/build/scan_gui</code></pre>
+      <p class="note"><code>scan_gui</code> is the desktop entry point. It loads the models before opening the scanning workspace. Use <strong>Connect cameras</strong> to reconnect a ZED, or import captures with their calibration JSON. Set <code>-DFS_BUILD_DESKTOP=OFF</code> for file-only builds.</p>
+      <p><code>scan_gui</code> automatically connects a <strong>Stereolabs ZED</strong> after model initialization. Live Sentech capture requires a confirmed calibration supplied by a caller; scan startup has none. ZED retrieves synchronized rectified RGB at 1920×1080, 30 fps, then center-crops both views to 1296×1080 (312 pixels removed from each side). The crop subtracts 312 from each principal-point x coordinate. FoundationStereo uses the same OpenCV <code>INTER_LINEAR</code> resize to 960×800 as imported captures, scaling fx, fy, cx and cy by 20/27 while preserving the baseline in metres. SDK depth is disabled; FoundationStereo computes depth.</p>
       <p>ZED preview and capture use SDK <code>VIEW::LEFT</code>/<code>VIEW::RIGHT</code> from the same <code>grab()</code>. Both views are already rectified. Captures use the <code>StereoFrame</code> constructor taking <code>StereoCameraParameters</code>, so no second <code>stereoRectify</code> or <code>remap</code> is applied. Saved <code>calibration.json</code> describes the 1296×1080 cropped images and records <code>images_rectified: 1</code>; importing this pair retains the exact pixels and intrinsics.</p>
-      <p><code>ZedStereoSource.hpp/.cpp</code> implements the <code>fs_zed_source</code> backend. CMake detects the ZED SDK under <code>FS_ZED_ROOT</code> (default <code>/usr/local/zed</code>); without it, live ZED capture is unavailable and file imports remain usable. Connect only one ZED camera. The initial calibration window retains its Sentech workflow.</p>
+      <p><code>ZedStereoSource.hpp/.cpp</code> implements the <code>fs_zed_source</code> backend. CMake detects the ZED SDK under <code>FS_ZED_ROOT</code> (default <code>/usr/local/zed</code>); without it, live ZED capture is unavailable and file imports remain usable. Connect only one ZED camera.</p>
       <details>
         <summary>Sentech source settings and SDK behaviour</summary>
         <p>The current implementation is <code>cpp/src/capture/SentechStereoSource.cpp</code>, with pairing and identity helpers in <code>StereoCaptureSupport.hpp</code>. The Qt window binds left <code>STC-MCS500U3V(21LJ548)</code> and right <code>STC-MCS500U3V(21LJ530)</code>. The source API also accepts exact user-defined names or serials; missing, ambiguous or same-camera matches fail.</p>
@@ -405,25 +405,10 @@ cmake --build cpp/build --target fs_gui --parallel
       </details>
     </section>
     <section id="qt-calibration" aria-labelledby="qt-calibration-heading">
-      <h2 id="qt-calibration-heading">08 · Qt 6 calibration window</h2>
-      <div class="grid">
-        <article class="card"><h3>Algorithms · fs_calibration</h3>
-          <p><code>calibration/CharucoCalibration.hpp/.cpp</code> contains RGB ChArUco detection, per-camera and stereo solving, independent reprojection checks, metadata JSON and deep-copy session handoff. It uses OpenCV aruco and existing stereo validation without depending on Qt.</p>
-          <p>Default board: 10×8 squares, 66.5 mm square side, 50.5 mm marker side, <code>DICT_4X4_250</code>. Internal lengths are in metres.</p>
-        </article>
-        <article class="card"><h3>Desktop · fs_calibration_ui / fs_gui</h3>
-          <p><code>app/desktop_main.cpp</code> starts <code>DesktopController</code>. <code>CalibrationWindow</code> displays settings, stereo images, sample history and quality. <code>CalibrationController</code> owns the worker thread; <code>CalibrationWorker</code> owns the camera source and performs detection, capture, solve, check and save. <code>widgets/StereoImageView</code> displays owned QImage snapshots.</p>
-          <p><code>DesktopController</code> maximizes each main window once after its native QWindow is exposed. The temporary event filter removes itself after scheduling the request; later manual restore/resize operations are preserved. Actual GNOME/X11 checks confirmed both maximization flags and frame geometry matching the screen work area.</p>
-          <p>Calibration quality uses the fixed <code>fs::calibration::kQualityThresholdPx = 1.0</code>. The worker publishes optional solve/check metrics; the window colors each RMS value green for ≤1.0 px and red for &gt;1.0 px. Missing results/checks have no colored numeric value. The editable threshold control and worker setter are removed; the Finish gate checks only solve stereo RMS. The independent check is optional and its result remains diagnostic.</p>
-          <p><code>CalibrationWindow::refreshActions()</code> blocks history-list signals and restores the current row while enabling/disabling controls. This prevents automatic Qt focus transfers from submitting historical-sample previews during Capture; explicit user selection still reaches the worker.</p>
-          <p>New calibration requires a saved result, matching connected cameras/grid and solve stereo RMS ≤ 1.0 px. A fresh independent check is optional. Startup reads temporary path history from <code>/tmp/FS_Engine-&lt;uid&gt;/fs_gui.conf</code>, tries the last successfully loaded/saved file, then searches the working directory and executable directory for <code>sentech_stereo_calibration.json</code> and <code>calibration.json</code>. A valid loaded file enables <strong>Skip calibration · Continue</strong> to explicitly reuse it without a fresh check. At either completion boundary the worker stops polling and transfers the current camera source with the confirmed calibration. DesktopController waits for the calibration thread to finish, shows InferenceSplashWindow, and closes calibration. The splash remains visible while the pipeline worker creates FS, loads FS and SAM engines/contexts and allocates their buffers; ReconstructionWindow is only created when both models are ready. Ordinary close cancels the session and exits.</p>
-          <p>The Qt loader requires board, camera identity and image-size metadata and checks the applied board and fixed camera identities. While connected, reuse also waits for a matching image size. Legacy six-matrix JSON files remain supported by the CLI loader. Confirmed results use <code>fs::calibration::SessionResult</code>, deep-copied into <code>ConfirmedCalibration</code> for handoff; the active source is handed off via <code>SharedStereoSource</code>. Only one worker accesses the source at a time.</p>
-        </article>
-      </div>
-      <pre tabindex="0"><code>cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DFS_BUILD_DESKTOP=ON
-cmake --build cpp/build --target fs_gui --parallel
-./cpp/build/fs_gui</code></pre>
-      <p class="note">Requires Qt 6 Widgets and OpenCV aruco. The target is enabled by default and configured by <code>cpp/cmake/Desktop.cmake</code>; set <code>-DFS_BUILD_DESKTOP=OFF</code> to disable it. It uses the Sentech source and does not link highgui/Qt 5. Calibration never initializes an inference engine. The intermediate splash waits for background initialization before opening reconstruction. See <a href="index.html#qt-calibration-window-heading">the calibration workflow</a> for controls, metadata checks and current limits, and <a href="#build-setup">build setup</a> for dependencies and CUDA configuration.</p>
+      <h2 id="qt-calibration-heading">08 · Retained calibration components</h2>
+      <p>The <code>fs_gui</code> executable and its calibration-first startup path have been removed. <code>scan_gui</code> starts at model loading and obtains live calibration from the ZED SDK, or uses calibration JSON supplied with imported captures.</p>
+      <p><code>calibration/CharucoCalibration.hpp/.cpp</code> retains ChArUco detection, solving, validation and session data used by the shared library. <code>CalibrationWindow</code>, <code>CalibrationController</code> and <code>CalibrationWorker</code> remain library components; the desktop entry does not launch them.</p>
+      <p><code>ConfirmedCalibration</code> and <code>SharedStereoSource</code> remain available to pipeline callers. Existing calibration JSON files are unaffected. The <a href="index.html#qt-calibration-window-heading">earlier calibration workflow notes</a> describe the removed application's historical behavior.</p>
     </section>
     <section id="qt-reconstruction" aria-labelledby="qt-reconstruction-heading">
       <h2 id="qt-reconstruction-heading">09 · Qt reconstruction workspace</h2>
@@ -473,7 +458,7 @@ cmake --build cpp/build --target fs_gui --parallel
           <thead><tr><th scope="col">Owner</th><th scope="col">Work and lifetime</th></tr></thead>
           <tbody>
             <tr><td>Qt main thread</td><td>DesktopController, windows, controls, MaskEditor CPU raster editing, QImage presentation and MeshView OpenGL rendering. It submits operations and receives queued state/result signals.</td></tr>
-            <tr><td>CalibrationController / CalibrationWorker</td><td>Dedicated calibration QThread: camera polling, board detection, solve, check, JSON load/save and session handoff. It finishes before the reconstruction worker takes over the source.</td></tr>
+
             <tr><td>PipelineController / PipelineWorker</td><td>A single dedicated QThread serializes model loading, rectification, FS and SAM calls, CPU Jet preparation, Triangle meshing and file encoding. It owns the active source, frozen StereoFrame, FS, SamSegmenter, calibration snapshot and cached CPU mesh inputs.</td></tr>
             <tr><td>FS CUDA stream</td><td>FS owns input uploads, TensorRT enqueue, full-image XYZ, selected-region denoising and XYZ download on this stream. The stream and reusable buffers live with FS.</td></tr>
             <tr><td>SamSegmenter CUDA stream</td><td>Separate non-blocking stream for image/prompt upload, encoder, decoder and mask/score download. The pipeline QThread calls both models serially; separate CUDA streams do not imply simultaneous UI jobs.</td></tr>

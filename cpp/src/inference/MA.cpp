@@ -11,7 +11,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,24 +41,6 @@ nvinfer1::Dims dims(std::initializer_list<int64_t> values) {
 }
 bool equal(nvinfer1::Dims a, nvinfer1::Dims b) {
     return a.nbDims == b.nbDims && a.nbDims >= 0 && std::equal(a.d, a.d + a.nbDims, b.d);
-}
-
-std::string tensorShapeString(const nvinfer1::Dims& shape) {
-    std::ostringstream output;
-    output << '[';
-    for (int i = 0; i < shape.nbDims; ++i) {
-        if (i) output << ", ";
-        output << shape.d[i];
-    }
-    return output.str() + ']';
-}
-
-std::size_t freeDeviceMemory() {
-    std::size_t free{}, total{};
-    const auto error = cudaMemGetInfo(&free, &total);
-    if (error != cudaSuccess)
-        throw std::runtime_error(std::string("MapAnything: cannot query free device memory: ") + cudaGetErrorString(error));
-    return free;
 }
 
 struct CudaStream {
@@ -132,15 +113,37 @@ struct Model {
     cudaStream_t stream;
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
-    DeviceBuffer workspace; // Outlives the context that borrows it.
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     int64_t workspace_bytes{};
-    bool inference_pending{false};
-    int output_views{0};
 
-    explicit Model(cudaStream_t ma_stream) : stream(ma_stream) {}
-    // Also complete profile work before destroying an unsuccessful load.
+    Model(cudaStream_t ma_stream, const std::filesystem::path& path) : stream(ma_stream) {
+        auto* active_logger = getLogger();
+        runtime.reset(nvinfer1::createInferRuntime(active_logger ? *active_logger : logger));
+        require(bool(runtime), "cannot create TensorRT runtime");
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        require(bool(file), "cannot open engine: " + path.string());
+        const auto size = file.tellg();
+        require(size > 0, "empty engine: " + path.string());
+        std::vector<char> bytes(static_cast<std::size_t>(size));
+        file.seekg(0);
+        require(bool(file.read(bytes.data(), std::streamsize(bytes.size()))), "cannot read engine: " + path.string());
+        engine.reset(runtime->deserializeCudaEngine(bytes.data(), bytes.size()));
+        require(bool(engine), "cannot deserialize engine: " + path.string());
+        workspace_bytes = engine->getDeviceMemorySizeV2();
+        require(workspace_bytes >= 0, "cannot query TensorRT activation memory");
+    }
+    // Also drain profile work if construction of the containing MA fails.
     ~Model() { cudaStreamSynchronize(stream); }
+
+    // Borrow MA's shared allocation; it outlives both models and their contexts.
+    void createContext(void* workspace, int64_t capacity) {
+        require(capacity >= workspace_bytes && (workspace_bytes == 0 || workspace),
+                "shared activation workspace is too small");
+        context.reset(engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED));
+        require(bool(context), "cannot create TensorRT context");
+        context->setDeviceMemoryV2(workspace, capacity);
+        require(context->setOptimizationProfileAsync(0, stream), "cannot select the MA engine profile");
+    }
 
     void tensor(const char* name, nvinfer1::Dims shape, nvinfer1::TensorIOMode mode) const {
         require(engine->getTensorIOMode(name) == mode &&
@@ -153,32 +156,106 @@ struct Model {
 } // namespace
 
 struct MA::Impl {
-    // Reverse destruction releases context/model, I/O buffers, then our stream.
+    // Reverse destruction releases both models/contexts before their shared
+    // workspace and I/O buffers, then our stream.
     // RAII also releases the stream if a buffer allocation fails in construction.
     CudaStream stream;
-    DeviceBuffer inputs, depths, poses, scale;
+    DeviceBuffer inputs, tokens, cls, poses, scale;
+    DeviceBuffer workspace;
+    int64_t workspace_bytes{};
     InputUpload color_upload{CV_8UC3, kColorElements};
     InputUpload depth_upload{CV_32FC1, kColorPlane};
     cv::Mat valid_depth;
     std::array<bool, kMaxViews> rays_ready{};
     std::array<bool, kMaxViews> depth_ready{};
-    std::unique_ptr<Model> model;
+    std::array<bool, kMaxViews> encoded{};
+    bool inference_pending{false};
+    int output_views{0};
+    std::unique_ptr<Model> encoder, pose_scale;
 
-    Impl() {
+    Impl(const std::filesystem::path& encoder_path, const std::filesystem::path& pose_scale_path) {
         inputs = allocate(kInputElements, "inputs");
-        depths = allocate(kDepthElements, "depths");
+        tokens = allocate(kTokenElements, "five-view F_fused tokens");
+        cls = allocate(kClsElements, "five-view CLS");
         poses = allocate(kPoseElements, "poses");
         scale = allocate(kScaleElements, "scale");
+
+        using Mode = nvinfer1::TensorIOMode;
+        using Profile = nvinfer1::OptProfileSelector;
+        encoder = std::make_unique<Model>(stream.handle, encoder_path);
+        require(encoder->engine->getNbIOTensors() == 3 && encoder->engine->getNbOptimizationProfiles() == 1,
+                "expected the single-view encoder with three I/O tensors and one profile");
+        encoder->tensor("inputs", dims({1, 7, kInputHeight, kInputWidth}), Mode::kINPUT);
+        encoder->tensor("F_fused", dims({1, kFeatureChannels, kFeatureHeight, kFeatureWidth}), Mode::kOUTPUT);
+        encoder->tensor("CLS", dims({1, kFeatureChannels, 1}), Mode::kOUTPUT);
+        pose_scale = std::make_unique<Model>(stream.handle, pose_scale_path);
+        require(pose_scale->engine->getNbIOTensors() == 4 && pose_scale->engine->getNbOptimizationProfiles() == 1,
+                "expected the pose/scale engine with four I/O tensors and one profile");
+        pose_scale->tensor("F_fused", dims({-1, kFeatureChannels, kFeatureHeight, kFeatureWidth}), Mode::kINPUT);
+        pose_scale->tensor("CLS", dims({-1, kFeatureChannels, 1}), Mode::kINPUT);
+        pose_scale->tensor("poses", dims({-1, 7}), Mode::kOUTPUT);
+        pose_scale->tensor("scale", dims({1, 1, 1}), Mode::kOUTPUT);
+        for (const auto profile : {Profile::kMIN, Profile::kOPT, Profile::kMAX}) {
+            const int views = profile == Profile::kMIN ? kMinViews : profile == Profile::kOPT ? 3 : kMaxViews;
+            require(equal(pose_scale->engine->getProfileShape("F_fused", 0, profile),
+                          dims({views, kFeatureChannels, kFeatureHeight, kFeatureWidth})) &&
+                    equal(pose_scale->engine->getProfileShape("CLS", 0, profile), dims({views, kFeatureChannels, 1})),
+                    "pose/scale profile must support min/opt/max views 2/3/5");
+        }
+        // Query maximum execution memory over each engine's profiles once at load.
+        // Both contexts execute serially on stream, so they borrow the same region.
+        workspace_bytes = std::max(encoder->workspace_bytes, pose_scale->workspace_bytes);
+        if (workspace_bytes > 0)
+            workspace = allocate((static_cast<std::size_t>(workspace_bytes) + sizeof(float) - 1) / sizeof(float),
+                                 "shared encoder/pose-scale activation workspace");
+        encoder->createContext(workspace.get(), workspace_bytes);
+        pose_scale->createContext(workspace.get(), workspace_bytes);
+        bindEncoderView(0);
+        auto& context = pose_scale->context;
+        require(context->setTensorAddress("F_fused", tokens.get()) && context->setTensorAddress("CLS", cls.get()) &&
+                context->setTensorAddress("poses", poses.get()) && context->setTensorAddress("scale", scale.get()),
+                "cannot bind pose/scale to the preallocated feature banks");
+        for (int views = kMinViews; views <= kMaxViews; ++views) setPoseShape(views);
+        stream.synchronize();
+
+        constexpr double mib = 1024.0 * 1024.0;
+        std::cout << "[MA] FMHA encoder: " << encoder_path << '\n'
+                  << "[MA] FMHA pose/scale: " << pose_scale_path << '\n'
+                  << "[MA] Constructor allocations: I/O " << double(kIOBytes) / mib
+                  << " MiB; shared activation workspace " << double(workspace_bytes) / mib
+                  << " MiB (encoder requires " << double(encoder->workspace_bytes) / mib
+                  << " MiB; pose/scale requires " << double(pose_scale->workspace_bytes) / mib << " MiB)\n"
+                  << "[MA] One encoder context reused serially across five fixed F_fused[1536,31,37] / CLS[1536,1] slots; one pose/scale context\n"
+                  << std::flush;
     }
     ~Impl() { cudaStreamSynchronize(stream.handle); }
+
+    void bindEncoderView(int view) {
+        auto& context = encoder->context;
+        require(context->setTensorAddress("inputs", inputs.get() + view * kInputStrideElements) &&
+                context->setTensorAddress("F_fused", tokens.get() + view * kTokenElementsPerView) &&
+                context->setTensorAddress("CLS", cls.get() + view * kClsElementsPerView),
+                "cannot bind encoder to its fixed view slot");
+    }
+
+    void setPoseShape(int views) {
+        auto& context = pose_scale->context;
+        require(context->setInputShape("F_fused", dims({views, kFeatureChannels, kFeatureHeight, kFeatureWidth})) &&
+                context->setInputShape("CLS", dims({views, kFeatureChannels, 1})), "cannot set pose/scale view count");
+        require(context->inferShapes(0, nullptr) == 0 &&
+                equal(context->getTensorShape("poses"), dims({views, 7})) &&
+                equal(context->getTensorShape("scale"), dims({1, 1, 1})), "unexpected pose/scale output shapes");
+    }
 };
 
-MA::MA() : impl_(std::make_unique<Impl>()) {}
+MA::MA(const std::filesystem::path& encoder_path, const std::filesystem::path& pose_scale_path)
+    : impl_(std::make_unique<Impl>(encoder_path, pose_scale_path)) {}
 MA::~MA() = default;
-bool MA::isLoaded() const noexcept { return bool(impl_->model); }
+bool MA::isLoaded() const noexcept { return impl_->encoder && impl_->pose_scale; }
 cudaStream_t MA::stream() const noexcept { return impl_->stream.handle; }
 float* MA::inputDevice() const noexcept { return impl_->inputs.get(); }
-float* MA::depthsDevice() const noexcept { return impl_->depths.get(); }
+float* MA::tokensDevice() const noexcept { return impl_->tokens.get(); }
+float* MA::clsDevice() const noexcept { return impl_->cls.get(); }
 float* MA::posesDevice() const noexcept { return impl_->poses.get(); }
 float* MA::scaleDevice() const noexcept { return impl_->scale.get(); }
 const cv::Mat& MA::resizedColor() const noexcept { return impl_->color_upload.resized; }
@@ -212,10 +289,11 @@ void MA::uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoC
             destination[2 * kColorPlane + offset] = float(row[x][2]);
         }
     }
-    float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * kInputStrideElements;
     impl_->rays_ready[view_index] = false;
     impl_->depth_ready[view_index] = false;
-    if (impl_->model) impl_->model->output_views = 0;
+    impl_->encoded[view_index] = false;
+    impl_->output_views = 0;
     upload.enqueue(view_input, kColorElements, stream());
     // Same-stream ordering starts this kernel after H2D, without a CPU wait.
     // The event above protects only host staging; the kernel uses device input.
@@ -244,9 +322,10 @@ void MA::uploadDepth(int view_index, const cv::Mat& depth_z) {
     cv::resize(valid, upload.resized, cv::Size(kInputWidth, kInputHeight), 0.0, 0.0, cv::INTER_LANCZOS4);
     upload.wait();
     std::memcpy(upload.host.get(), upload.resized.ptr<float>(), kColorPlane * sizeof(float));
-    float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * 7 * kColorPlane;
+    float* view_input = inputDevice() + static_cast<std::size_t>(view_index) * kInputStrideElements;
     impl_->depth_ready[view_index] = false;
-    if (impl_->model) impl_->model->output_views = 0;
+    impl_->encoded[view_index] = false;
+    impl_->output_views = 0;
     upload.enqueue(view_input + 6 * kColorPlane, kColorPlane, stream());
     // Same-stream ordering waits for both this H2D and the earlier ray kernel.
     checkCuda(ma_preprocessing::prepare_ray_distance(view_input, kInputWidth, kInputHeight, stream()),
@@ -257,47 +336,49 @@ void MA::uploadDepth(int view_index, const cv::Mat& depth_z) {
 void MA::resetInputs() noexcept {
     impl_->rays_ready.fill(false);
     impl_->depth_ready.fill(false);
-    if (impl_->model) impl_->model->output_views = 0;
+    impl_->encoded.fill(false);
+    impl_->output_views = 0;
 }
 
 void MA::inference(int view_count) {
     require(view_count >= kMinViews && view_count <= kMaxViews, "Inference requires 2..5 views");
-    require(isLoaded(), "Load an engine before inference");
     for (int view = 0; view < view_count; ++view)
         require(impl_->rays_ready[view] && impl_->depth_ready[view],
                 "Inference requires RGB, rays and depth for view " + std::to_string(view + 1));
-    auto& s = *impl_->model;
-    // TensorRT context state must not change while its previous enqueue runs.
-    // Current input preparation is already ordered on this same stream.
-    if (s.inference_pending) synchronize();
-    if (!s.workspace && s.workspace_bytes > 0) {
-        s.workspace = allocate((static_cast<std::size_t>(s.workspace_bytes) + sizeof(float) - 1) / sizeof(float),
-                               "activation workspace");
-        std::cout << "[MA] Activation workspace allocated once for V=2..5: " << s.workspace_bytes
-                  << " bytes (" << double(s.workspace_bytes) / (1024.0 * 1024.0) << " MiB)\n" << std::flush;
+    // The suffix's dynamic shape cannot change while its previous run is in flight.
+    if (impl_->inference_pending) synchronize();
+    impl_->output_views = 0;
+    impl_->setPoseShape(view_count);
+    impl_->inference_pending = true; // A failed enqueue may still submit work.
+    for (int view = 0; view < view_count; ++view) {
+        if (impl_->encoded[view]) continue;
+        // Rebind the same context for each enqueue. All view buffers stay alive,
+        // and same-stream ordering serializes reuse of its activation workspace.
+        impl_->bindEncoderView(view);
+        require(impl_->encoder->context->enqueueV3(stream()), "encoder enqueueV3 failed");
+        impl_->encoded[view] = true;
     }
-    s.context->setDeviceMemoryV2(s.workspace.get(), s.workspace_bytes);
-    require(s.context->setInputShape("inputs", dims({view_count, 7, kInputHeight, kInputWidth})),
-            "cannot set inference view count");
-    require(s.context->inferShapes(0, nullptr) == 0 &&
-            equal(s.context->getTensorShape("depths"), dims({view_count, 6, kInputHeight, kInputWidth})) &&
-            equal(s.context->getTensorShape("poses"), dims({view_count, 7})) &&
-            equal(s.context->getTensorShape("scale"), dims({1, 1, 1})), "unexpected inference output shapes");
-    // Even a failed enqueue may have submitted work that must be drained.
-    s.output_views = 0;
-    s.inference_pending = true;
-    require(s.context->enqueueV3(stream()), "TensorRT enqueueV3 failed");
-    s.output_views = view_count;
+    // Same-stream ordering lets pose/scale reuse the encoder's workspace after
+    // its last kernel, including TensorRT's joined auxiliary streams. Token/CLS
+    // banks are separate persistent buffers and are read directly by pose/scale.
+    require(impl_->pose_scale->context->enqueueV3(stream()), "pose/scale enqueueV3 failed");
+    impl_->output_views = view_count;
 }
 
 void MA::synchronize() {
-    impl_->stream.synchronize();
-    if (impl_->model) impl_->model->inference_pending = false;
+    try {
+        impl_->stream.synchronize();
+    } catch (...) {
+        impl_->encoded.fill(false);
+        impl_->output_views = 0;
+        throw;
+    }
+    impl_->inference_pending = false;
 }
 
 std::vector<cv::Matx44d> MA::downloadCameraPoses() {
-    require(impl_->model && impl_->model->output_views >= kMinViews, "Camera poses require current inference outputs");
-    const int views = impl_->model->output_views;
+    require(impl_->output_views >= kMinViews, "Camera poses require current inference outputs");
+    const int views = impl_->output_views;
     std::array<float, kPoseElements> poses{};
     float scale{};
     try {
@@ -311,89 +392,6 @@ std::vector<cv::Matx44d> MA::downloadCameraPoses() {
         throw;
     }
     return ma_postprocessing::camera_poses(poses.data(), views, scale);
-}
-
-void MA::loadEngine(const std::filesystem::path& path) {
-    impl_->stream.synchronize();
-    auto next = std::make_unique<Model>(stream());
-    auto& s = *next;
-    auto* active_logger = getLogger();
-    s.runtime.reset(nvinfer1::createInferRuntime(active_logger ? *active_logger : logger));
-    require(bool(s.runtime), "cannot create TensorRT runtime");
-    std::size_t engine_memory_bytes{};
-    {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        require(bool(file), "cannot open engine: " + path.string());
-        const auto size = file.tellg();
-        require(size > 0, "empty engine: " + path.string());
-        std::vector<char> bytes(static_cast<std::size_t>(size));
-        file.seekg(0);
-        require(bool(file.read(bytes.data(), std::streamsize(bytes.size()))), "cannot read engine: " + path.string());
-        const auto free_before = freeDeviceMemory();
-        s.engine.reset(s.runtime->deserializeCudaEngine(bytes.data(), bytes.size()));
-        require(bool(s.engine), "cannot deserialize engine: " + path.string());
-        const auto free_after = freeDeviceMemory();
-        engine_memory_bytes = free_before >= free_after ? free_before - free_after : 0;
-    }
-    using Mode = nvinfer1::TensorIOMode;
-    using Profile = nvinfer1::OptProfileSelector;
-    require(s.engine->getNbIOTensors() == 4 && s.engine->getNbOptimizationProfiles() == 1,
-            "expected the dynamic RAW engine with four I/O tensors and one profile");
-    s.tensor("inputs", dims({-1, 7, kInputHeight, kInputWidth}), Mode::kINPUT);
-    s.tensor("depths", dims({-1, 6, kInputHeight, kInputWidth}), Mode::kOUTPUT);
-    s.tensor("poses", dims({-1, 7}), Mode::kOUTPUT);
-    s.tensor("scale", dims({1, 1, 1}), Mode::kOUTPUT);
-    require(equal(s.engine->getProfileShape("inputs", 0, Profile::kMIN), dims({kMinViews, 7, kInputHeight, kInputWidth})) &&
-            equal(s.engine->getProfileShape("inputs", 0, Profile::kMAX), dims({kMaxViews, 7, kInputHeight, kInputWidth})),
-            "input profile must support exactly 2..5 views at 434x518");
-
-    // Allocate activation workspace lazily on first inference. I/O storage
-    // already exists independently of the engine and remains bound on reload.
-    s.context.reset(s.engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED));
-    require(bool(s.context), "cannot create TensorRT context");
-    require(s.context->setOptimizationProfileAsync(0, stream()), "cannot select the profile on the MA stream");
-    require(s.context->setTensorAddress("inputs", inputDevice()) &&
-            s.context->setTensorAddress("depths", depthsDevice()) &&
-            s.context->setTensorAddress("poses", posesDevice()) &&
-            s.context->setTensorAddress("scale", scaleDevice()),
-            "cannot bind preallocated GPU I/O buffers");
-    for (int views = kMinViews; views <= kMaxViews; ++views) {
-        require(s.context->setInputShape("inputs", dims({views, 7, kInputHeight, kInputWidth})), "cannot set view count");
-        require(s.context->inferShapes(0, nullptr) == 0 &&
-                equal(s.context->getTensorShape("depths"), dims({views, 6, kInputHeight, kInputWidth})) &&
-                equal(s.context->getTensorShape("poses"), dims({views, 7})) &&
-                equal(s.context->getTensorShape("scale"), dims({1, 1, 1})),
-                "unexpected dynamic output shapes for " + std::to_string(views) + " views");
-    }
-    const auto context_memory_bytes = s.engine->getDeviceMemorySizeV2();
-    require(context_memory_bytes >= 0, "cannot query TensorRT context device-memory requirement");
-    s.workspace_bytes = context_memory_bytes;
-    impl_->stream.synchronize();
-    impl_->model = std::move(next);
-
-    constexpr double kBytesPerMiB = 1024.0 * 1024.0;
-    std::cout << "[MA] TensorRT engine loaded: " << path << '\n'
-              << "[MA] TensorRT engine deserialization device-memory delta: "
-              << engine_memory_bytes << " bytes (" << double(engine_memory_bytes) / kBytesPerMiB << " MiB)\n"
-              << "[MA] Tensor I/O:\n";
-    for (int i = 0; i < s.engine->getNbIOTensors(); ++i) {
-        const auto* name = s.engine->getIOTensorName(i);
-        // All four tensors have already been validated as FP32 above.
-        std::cout << "  " << (s.engine->getTensorIOMode(name) == Mode::kINPUT ? "input" : "output")
-                  << "  name=" << name
-                  << "  shape=" << tensorShapeString(s.engine->getTensorShape(name))
-                  << "  type=FP32\n";
-    }
-    std::cout << "[MA] Optimization profile 0: inputs"
-              << "  min=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kMIN))
-              << "  opt=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kOPT))
-              << "  max=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kMAX)) << '\n'
-              << "[MA] TensorRT context device-memory requirement: " << context_memory_bytes
-              << " bytes (" << double(context_memory_bytes) / kBytesPerMiB
-              << " MiB); allocated on first inference and reused\n"
-              << "[MA] Preallocated GPU I/O (V=" << kMaxViews << "): " << kIOBytes
-              << " bytes (" << double(kIOBytes) / kBytesPerMiB << " MiB)\n"
-              << "[MA] CUDA stream: independent, non-blocking\n" << std::flush;
 }
 
 } // namespace fs

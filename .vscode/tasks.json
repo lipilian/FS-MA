@@ -32,7 +32,7 @@
       "problemMatcher": "$gcc"
     },
     {
-      "label": "Configure FS GUI (Release)",
+      "label": "Configure Scan GUI (Release)",
       "type": "shell",
       "command": "cmake",
       "args": [
@@ -45,17 +45,17 @@
       "problemMatcher": []
     },
     {
-      "label": "Build FS GUI",
+      "label": "Build Scan GUI",
       "type": "shell",
       "command": "cmake",
       "args": [
         "--build",
         "${workspaceFolder}/cpp/build",
         "--target",
-        "fs_gui",
+        "scan_gui",
         "--parallel"
       ],
-      "dependsOn": "Configure FS GUI (Release)",
+      "dependsOn": "Configure Scan GUI (Release)",
       "dependsOrder": "sequence",
       "problemMatcher": "$gcc"
     }

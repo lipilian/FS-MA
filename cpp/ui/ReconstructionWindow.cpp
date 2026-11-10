@@ -715,7 +715,7 @@ ReconstructionWindow::ReconstructionWindow(PipelineController& controller, Confi
 }
 bool ReconstructionWindow::inlineMaskMode() const {
     // All scan sources share per-view drawing and translucent unselected FS
-    // geometry. Only the calibrated fs_gui keeps its separate region tab.
+    // geometry. A workspace with confirmed calibration keeps its separate region tab.
     return !has_confirmed_calibration_;
 }
 void ReconstructionWindow::finishInlineDraw() {

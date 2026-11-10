@@ -80,7 +80,7 @@ private:
     QElapsedTimer elapsed_;
     QImage rectified_left_, rectified_right_, live_left_, live_right_, depth_image_;
     QPushButton *import_, *camera_, *retake_, *restart_, *capture_, *start_draw_, *finish_draw_, *clear_;
-    QPushButton* manual_reconstruct_{nullptr}; // Only the calibrated fs_gui workspace uses this control.
+    QPushButton* manual_reconstruct_{nullptr}; // Only a workspace with confirmed calibration uses this control.
     QPushButton *refine_poses_, *undo_icp_;
     QPushButton *tsdf_settings_, *build_tsdf_;
     fs::TsdfOptions tsdf_options_;

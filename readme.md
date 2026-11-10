@@ -24,14 +24,28 @@ to reconstruct, then **Capture more** for up to five views. If the camera is not
 connected at startup, attach it and click **Connect cameras**. A model load failure
 keeps the loading window open so engine paths can be corrected and retried.
 
+MapAnything uses the FMHA encoder and pose/scale engines in
+`onnx/MapAnything/updated_onnx/`: `mapanything_fix_encoder_fmha.engine` and
+`mapanything_dynamic_pose_scale_fmha.engine`. Both paths can be selected in the
+loading window. `fs::MA(encoder_path, pose_scale_path)` loads both engines and
+allocates all I/O and five-view `F_fused[5,1536,31,37]` / `CLS[5,1536,1]` banks
+during construction. Each engine owns one execution context; both share one
+activation workspace sized to the larger of their maximum device-memory needs.
+Destruction synchronizes the stream and destroys both contexts before freeing
+that workspace. Inference rebinds the encoder context to each changed view's
+input and feature slots and enqueues it serially on the MA stream, then feeds
+the first 2–5 slots directly to pose/scale. RGB/depth updates invalidate that
+view's cached features. The two-engine path produces camera poses and scale;
+FS supplies depth.
+
 The first scan capture displays FS points. Confirm a mask with **Finish draw** to
 automatically build a GPU triangle mesh using only valid points inside that mask
 and calculate its surface area. The mask is sampled on the 960 × 800 FS grid with
 nearest-neighbour resizing. Editing and confirming the mask rebuilds this mesh;
 clearing the mask removes the mesh and its area. From the second capture onward,
-MapAnything predicts camera poses and displays each view as a point cloud; MA
-triangle meshes are not computed. MA results export as a world-space point-cloud
-PLY without faces. FS point clouds remain available through the source selector.
+MapAnything predicts camera poses that position the captured FS point clouds in
+the scene. MA produces only poses and scale; dense MA depth decoding and the
+separate MA point-cloud display path have been removed.
 
 With geometry filtering enabled, a single view uses only the 5 × 5 neighbour
 support/distance filter. Before MA runs with 2–5 views, every view also receives
@@ -56,8 +70,8 @@ RGB images are the exact rectified, resized FoundationStereo inputs at 960 × 80
 float32 Z depth uses the same grid. A shared `cameras.json` contains the FS intrinsics
 and original MA camera-to-world poses in metres (identity for a single view).
 
-The existing `fs_gui` entry still starts with calibration. Imported captures in
-`scan_gui` must include `left.png`, `right.png` and their own `calibration.json`
+`scan_gui` is the desktop entry point. Imported captures must include
+`left.png`, `right.png` and their own `calibration.json`
 (or `sentech_stereo_calibration.json`).
 
 With `FS_BUILD_TESTS=ON`, `ctest --test-dir cpp/build --output-on-failure` includes

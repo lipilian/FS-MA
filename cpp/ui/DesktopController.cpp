@@ -38,35 +38,13 @@ void showMainWindow(QWidget* window) {
 }
 } // namespace
 
-DesktopController::DesktopController(StartupMode mode) : mode_(mode) {
-    if (mode_ == StartupMode::ZedScan) return;
-    calibration_ = std::make_unique<CalibrationController>();
-    window_ = std::make_unique<CalibrationWindow>(*calibration_);
-    connect(window_.get(), &CalibrationWindow::closeRequested, this, [this] {
-        cancelled_ = true; calibration_->stop();
-    });
-    connect(calibration_.get(), &CalibrationController::completed, this,
-        [this](ConfirmedCalibration result, QString path, SharedStereoSource source, double exposure_us) {
-        if (cancelled_ || confirmed_) { if (source) source->stop(); return; }
-        confirmed_ = std::move(result); saved_path_ = std::move(path); source_ = std::move(source);
-        camera_exposure_us_ = exposure_us;
-        window_->setEnabled(false); calibration_->stop();
-    });
-    connect(calibration_.get(), &CalibrationController::stopped, this, [this] {
-        if (cancelled_ || !confirmed_) {
-            if (source_) source_->stop();
-            source_.reset(); window_->allowClose(); QApplication::quit(); return;
-        }
-        prepareInference();
-    });
-}
 void DesktopController::prepareInference() {
     if (pipeline_ || cancelled_) return;
     try {
         // Model loading and all later inference share one pipeline worker.
         // ZED obtains rectified calibration from the SDK when it connects.
-        pipeline_ = std::make_unique<PipelineController>(confirmed_, saved_path_, std::move(source_), camera_exposure_us_);
-        splash_ = std::make_unique<InferenceSplashWindow>(mode_ == StartupMode::Calibration);
+        pipeline_ = std::make_unique<PipelineController>(ConfirmedCalibration{}, QString{}, SharedStereoSource{});
+        splash_ = std::make_unique<InferenceSplashWindow>(false);
         connect(splash_.get(), &InferenceSplashWindow::retryRequested, this, &DesktopController::initializeInference);
         connect(splash_.get(), &InferenceSplashWindow::closeRequested, this, [this] {
             cancelled_ = true; pipeline_->stop();
@@ -85,36 +63,30 @@ void DesktopController::prepareInference() {
             QApplication::quit();
         });
         splash_->show();
-        if (window_) { window_->allowClose(); window_.reset(); }
-        initializeInference(splash_->enginePath(),splash_->samEncoderPath(),splash_->samDecoderPath(),splash_->maEnginePath());
+        initializeInference(splash_->enginePath(),splash_->samEncoderPath(),splash_->samDecoderPath(),splash_->maEncoderPath(),splash_->maPoseScalePath());
     } catch (const std::exception& e) {
         pipeline_.reset();
-        if (source_) source_->stop();
-        source_.reset();
-        QMessageBox::critical(window_.get(), "Unable to prepare reconstruction", QString::fromUtf8(e.what()));
-        if (window_) window_->allowClose();
+        QMessageBox::critical(splash_.get(), "Unable to prepare reconstruction", QString::fromUtf8(e.what()));
         if (splash_) splash_->allowClose();
         QApplication::quit();
     }
 }
 void DesktopController::initializeInference(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder,
-                                           const QString& ma_engine) {
+                                           const QString& ma_encoder, const QString& ma_pose_scale) {
     if (cancelled_ || !splash_) return;
-    splash_->startLoading(); pipeline_->initialize(engine_path,sam_encoder,sam_decoder,ma_engine);
+    splash_->startLoading(); pipeline_->initialize(engine_path,sam_encoder,sam_decoder,ma_encoder,ma_pose_scale);
 }
 void DesktopController::openReconstruction() {
     if (reconstruction_ || cancelled_) return;
     try {
-        reconstruction_ = std::make_unique<ReconstructionWindow>(*pipeline_, confirmed_, saved_path_);
+        reconstruction_ = std::make_unique<ReconstructionWindow>(*pipeline_, ConfirmedCalibration{}, QString{});
         connect(reconstruction_.get(), &ReconstructionWindow::closeRequested, pipeline_.get(), &PipelineController::stop);
         showMainWindow(reconstruction_.get()); splash_->allowClose(); splash_.reset();
-        if (mode_ == StartupMode::ZedScan)
-            pipeline_->submit([](auto& worker) { worker.connectCameras(CameraMode::Zed); });
+        pipeline_->submit([](auto& worker) { worker.connectCameras(CameraMode::Zed); });
     } catch (const std::exception& e) {
         if (splash_) splash_->showFailure(QString::fromUtf8(e.what()));
     }
 }
 void DesktopController::show() {
-    if (mode_ == StartupMode::ZedScan) prepareInference();
-    else showMainWindow(window_.get());
+    prepareInference();
 }

@@ -1,7 +1,6 @@
 #include "fs/inference/FS.hpp"
 #include "fs/inference/MA.hpp"
 #include "fs/inference/MAPostprocessing.hpp"
-#include "fs/geometry/MeshBuilderGPU.hpp"
 
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
@@ -24,8 +23,8 @@ void require(bool condition, const char* message) {
 void checked(cudaError_t error) {
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-std::array<float*, 4> devicePointers(const fs::MA& model) {
-    return {model.inputDevice(), model.depthsDevice(), model.posesDevice(), model.scaleDevice()};
+std::array<float*, 5> devicePointers(const fs::MA& model) {
+    return {model.inputDevice(), model.tokensDevice(), model.clsDevice(), model.posesDevice(), model.scaleDevice()};
 }
 bool deviceAllocation(const float* pointer) {
     cudaPointerAttributes attributes{};
@@ -63,7 +62,7 @@ void checkColorUploads(fs::MA& model) {
             for (int c = 0; c < 7; ++c) {
                 for (int y = 0; y < h; ++y) {
                     for (int x = 0; x < w; ++x) {
-                        const auto offset = (v * 7 + c) * plane + y * w + x;
+                        const auto offset = v * fs::MA::kInputStrideElements + c * plane + y * w + x;
                         if (c < 3 && !expected[v].empty()) {
                             const double reference = (double(expected[v].at<cv::Vec3b>(y, x)[c]) / 255.0 - mean[c]) / stddev[c];
                             require(std::abs(double(actual[offset]) - reference) <= 1e-6,
@@ -163,7 +162,7 @@ void checkDepthUploads(fs::MA& model) {
         checked(cudaStreamSynchronize(model.stream()));
         for (int v = 0; v < fs::MA::kMaxViews; ++v) {
             for (int c = 0; c < 7; ++c) {
-                const auto offset = (v * 7 + c) * plane;
+                const auto offset = v * fs::MA::kInputStrideElements + c * plane;
                 if (c != 6 || !filled[v]) {
                     require(std::memcmp(actual.data() + offset, expected.data() + offset, plane * sizeof(float)) == 0,
                             "Depth upload changed RGB, rays or another view");
@@ -196,7 +195,7 @@ void checkDepthUploads(fs::MA& model) {
                 // its Euclidean norm as the notebook does (no GPU ray reads).
                 const double rx = ((x + 0.5) * rgb.cols / w - 0.5 - camera.cx) / camera.fx;
                 const double ry = ((y + 0.5) * rgb.rows / h - 0.5 - camera.cy) / camera.fy;
-                expected[(view * 7 + 6) * plane + y * w + x] =
+                expected[view * fs::MA::kInputStrideElements + 6 * plane + y * w + x] =
                     std::isfinite(z) && z > 0 ? float(std::sqrt(z * z * (rx * rx + ry * ry + 1.0))) : 0.0F;
             }
         }
@@ -257,8 +256,13 @@ void checkCameraPoseDecoding() {
     rejects([&] { fs::ma_postprocessing::camera_poses(raw.data(),2,0); }, "quaternion");
 }
 
+std::vector<float> download(const float* pointer, std::size_t count) {
+    std::vector<float> values(count);
+    checked(cudaMemcpy(values.data(), pointer, count * sizeof(float), cudaMemcpyDeviceToHost));
+    return values;
+}
+
 void checkInference(fs::MA& model) {
-    constexpr std::size_t plane = std::size_t{fs::MA::kInputHeight} * fs::MA::kInputWidth;
     const auto pointers = devicePointers(model);
     const StereoCameraParameters camera{540, 525, 310.5, 235.25, 0};
     model.resetInputs();
@@ -267,85 +271,62 @@ void checkInference(fs::MA& model) {
     rejects([&] { model.inference(6); }, "2..5 views");
     rejects([&] { model.inference(2); }, "view 1");
     rejects([&] { model.uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
+    checked(cudaMemsetAsync(model.tokensDevice(), 0xff, fs::MA::kTokenElements * sizeof(float), model.stream()));
+    checked(cudaMemsetAsync(model.clsDevice(), 0xff, fs::MA::kClsElements * sizeof(float), model.stream()));
 
     const auto run = [&](int views) {
-        const std::array<std::size_t, 3> capacities{fs::MA::kDepthElements, fs::MA::kPoseElements, 1};
-        const std::array<std::size_t, 3> counts{std::size_t(views) * 6 * plane, std::size_t(views) * 7, 1};
-        for (int i = 0; i < 3; ++i)
-            checked(cudaMemsetAsync(pointers[i + 1], 0xff, capacities[i] * sizeof(float), model.stream()));
-        // Queue directly after input preparation; inference must order itself
-        // after the RGB/ray/distance kernels on the MA-owned stream.
+        checked(cudaMemsetAsync(model.posesDevice(), 0xff, fs::MA::kPoseElements * sizeof(float), model.stream()));
+        checked(cudaMemsetAsync(model.scaleDevice(), 0xff, sizeof(float), model.stream()));
         const auto start = std::chrono::steady_clock::now();
         model.inference(views);
         model.synchronize();
-        std::cout << "MA inference V=" << views << ": "
+        std::cout << "MA encoder + pose/scale V=" << views << ": "
                   << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
                   << " ms\n";
-        require(devicePointers(model) == pointers, "Inference replaced persistent I/O allocations");
-        std::uint64_t hash = 14695981039346656037ULL;
-        for (int tensor = 0; tensor < 3; ++tensor) {
-            std::vector<float> output(capacities[tensor]);
-            checked(cudaMemcpy(output.data(), pointers[tensor + 1], output.size() * sizeof(float), cudaMemcpyDeviceToHost));
-            for (std::size_t i = 0; i < output.size(); ++i) {
+        require(devicePointers(model) == pointers, "Inference replaced persistent GPU allocations");
+        auto output = download(model.posesDevice(), fs::MA::kPoseElements);
+        for (std::size_t i = 0; i < output.size(); ++i) {
+            if (i < std::size_t(views) * 7) require(std::isfinite(output[i]), "Non-finite active camera pose");
+            else {
                 std::uint32_t bits{};
                 std::memcpy(&bits, &output[i], sizeof(bits));
-                if (i < counts[tensor]) {
-                    require(std::isfinite(output[i]), "MA inference did not produce finite raw outputs for every active view");
-                    hash = (hash ^ bits) * 1099511628211ULL;
-                } else {
-                    require(bits == 0xffffffffU, "Inference wrote outside its active view count");
-                }
+                require(bits == 0xffffffffU, "Pose output overwrote an inactive view");
             }
         }
+        output.resize(views * 7);
+        const float raw_scale = download(model.scaleDevice(), 1).front();
+        require(std::isfinite(raw_scale), "Non-finite scene scale");
+        const float scale = std::max(std::exp(raw_scale), 1e-8F);
         const auto cameras = model.downloadCameraPoses();
         require(int(cameras.size()) == views, "Camera download has the wrong view count");
-        std::array<float,fs::MA::kPoseElements> raw_poses{};
-        float raw_scale{};
-        checked(cudaMemcpy(raw_poses.data(),model.posesDevice(),views*7*sizeof(float),cudaMemcpyDeviceToHost));
-        checked(cudaMemcpy(&raw_scale,model.scaleDevice(),sizeof(float),cudaMemcpyDeviceToHost));
-        const float scale = std::max(std::exp(raw_scale),1e-8F);
-        fs::MeshGPUBuffer point_cloud;
         for (int v = 0; v < views; ++v) {
             const auto& pose = cameras[v];
             for (int c = 0; c < 3; ++c)
-                require(pose(c,3) == raw_poses[v*7+c]*scale, "Camera positions were rebased or use the wrong scale");
+                require(pose(c,3) == output[v*7+c]*scale, "Camera positions were rebased or use the wrong scale");
             const cv::Matx33d rotation(pose(0,0),pose(0,1),pose(0,2),pose(1,0),pose(1,1),pose(1,2),
                                       pose(2,0),pose(2,1),pose(2,2));
             require(cv::norm(rotation.t()*rotation-cv::Matx33d::eye()) < 1e-6 &&
                     std::abs(cv::determinant(rotation)-1) < 1e-6, "Invalid predicted camera rotation");
-            const auto stats=fs::build_ma_point_cloud_gpu({model.depthsDevice()+v*6*plane,
-                model.inputDevice()+v*7*plane,model.scaleDevice(),fs::MA::kInputWidth,
-                fs::MA::kInputHeight,model.stream()},point_cloud);
-            std::vector<float> dense(6*plane), input(7*plane);
-            std::vector<fs::MeshGPUVertex> vertices(plane);
-            // CPU readback is only for validation of the production GPU path.
-            checked(cudaMemcpy(dense.data(),model.depthsDevice()+v*6*plane,dense.size()*sizeof(float),cudaMemcpyDeviceToHost));
-            checked(cudaMemcpy(input.data(),model.inputDevice()+v*7*plane,input.size()*sizeof(float),cudaMemcpyDeviceToHost));
-            checked(cudaMemcpy(vertices.data(),point_cloud.vertices(),vertices.size()*sizeof(vertices[0]),cudaMemcpyDeviceToHost));
-            unsigned long long retained=0;
-            for (std::size_t i=0;i<plane;++i) {
-                const cv::Vec3f ray(dense[i],dense[plane+i],dense[2*plane+i]);
-                const float distance=std::exp(dense[3*plane+i])*scale;
-                const auto p=ray/std::max(float(cv::norm(ray)),1e-8f)*distance;
-                const bool valid=std::isfinite(input[6*plane+i]) && input[6*plane+i]>0 &&
-                    dense[5*plane+i]>0 && p[2]>0 &&
-                    std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]);
-                const auto& point=vertices[i];
-                if (!valid) { require(point.z==0,"MA invalid prediction reached the renderer"); continue; }
-                ++retained;
-                require(cv::norm(p-cv::Vec3f(point.x,point.y,point.z))<1e-5*std::max(1.f,distance),
-                    "GPU MA point differs from decoded real prediction");
-                require(std::abs(point.r-std::clamp(input[i]*.229f+.485f,0.f,1.f))<1e-6f &&
-                    std::abs(point.g-std::clamp(input[plane+i]*.224f+.456f,0.f,1.f))<1e-6f &&
-                    std::abs(point.b-std::clamp(input[2*plane+i]*.225f+.406f,0.f,1.f))<1e-6f,
-                    "GPU MA point has incorrect image color");
-            }
-            require(stats.point_count==retained,"MA rendered count differs from real prediction");
         }
-        return hash;
+        output.push_back(raw_scale);
+        return output;
     };
+    const auto features = [&] {
+        auto values = download(model.tokensDevice(), fs::MA::kTokenElements);
+        const auto cls = download(model.clsDevice(), fs::MA::kClsElements);
+        values.insert(values.end(), cls.begin(), cls.end());
+        return values;
+    };
+    const auto sameSlot = [](const auto& a, const auto& b, int view) {
+        const auto offset = std::size_t(view) * fs::MA::kTokenElementsPerView;
+        const auto cls_offset = fs::MA::kTokenElements + std::size_t(view) * fs::MA::kClsElementsPerView;
+        return std::memcmp(a.data()+offset,b.data()+offset,fs::MA::kTokenElementsPerView*sizeof(float)) == 0 &&
+               std::memcmp(a.data()+cls_offset,b.data()+cls_offset,fs::MA::kClsElementsPerView*sizeof(float)) == 0;
+    };
+    std::array<cv::Mat, fs::MA::kMaxViews> rgbs, depths;
+    std::array<std::vector<float>, fs::MA::kMaxViews + 1> results;
     for (int v = 0; v < fs::MA::kMaxViews; ++v) {
-        cv::Mat rgb(480, 640, CV_8UC3);
+        auto& rgb = rgbs[v]; rgb.create(480, 640, CV_8UC3);
         for (int y = 0; y < rgb.rows; ++y) {
             auto* row = rgb.ptr<cv::Vec3b>(y);
             for (int x = 0; x < rgb.cols; ++x)
@@ -353,21 +334,71 @@ void checkInference(fs::MA& model) {
         }
         model.uploadColor(v, rgb, camera);
         rejects([&] { model.inference(std::max(2, v + 1)); }, "view " + std::to_string(v + 1));
-        cv::Mat depth(800,960,CV_32FC1,cv::Scalar(0.35+v*0.02));
-        depth(cv::Rect(100+v*20,100,160,160)).setTo(0); // Missing FS depth remains absent in MA clouds.
-        model.uploadDepth(v,depth);
-        if (v == 0) rejects([&] { model.inference(2); }, "view 2");
-        else run(v + 1);
+        depths[v] = cv::Mat(800,960,CV_32FC1,cv::Scalar(0.35+v*0.02));
+        depths[v](cv::Rect(100+v*20,100,160,160)).setTo(0);
+        model.uploadDepth(v,depths[v]);
+        if (v == 0) { rejects([&] { model.inference(2); }, "view 2"); continue; }
+        model.synchronize();
+        const auto previous = features();
+        results[v+1] = run(v+1);
+        const auto current = features();
+        for (int slot = 0; slot < fs::MA::kMaxViews; ++slot) {
+            if ((v > 1 && slot < v) || slot > v)
+                require(sameSlot(previous,current,slot), "Encoding changed another view's token/CLS slot");
+            if (slot <= v) {
+                const auto offset = std::size_t(slot) * fs::MA::kTokenElementsPerView;
+                const auto cls_offset = fs::MA::kTokenElements + std::size_t(slot) * fs::MA::kClsElementsPerView;
+                require(std::all_of(current.begin()+offset,current.begin()+offset+fs::MA::kTokenElementsPerView,
+                                    [](float x) { return std::isfinite(x); }) &&
+                        std::all_of(current.begin()+cls_offset,current.begin()+cls_offset+fs::MA::kClsElementsPerView,
+                                    [](float x) { return std::isfinite(x); }), "Encoder did not fill an entire feature slot");
+            }
+        }
     }
-    // Verify a second enqueue safely handles a still-pending context and a
-    // shrinking shape, without reallocating the I/O or consuming trailing views.
+    const auto all_features = features();
+    // Shrink while inference is still pending, then grow using cached slots.
     model.inference(5);
-    const auto before = run(2);
-    model.uploadColor(1, cv::Mat(480, 640, CV_8UC3, cv::Scalar(190, 50, 70)), camera);
+    for (const int views : {2,5,3,4,2})
+        require(run(views) == results[views], "Dynamic view switching changed repeatable pose/scale outputs");
+    require(features() == all_features, "Pose/scale changed cached encoder features");
+
+    // A depth-only update must invalidate exactly its own encoding.
+    depths[1].setTo(0.62);
+    model.uploadDepth(1, depths[1]);
     rejects([&] { model.downloadCameraPoses(); }, "inference outputs");
-    rejects([&] { model.inference(2); }, "view 2"); // Retake must replace depth too.
-    model.uploadDepth(1, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.55)));
-    require(run(2) != before, "Retake input did not affect MA outputs");
+    require(run(2) != results[2], "Depth-only update retained stale features or camera outputs");
+    const auto changed_depth = features();
+    require(!sameSlot(all_features,changed_depth,1), "Depth change did not re-encode its view");
+    for (const int slot : {0,2,3,4})
+        require(sameSlot(all_features,changed_depth,slot), "Depth change overwrote another view's features");
+
+    rgbs[1].setTo(cv::Scalar(190,50,70));
+    model.uploadColor(1, rgbs[1], camera);
+    rejects([&] { model.downloadCameraPoses(); }, "inference outputs");
+    rejects([&] { model.inference(2); }, "view 2");
+    model.uploadDepth(1, depths[1]);
+    const auto retaken = run(2);
+    require(retaken != results[2], "Retake input did not affect MA outputs");
+    const auto changed_rgb = features();
+    require(!sameSlot(changed_depth,changed_rgb,1), "RGB change did not re-encode its view");
+    for (const int slot : {0,2,3,4})
+        require(sameSlot(changed_depth,changed_rgb,slot), "Retake overwrote another view's features");
+
+    // Compare incremental/cached results with five back-to-back encoder calls
+    // through one context. Reverse upload order also checks fixed slot mapping.
+    const auto all_retaken = run(5);
+    model.resetInputs();
+    rejects([&] { model.inference(2); }, "view 1");
+    rejects([&] { model.downloadCameraPoses(); }, "inference outputs");
+    checked(cudaMemsetAsync(model.tokensDevice(), 0xff, fs::MA::kTokenElements*sizeof(float), model.stream()));
+    checked(cudaMemsetAsync(model.clsDevice(), 0xff, fs::MA::kClsElements*sizeof(float), model.stream()));
+    for (int v = fs::MA::kMaxViews - 1; v >= 0; --v) {
+        model.uploadColor(v, rgbs[v], camera);
+        model.uploadDepth(v, depths[v]);
+    }
+    require(run(5) == all_retaken, "Serial five-view re-encoding changed pose/scale outputs");
+    require(features() == changed_rgb, "Serial encoder reuse changed a view's token/CLS slot");
+    require(run(2) == retaken, "Fresh encoding differs from cached/retaken features");
 }
 
 struct TempDirectory {
@@ -380,17 +411,21 @@ struct TempDirectory {
 
 int main(int argc, char** argv) {
     try {
-        require(argc == 3, "Usage: fs_ma_engine_test MA.engine SAM_encoder.engine");
+        require(argc == 3, "Usage: fs_ma_engine_test encoder_fmha.engine pose_scale_fmha.engine");
         checkCameraPoseDecoding();
         TempDirectory temp;
         const auto missing = temp.path / "missing.engine", empty = temp.path / "empty.engine";
         std::ofstream(empty).close();
-        // MA can be constructed without FS and owns a non-blocking stream.
-        auto model = std::make_unique<fs::MA>();
-        rejects([&] { model->inference(2); }, "Load an engine");
-        rejects([&] { model->uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
+        rejects([&] { fs::MA bad(missing,argv[2]); }, "cannot open engine");
+        rejects([&] { fs::MA bad(empty,argv[2]); }, "empty engine");
+        rejects([&] { fs::MA bad(argv[2],argv[1]); }, "single-view encoder");
+        // Fail after loading the encoder, before allocating the shared workspace.
+        rejects([&] { fs::MA bad(argv[1],missing); }, "cannot open engine");
+        rejects([&] { fs::MA bad(argv[1],argv[1]); }, "pose/scale engine");
+
+        auto model = std::make_unique<fs::MA>(argv[1],argv[2]);
         const auto ma_stream = model->stream();
-        require(!model->isLoaded() && ma_stream, "Incorrect initial model or stream");
+        require(model->isLoaded() && ma_stream, "Constructor did not prepare both engines");
         unsigned int flags{};
         checked(cudaStreamGetFlags(ma_stream, &flags));
         require(flags == cudaStreamNonBlocking, "MA stream is not non-blocking");
@@ -398,75 +433,47 @@ int main(int argc, char** argv) {
         const auto fs_stream = owner->stream();
         std::weak_ptr<FS> lifetime = owner;
         require(ma_stream != fs_stream, "MA borrowed FS's stream");
-        {
-            fs::MA another;
-            require(another.stream() != ma_stream && another.stream() != fs_stream,
-                    "MA instances share a stream");
-        }
         const auto pointers = devicePointers(*model);
-        constexpr std::array<std::size_t, 4> elements{5*7*434*518, 5*6*434*518, 5*7, 1};
+        constexpr std::array<std::size_t, 5> elements{
+            fs::MA::kInputElements,fs::MA::kTokenElements,fs::MA::kClsElements,fs::MA::kPoseElements,fs::MA::kScaleElements};
         for (std::size_t i = 0; i < pointers.size(); ++i) {
-            require(pointers[i] && deviceAllocation(pointers[i]), "Constructor did not allocate GPU I/O");
-            // Exercise the full V=5 extent with a different byte pattern per tensor.
+            require(pointers[i] && deviceAllocation(pointers[i]), "Constructor did not allocate GPU I/O and feature banks");
             checked(cudaMemsetAsync(pointers[i], int(i)+1, elements[i]*sizeof(float), ma_stream));
         }
-        const auto checkBuffers = [&] {
-            require(devicePointers(*model) == pointers, "Engine loading replaced persistent I/O addresses");
-            require(model->stream() == ma_stream, "Engine loading replaced MA's stream");
-            checked(cudaStreamSynchronize(ma_stream));
-            for (std::size_t i = 0; i < pointers.size(); ++i) {
-                std::uint32_t first{}, last{};
-                checked(cudaMemcpy(&first, pointers[i], sizeof(first), cudaMemcpyDeviceToHost));
-                checked(cudaMemcpy(&last, pointers[i]+elements[i]-1, sizeof(last), cudaMemcpyDeviceToHost));
-                const auto expected = std::uint32_t(i+1)*0x01010101U;
-                require(first == expected && last == expected, "I/O capacity, independence or contents changed");
-            }
-        };
-        checkBuffers();
-        rejects([&] { model->loadEngine(missing); }, "cannot open engine");
-        rejects([&] { model->loadEngine(empty); }, "empty engine");
-        require(!model->isLoaded(), "Failed initial load marked the model ready");
-        checkBuffers();
-
-        model->loadEngine(argv[1]); // Includes runtime output-shape checks for every V=2..5.
-        require(model->isLoaded() && model->stream() == ma_stream, "MA did not load on its own stream");
-        checkBuffers();
-        rejects([&] { model->loadEngine(argv[2]); }, "incompatible tensor");
-        rejects([&] { model->loadEngine(missing); }, "cannot open engine");
-        require(model->isLoaded(), "Failed reload discarded the working model");
-        checkBuffers();
-        model->loadEngine(argv[1]);
-        require(model->isLoaded() && model->stream() == ma_stream, "Successful reload changed the stream");
-        checkBuffers();
+        model->synchronize();
+        for (std::size_t i = 0; i < pointers.size(); ++i) {
+            std::uint32_t first{}, last{};
+            checked(cudaMemcpy(&first, pointers[i], sizeof(first), cudaMemcpyDeviceToHost));
+            checked(cudaMemcpy(&last, pointers[i]+elements[i]-1, sizeof(last), cudaMemcpyDeviceToHost));
+            const auto expected = std::uint32_t(i+1)*0x01010101U;
+            require(first == expected && last == expected, "V=5 buffers overlap or have insufficient capacity");
+        }
         checkColorUploads(*model);
         checkDepthUploads(*model);
         checkInference(*model);
-        model->inference(2); // Destruction must drain inference before freeing workspace and I/O.
+        model->inference(2); // Destructor must drain queued pose/scale execution.
         model.reset();
         for (const auto* pointer : pointers)
-            require(!deviceAllocation(pointer), "Destructor retained a GPU I/O allocation");
+            require(!deviceAllocation(pointer), "Destructor retained a GPU allocation");
         require(cudaStreamGetFlags(fs_stream, &flags) == cudaSuccess, "MA destroyed FS's stream");
         owner->synchronize();
 
-        // Releasing FS first must neither retain FS nor invalidate MA's stream.
-        model = std::make_unique<fs::MA>();
+        model = std::make_unique<fs::MA>(argv[1],argv[2]);
         const auto final_stream = model->stream();
         require(final_stream != fs_stream, "New MA instance borrowed FS's stream");
         const auto final_pointers = devicePointers(*model);
         owner.reset();
         require(lifetime.expired(), "MA retained FS");
-        require(model->stream() == final_stream, "Releasing FS changed MA's stream");
         checked(cudaStreamGetFlags(final_stream, &flags));
-        checked(cudaMemsetAsync(model->inputDevice(), 0, elements[0]*sizeof(float), final_stream));
-        checked(cudaStreamSynchronize(final_stream));
-        // Destruction also drains queued work before releasing buffers/stream.
-        checked(cudaMemsetAsync(model->depthsDevice(), 0, elements[1]*sizeof(float), final_stream));
-        model->uploadColor(0, cv::Mat(50, 80, CV_8UC3, cv::Scalar(5, 20, 240)), {60, 55, 39.5, 24.5, 0});
-        model->uploadDepth(0, cv::Mat(50, 80, CV_32FC1, cv::Scalar(0.4)));
+        for (int view = 0; view < 2; ++view) {
+            model->uploadColor(view, cv::Mat(50,80,CV_8UC3,cv::Scalar(5,20,240)), {60,55,39.5,24.5,0});
+            model->uploadDepth(view, cv::Mat(50,80,CV_32FC1,cv::Scalar(0.4)));
+        }
+        model->inference(2); // Both encoder and suffix may still be running.
         model.reset();
         for (const auto* pointer : final_pointers)
             require(!deviceAllocation(pointer), "GPU I/O survived MA release");
-        std::cout << "PASS: persistent GPU I/O, engine reload/error handling, Lanczos4 RGB/ray/distance preparation, invalid depth cleanup, real V=2..5 MA inference, camera pose decoding in the predicted world (first pose preserved), shrinking shapes, Retake readiness/output updates, output bounds, GPU buffer release with pending inference, independent streams and FS/MA lifetimes\n";
+        std::cout << "PASS: constructor-owned two-engine resources with shared activation workspace, one encoder context reused across five fixed token/CLS slots, RGB/ray/depth preparation, real V=2..5 inference, dynamic switching, cached views, depth/RGB invalidation, reset, pose decoding, output bounds and destruction with pending encoder/pose work\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

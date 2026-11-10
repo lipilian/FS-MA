@@ -14,45 +14,17 @@ void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(m
 void checked(cudaError_t error) { if (error!=cudaSuccess) throw std::runtime_error(cudaGetErrorString(error)); }
 struct Device {
     cudaStream_t stream{};
-    float *dense{}, *input{}, *scale{};
+    float *xyz{}, *rgb{};
     unsigned char* mask{};
     explicit Device(int n) {
         checked(cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking));
-        checked(cudaMalloc(reinterpret_cast<void**>(&dense),n*6*sizeof(float)));
-        checked(cudaMalloc(reinterpret_cast<void**>(&input),n*7*sizeof(float)));
-        checked(cudaMalloc(reinterpret_cast<void**>(&scale),sizeof(float)));
+        checked(cudaMalloc(reinterpret_cast<void**>(&xyz),n*3*sizeof(float)));
+        checked(cudaMalloc(reinterpret_cast<void**>(&rgb),n*3*sizeof(float)));
         checked(cudaMalloc(reinterpret_cast<void**>(&mask),n));
     }
-    ~Device() { cudaFree(dense); cudaFree(input); cudaFree(scale); cudaFree(mask); cudaStreamDestroy(stream); }
+    ~Device() { cudaFree(xyz); cudaFree(rgb); cudaFree(mask); cudaStreamDestroy(stream); }
 };
-SharedGPUMesh cloud(quint64 id, bool red, bool empty=false) {
-    constexpr int w=31,h=23,n=w*h;
-    auto device=std::make_shared<Device>(n);
-    std::vector<float> dense(n*6),input(n*7);
-    for (int y=0;y<h;++y) for (int x=0;x<w;++x) {
-        const int i=y*w+x;
-        const float px=(x-15)*.006f, py=(y-11)*.006f, pz=.4f;
-        dense[i]=px; dense[n+i]=py; dense[2*n+i]=pz;
-        dense[3*n+i]=std::log(std::sqrt(px*px+py*py+pz*pz));
-        dense[5*n+i]=1;
-        input[i]=((red ? 1.f : 0.f)-.485f)/.229f;
-        input[n+i]=((red ? 0.f : 1.f)-.456f)/.224f;
-        input[2*n+i]=-.406f/.225f;
-        input[6*n+i]=empty ? 0.f : .4f;
-    }
-    float scale=0;
-    checked(cudaMemcpyAsync(device->dense,dense.data(),dense.size()*sizeof(float),cudaMemcpyHostToDevice,device->stream));
-    checked(cudaMemcpyAsync(device->input,input.data(),input.size()*sizeof(float),cudaMemcpyHostToDevice,device->stream));
-    checked(cudaMemcpyAsync(device->scale,&scale,sizeof(float),cudaMemcpyHostToDevice,device->stream));
-    auto buffer=std::make_shared<fs::MeshGPUBuffer>();
-    auto frame=std::make_shared<GPUMeshFrame>();
-    frame->stats=fs::build_ma_point_cloud_gpu({device->dense,device->input,device->scale,w,h,device->stream},*buffer);
-    frame->buffer=buffer; frame->point_cloud=true; frame->stream=device->stream;
-    frame->stream_owner=device; frame->image_id=id;
-    checked(cudaGetDevice(&frame->device));
-    return frame;
-}
-SharedGPUMesh fsGeometry(quint64 id, bool surface, bool red=true, int w=31, int h=23) {
+SharedGPUMesh fsGeometry(quint64 id, bool surface, bool red=true, int w=31, int h=23, bool empty=false) {
     const int n=w*h;
     auto device=std::make_shared<Device>(n);
     std::vector<float> xyz(n*3),rgb(n*3);
@@ -61,17 +33,24 @@ SharedGPUMesh fsGeometry(quint64 id, bool surface, bool red=true, int w=31, int 
         xyz[3*i]=(x-(w-1)*.5f)*.006f; xyz[3*i+1]=(y-(h-1)*.5f)*.006f; xyz[3*i+2]=.4f;
         rgb[i]=red ? 255 : 0; rgb[n+i]=red ? 0 : 255;
     }
-    checked(cudaMemcpyAsync(device->dense,xyz.data(),xyz.size()*sizeof(float),cudaMemcpyHostToDevice,device->stream));
-    checked(cudaMemcpyAsync(device->input,rgb.data(),rgb.size()*sizeof(float),cudaMemcpyHostToDevice,device->stream));
-    checked(cudaMemsetAsync(device->mask,255,n,device->stream));
+    checked(cudaMemcpyAsync(device->xyz,xyz.data(),xyz.size()*sizeof(float),cudaMemcpyHostToDevice,device->stream));
+    checked(cudaMemcpyAsync(device->rgb,rgb.data(),rgb.size()*sizeof(float),cudaMemcpyHostToDevice,device->stream));
+    checked(cudaMemsetAsync(device->mask,empty ? 0 : 255,n,device->stream));
     auto buffer=std::make_shared<fs::MeshGPUBuffer>();
     auto frame=std::make_shared<GPUMeshFrame>();
-    const fs::MeshGPUInputs input{device->dense,device->input,device->mask,w,h,device->stream};
+    const fs::MeshGPUInputs input{device->xyz,device->rgb,device->mask,w,h,device->stream};
     frame->stats=surface ? fs::build_mesh_gpu(input,*buffer) : fs::build_point_cloud_gpu(input,*buffer);
     frame->buffer=buffer; frame->point_cloud=!surface; frame->stream=device->stream;
     frame->stream_owner=device; frame->image_id=id;
     frame->camera={cv::Matx33d(.4/.006,0,(w-1)*.5,0,.4/.006,(h-1)*.5,0,0,1),{w,h}};
     checked(cudaGetDevice(&frame->device));
+    return frame;
+}
+// Geometry-only fixtures omit camera overlays so framebuffer comparisons isolate
+// point positions and colors. Camera projection and picking are tested below.
+SharedGPUMesh pointsWithoutCamera(quint64 id, bool red, bool empty=false) {
+    auto frame=std::make_shared<GPUMeshFrame>(*fsGeometry(id,false,red,31,23,empty));
+    frame->camera={};
     return frame;
 }
 int pixels(const QImage& image, bool red) {
@@ -98,11 +77,10 @@ int main(int argc, char** argv) {
         QString failure; int uploads=0;
         QObject::connect(&view,&MeshView::renderFailed,[&](QString message) { failure=message; });
         QObject::connect(&view,&MeshView::log,[&](QString message) { if (message.contains("→ OpenGL")) ++uploads; });
-        const auto fs=cloud(1,true), ma=cloud(1,false);
-        auto clouds=std::make_shared<std::vector<SharedGPUMesh>>(); clouds->push_back(ma);
-        view.setCapturedClouds({fs}); view.setGPUMesh(fs); view.setMAClouds(clouds);
+        const auto fs=pointsWithoutCamera(1,true), green=pointsWithoutCamera(1,false);
+        view.setCapturedClouds({fs});
         // Nonidentity first pose, including negative world Z. No camera frustum
-        // is needed: the ID still maps both clouds into the same world frame.
+        // is needed: the capture ID maps the FS points into MA's world frame.
         auto poses=std::make_shared<std::vector<PredictedCameraFrame>>();
         poses->push_back({{},cv::Matx44d(0,-1,0,.1,1,0,0,-.1,0,0,1,-.5,0,0,0,1),1,{}});
         view.setPredictedCameras(poses); view.show(); view.resetView();
@@ -116,65 +94,50 @@ int main(int argc, char** argv) {
             return image;
         };
         const auto fs_image=snapshot();
-        require(pixels(fs_image,true)>500 && pixels(fs_image,false)==0,"FS selection drew MA or lost FS points");
-        require(uploads==2,"Both GPU sources must be uploaded once");
+        require(pixels(fs_image,true)>500 && pixels(fs_image,false)==0,"Captured FS points were not rendered");
+        require(uploads==1,"Captured geometry must upload once");
         for (int i=0;i<3;++i) {
-            view.setShowMAClouds(true);
-            const auto ma_image=snapshot();
-            require(pixels(ma_image,false)>500 && pixels(ma_image,true)==0,"MA selection drew FS or lost MA points");
-            // Equal geometry and pose must occupy exactly the same pixel set.
-            for (int y=0;y<fs_image.height();++y) for (int x=0;x<fs_image.width();++x)
-                require((fs_image.pixelColor(x,y).red()>240)==(ma_image.pixelColor(x,y).green()>240),
-                    "Source switch changed world pose or view framing");
-            view.setShowMAClouds(false);
-            require(snapshot()==fs_image,"Switching back changed the FS scene");
+            view.setCapturedClouds({fs});
+            require(snapshot()==fs_image,"Refreshing the same capture changed the scene");
         }
-        require(uploads==2,"Source selection reuploaded GPU geometry");
-        view.setShowMAClouds(true);
-        auto replacement=std::make_shared<std::vector<SharedGPUMesh>>(); replacement->push_back(cloud(2,false));
+        require(uploads==1,"Refreshing the same capture reuploaded GPU geometry");
+        const auto replacement=pointsWithoutCamera(2,false);
         auto new_poses=std::make_shared<std::vector<PredictedCameraFrame>>(*poses); new_poses->back().image_id=2;
-        view.setMAClouds(replacement); view.setPredictedCameras(new_poses);
-        require(pixels(snapshot(),false)>500 && uploads==3,"Retake failed to replace the MA cloud");
-        auto empty=std::make_shared<std::vector<SharedGPUMesh>>(); empty->push_back(cloud(2,false,true));
-        view.setMAClouds(empty);
+        view.setCapturedClouds({replacement}); view.setPredictedCameras(new_poses);
+        require(pixels(snapshot(),false)>500 && uploads==2,"Retake failed to replace the captured cloud");
+        view.setCapturedClouds({pointsWithoutCamera(2,false,true)});
         const auto no_points=snapshot();
-        require(pixels(no_points,true)==0 && pixels(no_points,false)==0,"Empty MA result retained old geometry or fell back to FS");
-        view.setMAClouds({}); view.setCapturedClouds({}); view.setGPUMesh({}); view.setPredictedCameras({});
-        view.setShowMAClouds(false);
+        require(pixels(no_points,true)==0 && pixels(no_points,false)==0,"Empty capture retained old geometry");
+        view.setCapturedClouds({}); view.setPredictedCameras({});
         require(snapshot()==no_points,"Clean retained point-cloud geometry");
-        // Render five MA clouds at distinct poses, with negative world-space Z.
-        // Mesh/wireframe requests must keep MA in point-cloud mode.
+        // Render five FS captures at distinct MA poses, with negative world Z.
+        // Point-cloud geometry must remain points in every requested draw mode.
         auto cloud_poses=std::make_shared<std::vector<PredictedCameraFrame>>();
-        auto multi_clouds=std::make_shared<std::vector<SharedGPUMesh>>();
+        std::vector<SharedGPUMesh> multi_clouds;
         for (int i=0;i<5;++i) {
-            auto points=std::make_shared<GPUMeshFrame>(*ma); points->image_id=i+1; multi_clouds->push_back(points);
+            auto points=std::make_shared<GPUMeshFrame>(*green); points->image_id=i+1; multi_clouds.push_back(points);
             auto pose=cv::Matx44d::eye(); pose(0,3)=i*.25; pose(2,3)=-.5;
             cloud_poses->push_back({{},pose,quint64(i+1),{}});
         }
-        int presented_clouds=0;
-        QObject::connect(&view,&MeshView::maCloudsPresented,[&](SharedGPUClouds result) {
-            require(result==multi_clouds,"Renderer presented an outdated MA point-cloud snapshot"); ++presented_clouds;
-        });
         const int uploads_before=uploads;
-        view.setCapturedClouds({fs}); view.setMAClouds(multi_clouds);
-        view.setPredictedCameras(cloud_poses); view.setShowMAClouds(true); view.setMode(0); view.resetView();
+        view.setCapturedClouds(multi_clouds);
+        view.setPredictedCameras(cloud_poses); view.setMode(0); view.resetView();
         const auto cloud_image=snapshot();
-        require(presented_clouds==1 && pixels(cloud_image,false)>500 && pixels(cloud_image,true)==0,
-                "MA clouds were not presented, lost negative world Z, or overlapped FS geometry");
-        require(uploads==uploads_before+6,"Five MA clouds and one FS cloud should upload without extra mesh buffers");
+        require(pixels(cloud_image,false)>500 && pixels(cloud_image,true)==0,
+                "Five captures lost negative world Z or retained previous geometry");
+        require(uploads==uploads_before+5,"Five captures should upload without extra mesh buffers");
         for (int mode : {1,2,0}) {
             view.setMode(mode);
-            require(snapshot()==cloud_image,"A mesh/wireframe request changed MA point-cloud rendering");
+            require(snapshot()==cloud_image,"A mesh/wireframe request changed captured point-cloud rendering");
         }
-        view.setMAClouds(multi_clouds); snapshot();
-        require(presented_clouds==1 && uploads==uploads_before+6,"Unchanged MA clouds were reuploaded or announced again");
+        view.setCapturedClouds(multi_clouds); snapshot();
+        require(uploads==uploads_before+5,"Unchanged captures were reuploaded");
         auto updated_poses=std::make_shared<std::vector<PredictedCameraFrame>>(*cloud_poses);
         updated_poses->back().camera_to_world(1,3)=.2;
         view.setPredictedCameras(updated_poses); view.setMode(1);
-        require(snapshot()!=cloud_image,"MA point cloud ignored an updated camera pose");
-        view.setMAClouds({}); view.setCapturedClouds({}); view.setPredictedCameras({});
-        view.setShowMAClouds(false);
-        require(snapshot()==no_points,"Clean retained MA point-cloud geometry");
+        require(snapshot()!=cloud_image,"Captured point cloud ignored an updated MA camera pose");
+        view.setCapturedClouds({}); view.setPredictedCameras({});
+        require(snapshot()==no_points,"Clean retained captured point-cloud geometry");
         // TSDF is compact world-space geometry, including negative Z. It must
         // bypass FS masks and camera transforms and retain both extraction modes.
         const auto world_geometry=[&](bool surface) {
@@ -281,7 +244,7 @@ int main(int argc, char** argv) {
         const auto cleared=snapshot();
         require(color_count(cleared,true)==0 && color_count(cleared,false)==0 && view.cameraImageQuad().isEmpty(),
                 "Clean retained camera highlighting");
-        // Pick using the rendered image planes, independent of FS/MA selection.
+        // Pick using the rendered image planes for all five captures.
         auto* canvas=view.findChild<QOpenGLWidget*>();
         const auto mouse=[&](QEvent::Type type,QPointF point,Qt::MouseButton button,Qt::MouseButtons buttons) {
             QMouseEvent event(type,point,canvas->mapToGlobal(point.toPoint()),button,buttons,Qt::NoModifier);
@@ -319,16 +282,13 @@ int main(int argc, char** argv) {
         }
         const int before_hover_uploads=uploads;
         view.setCameraInteractionEnabled(true);
-        for (bool show_ma : {false,true}) {
-            view.setShowMAClouds(show_ma);
-            for (int i=0;i<5;++i) {
-                hover(centers[i]);
-                require(purple_count(snapshot())>10 && canvas->cursor().shape()==Qt::PointingHandCursor,
-                        "Hover did not turn a selectable camera purple");
-                click(centers[i]);
-                require(clicked.size()==size_t((show_ma ? 5 : 0)+i+1) && clicked.back()==quint64(i+1),
-                        "Click selected the wrong camera or depended on the geometry source");
-            }
+        for (int i=0;i<5;++i) {
+            hover(centers[i]);
+            require(purple_count(snapshot())>10 && canvas->cursor().shape()==Qt::PointingHandCursor,
+                    "Hover did not turn a selectable camera purple");
+            click(centers[i]);
+            require(clicked.size()==size_t(i+1) && clicked.back()==quint64(i+1),
+                    "Click selected the wrong camera");
         }
         require(uploads==before_hover_uploads,"Camera hover/click reuploaded point clouds");
         QEvent leave(QEvent::Leave); QApplication::sendEvent(canvas,&leave);
@@ -337,14 +297,14 @@ int main(int argc, char** argv) {
         mouse(QEvent::MouseMove,centers[0]+QPointF(30,0),Qt::NoButton,Qt::LeftButton);
         mouse(QEvent::MouseMove,centers[0],Qt::NoButton,Qt::LeftButton);
         mouse(QEvent::MouseButtonRelease,centers[0],Qt::LeftButton,Qt::NoButton);
-        require(clicked.size()==10,"Rotating the scene triggered a camera click");
+        require(clicked.size()==5,"Rotating the scene triggered a camera click");
         view.setCameraInteractionEnabled(false); hover(centers[0]); click(centers[0]);
-        require(clicked.size()==10 && purple_count(snapshot())==0,"Disabled camera interaction still picked or highlighted");
+        require(clicked.size()==5 && purple_count(snapshot())==0,"Disabled camera interaction still picked or highlighted");
         auto retaken=std::make_shared<std::vector<PredictedCameraFrame>>(*five);
         retaken->back().image_id=99;
         view.setPredictedCameras(retaken); view.setCameraPresentation(99,99); snapshot();
         view.setCameraInteractionEnabled(true); hover(centers.back()); click(centers.back());
-        require(clicked.size()==11 && clicked.back()==99,"Retake kept the previous capture ID in its hit target");
+        require(clicked.size()==6 && clicked.back()==99,"Retake kept the previous capture ID in its hit target");
         // With coincident poses, click both non-overlapping numbered labels.
         view.setPredictedCameras(overlapping); view.setCameraPresentation(20,20); view.resetCaptureView();
         snapshot();
@@ -375,13 +335,13 @@ int main(int argc, char** argv) {
                 "Single FS camera without MA poses could not be selected");
         // Hover must tint only the matching FS points and restore their original
         // RGB on leave, without uploading or changing the immutable GPU buffers.
-        const auto fs_left=cloud(101,true), fs_right=cloud(202,false);
+        const auto fs_left=pointsWithoutCamera(101,true), fs_right=pointsWithoutCamera(202,false);
         auto fs_cameras=std::make_shared<std::vector<PredictedCameraFrame>>();
         auto fs_left_pose=cv::Matx44d::eye(), fs_right_pose=cv::Matx44d::eye();
         fs_left_pose(0,3)=-.18; fs_right_pose(0,3)=.18;
         fs_cameras->push_back({camera,fs_left_pose,101,dark});
         fs_cameras->push_back({camera,fs_right_pose,202,dark});
-        view.setShowMAClouds(false); view.setCapturedClouds({fs_left,fs_right}); view.setGPUMesh(fs_right);
+        view.setCapturedClouds({fs_left,fs_right}); view.setGPUMesh(fs_right);
         view.setPredictedCameras(fs_cameras); view.resetView();
         std::vector<QPointF> fs_centers;
         for (const auto& frame:*fs_cameras) {
@@ -420,14 +380,9 @@ int main(int argc, char** argv) {
                 "An overlapping view hid the hovered FS cloud at equal depth");
         QApplication::sendEvent(canvas,&leave);
         require(pixels(snapshot(),true)>300,"Overlapping FS points did not restore after hover");
-        // Mask display is independent of MA, including matching camera IDs.
-        view.setShowMAClouds(true);
-        const auto ma_before_mask=snapshot();
         QImage full_mask(62,46,QImage::Format_Grayscale8); full_mask.fill(255);
         QImage empty_mask(full_mask.size(),QImage::Format_Grayscale8); empty_mask.fill(0);
-        view.setFSMasks({{1,empty_mask}});
-        require(snapshot()==ma_before_mask,"FS mask transparency changed the MA display");
-        view.setShowMAClouds(false); view.setMAClouds({}); view.setPredictedCameras({});
+        view.setPredictedCameras({});
         view.setCamera(fs::MeshCamera{}); view.setCameraInteractionEnabled(false);
         const auto masked_cloud=fsGeometry(501,false);
         view.setCameraPresentation(501,0); view.setCapturedClouds({masked_cloud}); view.setGPUMesh(masked_cloud);
@@ -520,12 +475,12 @@ int main(int argc, char** argv) {
         const auto dense_counts=check_blend(dense_solid,snapshot(),true);
         require(dense_counts.first==0 && dense_counts.second>10000,
                 "Dense FS samples accumulated opacity instead of staying at alpha 0.3");
-        std::cout<<"PASS: CUDA/OpenGL uploads, exclusive FS/MA rendering, stable view/poses, cached switches, retake, empty clouds and clean\n";
+        std::cout<<"PASS: CUDA/OpenGL uploads, FS captures at MA poses, cached refreshes, retake, empty clouds and clean\n";
         std::cout<<"PASS: projected camera corners match textured GL pixels, perspective, orientation and resizing\n";
-        std::cout<<"PASS: five MA point clouds, point-only modes, presentation notifications, negative world Z, pose updates and green/blue camera selection\n";
-        std::cout<<"PASS: five clickable cameras, purple hover, FS/MA selection, drag rejection, disabled/cleared picks, retakes and overlapping labels\n";
+        std::cout<<"PASS: five captured point clouds, point-only modes, negative world Z, pose updates and green/blue camera selection\n";
+        std::cout<<"PASS: five clickable cameras, purple hover, drag rejection, disabled/cleared picks, retakes and overlapping labels\n";
         std::cout<<"PASS: matching FS cloud pale-purple hover, unchanged other views, exact RGB restoration, overlapping points and cached GPU geometry\n";
-        std::cout<<"PASS: unmasked/cleared FS alpha 0.3, per-view solid masks, original RGB, rotated poses, first-view mesh and unchanged MA/GPU buffers\n";
+        std::cout<<"PASS: unmasked/cleared FS alpha 0.3, per-view solid masks, original RGB, rotated poses, first-view mesh and unchanged GPU buffers\n";
         std::cout<<"PASS: Mesh/Point cloud mode switching and dense 960x800 FS points retain alpha 0.3 without repeated blending\n";
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;

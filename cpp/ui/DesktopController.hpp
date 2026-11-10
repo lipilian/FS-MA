@@ -1,28 +1,19 @@
 #pragma once
-#include "CalibrationWindow.hpp"
 #include "ReconstructionWindow.hpp"
 #include "InferenceSplashWindow.hpp"
 #include <memory>
 
-// Optional calibration -> background model loading -> reconstruction.
+// Background model loading -> ZED scanning and capture imports.
 class DesktopController : public QObject {
     Q_OBJECT
 public:
-    enum class StartupMode { Calibration, ZedScan };
-    explicit DesktopController(StartupMode mode = StartupMode::Calibration);
+    DesktopController() = default;
     void show();
 private:
     void prepareInference();
     void initializeInference(const QString& engine_path, const QString& sam_encoder, const QString& sam_decoder,
-                             const QString& ma_engine);
+                             const QString& ma_encoder, const QString& ma_pose_scale);
     void openReconstruction();
-    const StartupMode mode_;
-    std::unique_ptr<CalibrationController> calibration_;
-    std::unique_ptr<CalibrationWindow> window_;
-    ConfirmedCalibration confirmed_;
-    QString saved_path_;
-    SharedStereoSource source_;
-    double camera_exposure_us_{SentechStereoOptions{}.exposure_us};
     std::unique_ptr<PipelineController> pipeline_;
     std::unique_ptr<ReconstructionWindow> reconstruction_;
     std::unique_ptr<InferenceSplashWindow> splash_;

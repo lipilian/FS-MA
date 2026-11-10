@@ -12,7 +12,7 @@ struct StereoCameraParameters;
 
 namespace fs {
 
-// MapAnything dynamic RAW engine (the MA integration entry point).
+// MapAnything FMHA encoder followed by the dynamic RAW pose/scale engine.
 // Owns a non-blocking CUDA stream independently of FS. Calls on this instance
 // must be serialized on the pipeline thread.
 class MA {
@@ -21,24 +21,32 @@ public:
     static constexpr int kMaxViews = 5;
     static constexpr int kInputHeight = 434;
     static constexpr int kInputWidth = 518;
-    static constexpr std::size_t kInputElements = std::size_t{kMaxViews} * 7 * kInputHeight * kInputWidth;
-    static constexpr std::size_t kDepthElements = std::size_t{kMaxViews} * 6 * kInputHeight * kInputWidth;
+    static constexpr int kFeatureChannels = 1536;
+    static constexpr int kFeatureHeight = 31;
+    static constexpr int kFeatureWidth = 37;
+    static constexpr std::size_t kInputElementsPerView = std::size_t{7} * kInputHeight * kInputWidth;
+    // Every encoder binding needs 256-byte alignment: 12 padding floats/view.
+    static constexpr std::size_t kInputStrideElements = (kInputElementsPerView + 63) / 64 * 64;
+    static constexpr std::size_t kTokenElementsPerView = std::size_t{kFeatureChannels} * kFeatureHeight * kFeatureWidth;
+    static constexpr std::size_t kClsElementsPerView = kFeatureChannels;
+    static constexpr std::size_t kInputElements = kMaxViews * kInputStrideElements;
+    static constexpr std::size_t kTokenElements = kMaxViews * kTokenElementsPerView;
+    static constexpr std::size_t kClsElements = kMaxViews * kClsElementsPerView;
     static constexpr std::size_t kPoseElements = kMaxViews * 7;
     static constexpr std::size_t kScaleElements = 1;
     static constexpr std::size_t kIOBytes =
-        (kInputElements + kDepthElements + kPoseElements + kScaleElements) * sizeof(float);
+        (kInputElements + kTokenElements + kClsElements + kPoseElements + kScaleElements) * sizeof(float);
 
-    // Create the stream and allocate all four FP32 I/O buffers once for V=5.
-    MA();
+    // Load both engines, create one context per engine, and allocate V=5 FP32
+    // I/O and token/CLS banks during construction. Both contexts share one
+    // workspace sized to max(encoder, pose/scale) and run serially on stream().
+    // No lazy buffer allocation in inference. Destruction drains the stream
+    // and destroys both contexts before releasing their shared workspace.
+    MA(const std::filesystem::path& encoder_path, const std::filesystem::path& pose_scale_path);
     ~MA();
     MA(const MA&) = delete;
     MA& operator=(const MA&) = delete;
 
-    // Load weights and a user-managed TensorRT context, validate FP32 I/O and
-    // the 2..5-view profile and bind the existing I/O buffers. No inference is
-    // run or activation workspace allocated. A failed reload preserves the
-    // previous model; both successful and failed reloads preserve I/O addresses.
-    void loadEngine(const std::filesystem::path& path);
     bool isLoaded() const noexcept;
     cudaStream_t stream() const noexcept; // Borrowed handle; do not destroy.
 
@@ -63,14 +71,16 @@ public:
     // views are preserved. Source storage may be reused when this returns.
     void uploadDepth(int view_index, const cv::Mat& depth_z);
 
-    // Forget prepared slots when starting a new capture sequence.
+    // Forget prepared slots, cached features and results for a new sequence.
     void resetInputs() noexcept;
 
-    // Enqueue the first view_count complete slots (2..5) on our stream, after
-    // their queued RGB/ray/depth preparation. Allocates the engine's maximum
-    // activation workspace on first use and reuses it thereafter. A preceding
-    // inference is completed before modifying the context's dynamic shape.
-    // Retaking RGB invalidates that slot's depth until uploadDepth is called.
+    // Encode changed slots among the first view_count complete slots (2..5),
+    // then run pose/scale directly on their contiguous token/CLS banks. The
+    // single encoder context is rebound to each view's fixed input/output slots
+    // and enqueued serially on stream(); unchanged features are reused.
+    // A preceding inference completes before the pose/scale shape changes.
+    // RGB/ray/depth uploads invalidate that view's features and current poses.
+    // Retaking RGB also invalidates its depth until uploadDepth is called.
     void inference(int view_count);
     void synchronize();
 
@@ -81,12 +91,19 @@ public:
 
     // Borrowed device pointers, valid from construction until destruction.
     // Contents are uninitialized until written. Callers must not free them;
-    // queue accesses on stream(), serialized with model loading. Access from
-    // another stream requires explicit synchronization by the caller.
-    // After inference + synchronize, the first V entries hold RAW model heads
-    // (before MapAnything output adaptors); a later inference replaces them.
-    float* inputDevice() const noexcept;  // [5,7,434,518]
-    float* depthsDevice() const noexcept; // [5,6,434,518]
+    // queue accesses on stream(). Access from another stream requires explicit
+    // synchronization by the caller.
+    // After inference + synchronize, the first V token/CLS slots are valid;
+    // poses/scale hold RAW heads before MapAnything output adaptors. Tokens
+    // use the engine's channel-major F_fused layout, not [V,1147,1536].
+    // View i starts at tokensDevice()+i*kTokenElementsPerView and
+    // clsDevice()+i*kClsElementsPerView. Write inputs through upload methods
+    // so cached features are invalidated correctly.
+    // View i: inputDevice()+i*kInputStrideElements; first [7,434,518] values
+    // are data, followed by padding. Feature and output banks have no padding.
+    float* inputDevice() const noexcept;
+    float* tokensDevice() const noexcept; // F_fused [5,1536,31,37]
+    float* clsDevice() const noexcept;    // CLS [5,1536,1]
     float* posesDevice() const noexcept;  // [5,7]
     float* scaleDevice() const noexcept;  // [1,1,1]
 
