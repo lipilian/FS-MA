@@ -282,7 +282,7 @@ void PipelineWorker::initialize(const QString& engine_path, const QString& sam_e
     checkpoint();
     emit log("SAM 2.1 ready · independent CUDA stream, contexts, GPU I/O / cached features and pinned buffers allocated.\n" + encoder + "\n" + decoder);
     state_.status = "Loading MapAnything and checking its 2–5-view engine…"; publish(); checkpoint();
-    auto ma = std::make_shared<fs::MA_VGGT>();
+    auto ma = std::make_shared<fs::MA>();
     ma->loadEngine(ma_engine_file.toStdString());
     checkpoint();
     emit log("MapAnything loaded · FP32 inputs[V,7,434,518], depths[V,6,434,518], poses[V,7], scale[1,1,1]; V=2–5.\n"
@@ -683,7 +683,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
         throw std::runtime_error("Neighbour distance must be positive and finite.");
     state_.icp_ready=false; state_.tsdf.reset();
     state_.gpu_ready = false; state_.depth_ready = false; latest_gpu_mesh_.reset(); depth_.release(); publish();
-    const bool filter_normals=std::max(int(captures_.size()),capture_slot_+1)>=fs::MA_VGGT::kMinViews;
+    const bool filter_normals=std::max(int(captures_.size()),capture_slot_+1)>=fs::MA::kMinViews;
     if (filter_normals) completePendingNormalFiltering();
     reportProgress(10, "Preparing stereo images…");
     QElapsedTimer elapsed; elapsed.start();
@@ -750,7 +750,7 @@ void PipelineWorker::reconstruct(float minimum, float maximum, const QImage& sel
     // A successful cloud build retains this capture (or replaces its retake
     // slot), so use the committed view count rather than capture_slot_ + 1.
     const int views = int(captures_.size());
-    if (views >= fs::MA_VGGT::kMinViews) {
+    if (views >= fs::MA::kMinViews) {
         reportProgress(97, QString("Running MapAnything inference on %1 views…").arg(views));
         elapsed.restart();
         ma_->inference(views);

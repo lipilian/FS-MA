@@ -1,4 +1,4 @@
-#include "fs/inference/MA-VGGT.hpp"
+#include "fs/inference/MA.hpp"
 #include "fs/inference/MAPreprocessing.hpp"
 #include "fs/inference/MAPostprocessing.hpp"
 #include "fs/stereo/StereoFrame.hpp"
@@ -18,7 +18,7 @@
 
 namespace fs {
 namespace {
-constexpr std::size_t kColorPlane = std::size_t{MA_VGGT::kInputHeight} * MA_VGGT::kInputWidth;
+constexpr std::size_t kColorPlane = std::size_t{MA::kInputHeight} * MA::kInputWidth;
 constexpr std::size_t kColorElements = 3 * kColorPlane;
 
 class Logger final : public nvinfer1::ILogger {
@@ -102,7 +102,7 @@ struct InputUpload {
     cudaEvent_t done{};
     bool pending{false};
 
-    InputUpload(int type, std::size_t elements) : resized(MA_VGGT::kInputHeight, MA_VGGT::kInputWidth, type) {
+    InputUpload(int type, std::size_t elements) : resized(MA::kInputHeight, MA::kInputWidth, type) {
         void* pointer = nullptr;
         checkCuda(cudaMallocHost(&pointer, elements * sizeof(float)), "cannot allocate pinned input staging buffer");
         host.reset(static_cast<float*>(pointer));
@@ -152,7 +152,7 @@ struct Model {
 };
 } // namespace
 
-struct MA_VGGT::Impl {
+struct MA::Impl {
     // Reverse destruction releases context/model, I/O buffers, then our stream.
     // RAII also releases the stream if a buffer allocation fails in construction.
     CudaStream stream;
@@ -173,17 +173,17 @@ struct MA_VGGT::Impl {
     ~Impl() { cudaStreamSynchronize(stream.handle); }
 };
 
-MA_VGGT::MA_VGGT() : impl_(std::make_unique<Impl>()) {}
-MA_VGGT::~MA_VGGT() = default;
-bool MA_VGGT::isLoaded() const noexcept { return bool(impl_->model); }
-cudaStream_t MA_VGGT::stream() const noexcept { return impl_->stream.handle; }
-float* MA_VGGT::inputDevice() const noexcept { return impl_->inputs.get(); }
-float* MA_VGGT::depthsDevice() const noexcept { return impl_->depths.get(); }
-float* MA_VGGT::posesDevice() const noexcept { return impl_->poses.get(); }
-float* MA_VGGT::scaleDevice() const noexcept { return impl_->scale.get(); }
-const cv::Mat& MA_VGGT::resizedColor() const noexcept { return impl_->color_upload.resized; }
+MA::MA() : impl_(std::make_unique<Impl>()) {}
+MA::~MA() = default;
+bool MA::isLoaded() const noexcept { return bool(impl_->model); }
+cudaStream_t MA::stream() const noexcept { return impl_->stream.handle; }
+float* MA::inputDevice() const noexcept { return impl_->inputs.get(); }
+float* MA::depthsDevice() const noexcept { return impl_->depths.get(); }
+float* MA::posesDevice() const noexcept { return impl_->poses.get(); }
+float* MA::scaleDevice() const noexcept { return impl_->scale.get(); }
+const cv::Mat& MA::resizedColor() const noexcept { return impl_->color_upload.resized; }
 
-void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera) {
+void MA::uploadColor(int view_index, const cv::Mat& rectified_rgb, const StereoCameraParameters& camera) {
     require(view_index >= 0 && view_index < kMaxViews, "RGB view index must be in 0..4");
     require(!rectified_rgb.empty() && rectified_rgb.type() == CV_8UC3,
             "RGB upload requires a nonempty CV_8UC3 RGB image");
@@ -225,7 +225,7 @@ void MA_VGGT::uploadColor(int view_index, const cv::Mat& rectified_rgb, const St
     impl_->rays_ready[view_index] = true;
 }
 
-void MA_VGGT::uploadDepth(int view_index, const cv::Mat& depth_z) {
+void MA::uploadDepth(int view_index, const cv::Mat& depth_z) {
     require(view_index >= 0 && view_index < kMaxViews, "Depth view index must be in 0..4");
     require(!depth_z.empty() && depth_z.dims == 2 && depth_z.type() == CV_32FC1,
             "Depth upload requires a nonempty CV_32FC1 metric Z-depth image");
@@ -254,13 +254,13 @@ void MA_VGGT::uploadDepth(int view_index, const cv::Mat& depth_z) {
     impl_->depth_ready[view_index] = true;
 }
 
-void MA_VGGT::resetInputs() noexcept {
+void MA::resetInputs() noexcept {
     impl_->rays_ready.fill(false);
     impl_->depth_ready.fill(false);
     if (impl_->model) impl_->model->output_views = 0;
 }
 
-void MA_VGGT::inference(int view_count) {
+void MA::inference(int view_count) {
     require(view_count >= kMinViews && view_count <= kMaxViews, "Inference requires 2..5 views");
     require(isLoaded(), "Load an engine before inference");
     for (int view = 0; view < view_count; ++view)
@@ -273,7 +273,7 @@ void MA_VGGT::inference(int view_count) {
     if (!s.workspace && s.workspace_bytes > 0) {
         s.workspace = allocate((static_cast<std::size_t>(s.workspace_bytes) + sizeof(float) - 1) / sizeof(float),
                                "activation workspace");
-        std::cout << "[MA-VGGT] Activation workspace allocated once for V=2..5: " << s.workspace_bytes
+        std::cout << "[MA] Activation workspace allocated once for V=2..5: " << s.workspace_bytes
                   << " bytes (" << double(s.workspace_bytes) / (1024.0 * 1024.0) << " MiB)\n" << std::flush;
     }
     s.context->setDeviceMemoryV2(s.workspace.get(), s.workspace_bytes);
@@ -290,12 +290,12 @@ void MA_VGGT::inference(int view_count) {
     s.output_views = view_count;
 }
 
-void MA_VGGT::synchronize() {
+void MA::synchronize() {
     impl_->stream.synchronize();
     if (impl_->model) impl_->model->inference_pending = false;
 }
 
-std::vector<cv::Matx44d> MA_VGGT::downloadCameraPoses() {
+std::vector<cv::Matx44d> MA::downloadCameraPoses() {
     require(impl_->model && impl_->model->output_views >= kMinViews, "Camera poses require current inference outputs");
     const int views = impl_->model->output_views;
     std::array<float, kPoseElements> poses{};
@@ -313,7 +313,7 @@ std::vector<cv::Matx44d> MA_VGGT::downloadCameraPoses() {
     return ma_postprocessing::camera_poses(poses.data(), views, scale);
 }
 
-void MA_VGGT::loadEngine(const std::filesystem::path& path) {
+void MA::loadEngine(const std::filesystem::path& path) {
     impl_->stream.synchronize();
     auto next = std::make_unique<Model>(stream());
     auto& s = *next;
@@ -372,10 +372,10 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
     impl_->model = std::move(next);
 
     constexpr double kBytesPerMiB = 1024.0 * 1024.0;
-    std::cout << "[MA-VGGT] TensorRT engine loaded: " << path << '\n'
-              << "[MA-VGGT] TensorRT engine deserialization device-memory delta: "
+    std::cout << "[MA] TensorRT engine loaded: " << path << '\n'
+              << "[MA] TensorRT engine deserialization device-memory delta: "
               << engine_memory_bytes << " bytes (" << double(engine_memory_bytes) / kBytesPerMiB << " MiB)\n"
-              << "[MA-VGGT] Tensor I/O:\n";
+              << "[MA] Tensor I/O:\n";
     for (int i = 0; i < s.engine->getNbIOTensors(); ++i) {
         const auto* name = s.engine->getIOTensorName(i);
         // All four tensors have already been validated as FP32 above.
@@ -384,16 +384,16 @@ void MA_VGGT::loadEngine(const std::filesystem::path& path) {
                   << "  shape=" << tensorShapeString(s.engine->getTensorShape(name))
                   << "  type=FP32\n";
     }
-    std::cout << "[MA-VGGT] Optimization profile 0: inputs"
+    std::cout << "[MA] Optimization profile 0: inputs"
               << "  min=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kMIN))
               << "  opt=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kOPT))
               << "  max=" << tensorShapeString(s.engine->getProfileShape("inputs", 0, Profile::kMAX)) << '\n'
-              << "[MA-VGGT] TensorRT context device-memory requirement: " << context_memory_bytes
+              << "[MA] TensorRT context device-memory requirement: " << context_memory_bytes
               << " bytes (" << double(context_memory_bytes) / kBytesPerMiB
               << " MiB); allocated on first inference and reused\n"
-              << "[MA-VGGT] Preallocated GPU I/O (V=" << kMaxViews << "): " << kIOBytes
+              << "[MA] Preallocated GPU I/O (V=" << kMaxViews << "): " << kIOBytes
               << " bytes (" << double(kIOBytes) / kBytesPerMiB << " MiB)\n"
-              << "[MA-VGGT] CUDA stream: independent, non-blocking\n" << std::flush;
+              << "[MA] CUDA stream: independent, non-blocking\n" << std::flush;
 }
 
 } // namespace fs

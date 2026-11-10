@@ -1,5 +1,5 @@
 #include "fs/inference/FS.hpp"
-#include "fs/inference/MA-VGGT.hpp"
+#include "fs/inference/MA.hpp"
 #include "fs/inference/MAPostprocessing.hpp"
 #include "fs/geometry/MeshBuilderGPU.hpp"
 
@@ -24,7 +24,7 @@ void require(bool condition, const char* message) {
 void checked(cudaError_t error) {
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-std::array<float*, 4> devicePointers(const fs::MA_VGGT& model) {
+std::array<float*, 4> devicePointers(const fs::MA& model) {
     return {model.inputDevice(), model.depthsDevice(), model.posesDevice(), model.scaleDevice()};
 }
 bool deviceAllocation(const float* pointer) {
@@ -43,23 +43,23 @@ template<class Action> void rejects(Action action, const std::string& expected) 
     throw std::runtime_error("Invalid operation unexpectedly succeeded");
 }
 
-void checkColorUploads(fs::MA_VGGT& model) {
-    constexpr int h = fs::MA_VGGT::kInputHeight, w = fs::MA_VGGT::kInputWidth;
+void checkColorUploads(fs::MA& model) {
+    constexpr int h = fs::MA::kInputHeight, w = fs::MA::kInputWidth;
     constexpr std::size_t plane = std::size_t{h} * w;
     constexpr std::uint32_t untouched = 0x3f3f3f3fU;
     constexpr std::array<double, 3> mean{0.485, 0.456, 0.406}, stddev{0.229, 0.224, 0.225};
-    std::array<cv::Mat, fs::MA_VGGT::kMaxViews> expected;
-    std::array<StereoCameraParameters, fs::MA_VGGT::kMaxViews> cameras{};
-    std::array<cv::Size, fs::MA_VGGT::kMaxViews> source_sizes{};
+    std::array<cv::Mat, fs::MA::kMaxViews> expected;
+    std::array<StereoCameraParameters, fs::MA::kMaxViews> cameras{};
+    std::array<cv::Size, fs::MA::kMaxViews> source_sizes{};
     const auto* input = model.inputDevice();
-    checked(cudaMemsetAsync(model.inputDevice(), 0x3f, fs::MA_VGGT::kInputElements * sizeof(float), model.stream()));
+    checked(cudaMemsetAsync(model.inputDevice(), 0x3f, fs::MA::kInputElements * sizeof(float), model.stream()));
 
     const auto checkContents = [&] {
         require(model.inputDevice() == input, "Color upload replaced the engine's input allocation");
-        std::vector<float> actual(fs::MA_VGGT::kInputElements);
+        std::vector<float> actual(fs::MA::kInputElements);
         checked(cudaMemcpyAsync(actual.data(), input, actual.size() * sizeof(float), cudaMemcpyDeviceToHost, model.stream()));
         checked(cudaStreamSynchronize(model.stream()));
-        for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+        for (int v = 0; v < fs::MA::kMaxViews; ++v) {
             for (int c = 0; c < 7; ++c) {
                 for (int y = 0; y < h; ++y) {
                     for (int x = 0; x < w; ++x) {
@@ -97,7 +97,7 @@ void checkColorUploads(fs::MA_VGGT& model) {
 
     // Different aspect ratios exercise a direct resize; non-contiguous ROIs
     // and immediately modified/destroyed source Mats exercise staging ownership.
-    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+    for (int v = 0; v < fs::MA::kMaxViews; ++v) {
         const int source_w = 640 + v * 83, source_h = 480 - v * 41;
         cv::Mat storage(source_h + 8, source_w + 16, CV_8UC3);
         cv::Mat rgb = storage(cv::Rect(3, 2, source_w, source_h));
@@ -122,16 +122,16 @@ void checkColorUploads(fs::MA_VGGT& model) {
     expected.back() = cv::Mat(h, w, CV_8UC3, cv::Scalar(0, 127, 255));
     cameras.back() = {630, 410, 149.5, 349.5, 0};
     source_sizes.back() = replacement.size();
-    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement, cameras.back());
+    model.uploadColor(fs::MA::kMaxViews - 1, replacement, cameras.back());
     checkContents();
-    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement, cameras.back());
+    model.uploadColor(fs::MA::kMaxViews - 1, replacement, cameras.back());
     checkContents(); // Re-upload starts from raw RGB; it must not normalize twice.
     cameras.back().cx += 13;
     cameras.back().fy *= 0.8;
-    model.uploadColor(fs::MA_VGGT::kMaxViews - 1, replacement, cameras.back());
+    model.uploadColor(fs::MA::kMaxViews - 1, replacement, cameras.back());
     checkContents(); // Same image size must not retain stale rays after K changes.
     rejects([&] { model.uploadColor(-1, replacement, cameras.back()); }, "view index");
-    rejects([&] { model.uploadColor(fs::MA_VGGT::kMaxViews, replacement, cameras.back()); }, "view index");
+    rejects([&] { model.uploadColor(fs::MA::kMaxViews, replacement, cameras.back()); }, "view index");
     rejects([&] { model.uploadColor(0, cv::Mat{}, cameras.back()); }, "CV_8UC3");
     rejects([&] { model.uploadColor(0, cv::Mat(h, w, CV_32FC3), cameras.back()); }, "CV_8UC3");
     auto invalid = cameras.back(); invalid.fx = 0;
@@ -145,23 +145,23 @@ void checkColorUploads(fs::MA_VGGT& model) {
     checkContents();
 }
 
-void checkDepthUploads(fs::MA_VGGT& model) {
-    constexpr int h = fs::MA_VGGT::kInputHeight, w = fs::MA_VGGT::kInputWidth;
+void checkDepthUploads(fs::MA& model) {
+    constexpr int h = fs::MA::kInputHeight, w = fs::MA::kInputWidth;
     constexpr std::size_t plane = std::size_t{h} * w;
     const StereoCameraParameters camera{1800, 1750, 1100.25, 970.75, 0};
     const cv::Mat rgb(2048, 2448, CV_8UC3, cv::Scalar(40, 110, 230));
-    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) model.uploadColor(v, rgb, camera);
-    std::vector<float> expected(fs::MA_VGGT::kInputElements);
+    for (int v = 0; v < fs::MA::kMaxViews; ++v) model.uploadColor(v, rgb, camera);
+    std::vector<float> expected(fs::MA::kInputElements);
     checked(cudaMemcpyAsync(expected.data(), model.inputDevice(), expected.size() * sizeof(float),
                             cudaMemcpyDeviceToHost, model.stream()));
     checked(cudaStreamSynchronize(model.stream()));
-    std::array<bool, fs::MA_VGGT::kMaxViews> filled{};
+    std::array<bool, fs::MA::kMaxViews> filled{};
     const auto checkContents = [&] {
         std::vector<float> actual(expected.size());
         checked(cudaMemcpyAsync(actual.data(), model.inputDevice(), actual.size() * sizeof(float),
                                 cudaMemcpyDeviceToHost, model.stream()));
         checked(cudaStreamSynchronize(model.stream()));
-        for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+        for (int v = 0; v < fs::MA::kMaxViews; ++v) {
             for (int c = 0; c < 7; ++c) {
                 const auto offset = (v * 7 + c) * plane;
                 if (c != 6 || !filled[v]) {
@@ -203,7 +203,7 @@ void checkDepthUploads(fs::MA_VGGT& model) {
         model.uploadDepth(view, depth);
         filled[view] = true;
     };
-    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+    for (int v = 0; v < fs::MA::kMaxViews; ++v) {
         // Includes FS's 960x800 grid, other aspect ratios, and strided inputs.
         const int sw = 960 + v * 17, sh = 800 - v * 31;
         cv::Mat storage(sh + 8, sw + 12, CV_32FC1);
@@ -224,14 +224,14 @@ void checkDepthUploads(fs::MA_VGGT& model) {
     checkContents();
     require(undershoot_count > 0, "Depth test must exercise negative Lanczos ringing");
     const cv::Mat replacement(700, 300, CV_32FC1, cv::Scalar(0.42));
-    upload(fs::MA_VGGT::kMaxViews - 1, replacement);
+    upload(fs::MA::kMaxViews - 1, replacement);
     checkContents();
-    upload(fs::MA_VGGT::kMaxViews - 1, replacement);
+    upload(fs::MA::kMaxViews - 1, replacement);
     checkContents(); // No double conversion, even when replacing the same slot.
     upload(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0)));
     checkContents(); // A fully invalid replacement must clear the old distances.
     rejects([&] { model.uploadDepth(-1, replacement); }, "view index");
-    rejects([&] { model.uploadDepth(fs::MA_VGGT::kMaxViews, replacement); }, "view index");
+    rejects([&] { model.uploadDepth(fs::MA::kMaxViews, replacement); }, "view index");
     rejects([&] { model.uploadDepth(0, cv::Mat{}); }, "CV_32FC1");
     rejects([&] { model.uploadDepth(0, cv::Mat(h, w, CV_8UC1)); }, "CV_32FC1");
     checkContents();
@@ -257,8 +257,8 @@ void checkCameraPoseDecoding() {
     rejects([&] { fs::ma_postprocessing::camera_poses(raw.data(),2,0); }, "quaternion");
 }
 
-void checkInference(fs::MA_VGGT& model) {
-    constexpr std::size_t plane = std::size_t{fs::MA_VGGT::kInputHeight} * fs::MA_VGGT::kInputWidth;
+void checkInference(fs::MA& model) {
+    constexpr std::size_t plane = std::size_t{fs::MA::kInputHeight} * fs::MA::kInputWidth;
     const auto pointers = devicePointers(model);
     const StereoCameraParameters camera{540, 525, 310.5, 235.25, 0};
     model.resetInputs();
@@ -269,7 +269,7 @@ void checkInference(fs::MA_VGGT& model) {
     rejects([&] { model.uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
 
     const auto run = [&](int views) {
-        const std::array<std::size_t, 3> capacities{fs::MA_VGGT::kDepthElements, fs::MA_VGGT::kPoseElements, 1};
+        const std::array<std::size_t, 3> capacities{fs::MA::kDepthElements, fs::MA::kPoseElements, 1};
         const std::array<std::size_t, 3> counts{std::size_t(views) * 6 * plane, std::size_t(views) * 7, 1};
         for (int i = 0; i < 3; ++i)
             checked(cudaMemsetAsync(pointers[i + 1], 0xff, capacities[i] * sizeof(float), model.stream()));
@@ -299,7 +299,7 @@ void checkInference(fs::MA_VGGT& model) {
         }
         const auto cameras = model.downloadCameraPoses();
         require(int(cameras.size()) == views, "Camera download has the wrong view count");
-        std::array<float,fs::MA_VGGT::kPoseElements> raw_poses{};
+        std::array<float,fs::MA::kPoseElements> raw_poses{};
         float raw_scale{};
         checked(cudaMemcpy(raw_poses.data(),model.posesDevice(),views*7*sizeof(float),cudaMemcpyDeviceToHost));
         checked(cudaMemcpy(&raw_scale,model.scaleDevice(),sizeof(float),cudaMemcpyDeviceToHost));
@@ -314,8 +314,8 @@ void checkInference(fs::MA_VGGT& model) {
             require(cv::norm(rotation.t()*rotation-cv::Matx33d::eye()) < 1e-6 &&
                     std::abs(cv::determinant(rotation)-1) < 1e-6, "Invalid predicted camera rotation");
             const auto stats=fs::build_ma_point_cloud_gpu({model.depthsDevice()+v*6*plane,
-                model.inputDevice()+v*7*plane,model.scaleDevice(),fs::MA_VGGT::kInputWidth,
-                fs::MA_VGGT::kInputHeight,model.stream()},point_cloud);
+                model.inputDevice()+v*7*plane,model.scaleDevice(),fs::MA::kInputWidth,
+                fs::MA::kInputHeight,model.stream()},point_cloud);
             std::vector<float> dense(6*plane), input(7*plane);
             std::vector<fs::MeshGPUVertex> vertices(plane);
             // CPU readback is only for validation of the production GPU path.
@@ -344,7 +344,7 @@ void checkInference(fs::MA_VGGT& model) {
         }
         return hash;
     };
-    for (int v = 0; v < fs::MA_VGGT::kMaxViews; ++v) {
+    for (int v = 0; v < fs::MA::kMaxViews; ++v) {
         cv::Mat rgb(480, 640, CV_8UC3);
         for (int y = 0; y < rgb.rows; ++y) {
             auto* row = rgb.ptr<cv::Vec3b>(y);
@@ -386,7 +386,7 @@ int main(int argc, char** argv) {
         const auto missing = temp.path / "missing.engine", empty = temp.path / "empty.engine";
         std::ofstream(empty).close();
         // MA can be constructed without FS and owns a non-blocking stream.
-        auto model = std::make_unique<fs::MA_VGGT>();
+        auto model = std::make_unique<fs::MA>();
         rejects([&] { model->inference(2); }, "Load an engine");
         rejects([&] { model->uploadDepth(0, cv::Mat(800, 960, CV_32FC1, cv::Scalar(0.4))); }, "camera rays");
         const auto ma_stream = model->stream();
@@ -399,7 +399,7 @@ int main(int argc, char** argv) {
         std::weak_ptr<FS> lifetime = owner;
         require(ma_stream != fs_stream, "MA borrowed FS's stream");
         {
-            fs::MA_VGGT another;
+            fs::MA another;
             require(another.stream() != ma_stream && another.stream() != fs_stream,
                     "MA instances share a stream");
         }
@@ -449,7 +449,7 @@ int main(int argc, char** argv) {
         owner->synchronize();
 
         // Releasing FS first must neither retain FS nor invalidate MA's stream.
-        model = std::make_unique<fs::MA_VGGT>();
+        model = std::make_unique<fs::MA>();
         const auto final_stream = model->stream();
         require(final_stream != fs_stream, "New MA instance borrowed FS's stream");
         const auto final_pointers = devicePointers(*model);

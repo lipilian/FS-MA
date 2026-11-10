@@ -1053,7 +1053,7 @@ int checkImportedScan(const QString& directory, const QString& engine) {
         require(predicted.image_id==ids[i] && predicted.camera.image_size==cameras[i].image_size &&
                 predicted.camera.intrinsics==cameras[i].intrinsics,
                 "Historical camera changed after releasing its stereo images");
-        require(predicted.image.size()==QSize(fs::MA_VGGT::kInputWidth,fs::MA_VGGT::kInputHeight),
+        require(predicted.image.size()==QSize(fs::MA::kInputWidth,fs::MA::kInputHeight),
                 "MA camera texture does not match its input grid");
     }
     const auto geometry_before=geometry;

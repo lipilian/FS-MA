@@ -3,7 +3,7 @@
 #include "fs/geometry/ICPPoseRefinement.hpp"
 #include "fs/geometry/TsdfFusion.hpp"
 #include "fs/inference/FS.hpp"
-#include "fs/inference/MA-VGGT.hpp"
+#include "fs/inference/MA.hpp"
 #include "fs/inference/SamSegmenter.hpp"
 #include <atomic>
 #include <functional>
@@ -149,7 +149,7 @@ private:
     std::shared_ptr<FS> fs_;
     std::unique_ptr<fs::SamSegmenter> sam_;
     quint64 sam_image_id_{0};
-    std::shared_ptr<fs::MA_VGGT> ma_;
+    std::shared_ptr<fs::MA> ma_;
     SharedPredictedCameras ma_cameras_; // Original MA poses; repeated ICP never compounds corrections.
     // Filtered Z depth retained for TIFF export; geometry stays on the GPU.
     cv::Mat depth_;

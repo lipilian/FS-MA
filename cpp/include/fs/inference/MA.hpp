@@ -12,10 +12,10 @@ struct StereoCameraParameters;
 
 namespace fs {
 
-// MapAnything dynamic RAW engine (the MA-VGGT integration entry point).
+// MapAnything dynamic RAW engine (the MA integration entry point).
 // Owns a non-blocking CUDA stream independently of FS. Calls on this instance
 // must be serialized on the pipeline thread.
-class MA_VGGT {
+class MA {
 public:
     static constexpr int kMinViews = 2;
     static constexpr int kMaxViews = 5;
@@ -29,10 +29,10 @@ public:
         (kInputElements + kDepthElements + kPoseElements + kScaleElements) * sizeof(float);
 
     // Create the stream and allocate all four FP32 I/O buffers once for V=5.
-    MA_VGGT();
-    ~MA_VGGT();
-    MA_VGGT(const MA_VGGT&) = delete;
-    MA_VGGT& operator=(const MA_VGGT&) = delete;
+    MA();
+    ~MA();
+    MA(const MA&) = delete;
+    MA& operator=(const MA&) = delete;
 
     // Load weights and a user-managed TensorRT context, validate FP32 I/O and
     // the 2..5-view profile and bind the existing I/O buffers. No inference is

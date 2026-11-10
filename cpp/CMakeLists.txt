@@ -51,7 +51,7 @@ endif()
 add_library(fs_core STATIC
     src/geometry/MeshBuilderGPU.cu
     src/inference/FS.cpp
-    src/inference/MA-VGGT.cpp
+    src/inference/MA.cpp
     src/inference/MAPreprocessing.cu
     src/inference/MAPostprocessing.cpp
     src/inference/SamSegmenter.cpp
