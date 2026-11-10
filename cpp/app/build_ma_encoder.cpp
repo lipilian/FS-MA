@@ -26,7 +26,7 @@ namespace fs = std::filesystem;
 using namespace nvinfer1;
 
 constexpr int kAttentionCount = 24;
-constexpr float kAttentionCount = 0.125F; // 1 / sqrt(1536 / 24)
+constexpr float kAttentionScale = 0.125F; // 1 / sqrt(1536 / 24)
 
 class Logger final : public ILogger {
 public:
@@ -175,7 +175,7 @@ public:
         const auto weights = constant->getWeights();
         require(weights.type == DataType::kFLOAT && weights.count == 1 && weights.values,
                 "Expected a scalar FP32 constant for attention scale");
-        require(*static_cast<float const*>(weights.values) == kAttentionCount,
+        require(*static_cast<float const*>(weights.values) == kAttentionScale,
                 "Attention scale is not 0.125; refusing to change model semantics");
     }
 
@@ -426,7 +426,7 @@ int main(int argc, char** argv) {
         validateNetwork(*network);
         Graph graph(*network);
         auto blocks = findAttention(graph);
-        const float scale = kAttentionCount;
+        const float scale = kAttentionScale;
         replaceAttention(*network, blocks, scale);
         std::unique_ptr<IBuilderConfig> config(builder->createBuilderConfig());
         require(config != nullptr, "createBuilderConfig failed");

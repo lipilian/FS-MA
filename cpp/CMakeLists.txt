@@ -151,6 +151,18 @@ target_compile_options(ma_build_encoder PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
 )
 
+# Dynamic 2..5-view MapAnything Transformer and pose/scale heads.
+add_executable(ma_build_pose_scale app/build_ma_pose_scale.cpp)
+target_include_directories(ma_build_pose_scale PRIVATE ${TENSORRT_INCLUDE_DIR})
+target_link_libraries(ma_build_pose_scale PRIVATE
+    ${TENSORRT_NVINFER_LIBRARY}
+    ${TENSORRT_NVONNXPARSER_LIBRARY}
+    CUDA::cudart
+)
+target_compile_options(ma_build_pose_scale PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+)
+
 # The Qt desktop owns the camera SDK dependency; file-only builds can disable it.
 option(FS_BUILD_DESKTOP "Build the Qt 6 calibration and reconstruction desktop" ON)
 if(FS_BUILD_DESKTOP)
